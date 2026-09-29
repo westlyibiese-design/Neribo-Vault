@@ -3,7 +3,7 @@ package com.westly.neribovault.core.ui.components
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -17,9 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 
-private val FabShape = RoundedCornerShape(16.dp)
+private val FabShape = CircleShape
 
-/** Flat accent FAB (16dp rounded square). Give it [text] to make it an extended FAB. */
+/** Flat accent FAB (circle). Give it [text] to make it an extended FAB. */
 @Composable
 fun NeriboFab(
     onClick: () -> Unit,

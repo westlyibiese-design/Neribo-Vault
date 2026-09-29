@@ -3,6 +3,8 @@ package com.westly.neribovault.core.navigation
 /** Top-level route names. Features define their own sub-routes in `<Feature>Routes`. */
 object Routes {
     const val HOME = "home"
+    const val SEARCH = "search"
+    const val RECENT = "recent"
     const val SETTINGS = "settings"
     const val SECURITY = "settings/security"
     const val DIAGNOSTICS = "settings/diagnostics"

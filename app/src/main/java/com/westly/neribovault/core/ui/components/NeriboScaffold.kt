@@ -15,6 +15,7 @@ fun NeriboScaffold(
     modifier: Modifier = Modifier,
     topBar: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
+    bottomBar: @Composable () -> Unit = {},
     snackbarHostState: SnackbarHostState? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
@@ -22,6 +23,7 @@ fun NeriboScaffold(
         modifier = modifier,
         topBar = topBar,
         floatingActionButton = floatingActionButton,
+        bottomBar = bottomBar,
         snackbarHost = {
             if (snackbarHostState != null) {
                 SnackbarHost(hostState = snackbarHostState) { data ->

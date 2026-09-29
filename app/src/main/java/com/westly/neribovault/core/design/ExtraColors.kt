@@ -9,9 +9,18 @@ import androidx.compose.ui.graphics.Color
 data class ExtraColors(
     val success: Color,
     val warning: Color,
+    val vaultIcon: Color,
 )
 
-internal val LightExtraColors = ExtraColors(success = LightSuccess, warning = LightWarning)
-internal val DarkExtraColors = ExtraColors(success = DarkSuccess, warning = DarkWarning)
+internal val LightExtraColors = ExtraColors(
+    success = LightSuccess,
+    warning = LightWarning,
+    vaultIcon = LightVaultIcon,
+)
+internal val DarkExtraColors = ExtraColors(
+    success = DarkSuccess,
+    warning = DarkWarning,
+    vaultIcon = DarkVaultIcon,
+)
 
 val LocalExtraColors = staticCompositionLocalOf { LightExtraColors }

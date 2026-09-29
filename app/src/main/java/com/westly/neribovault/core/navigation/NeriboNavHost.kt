@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.westly.neribovault.core.ui.components.PlaceholderScreen
 import com.westly.neribovault.feature.church.churchGraph
 import com.westly.neribovault.feature.developer.developerGraph
 import com.westly.neribovault.feature.diagnostics.diagnosticsGraph
@@ -61,6 +62,22 @@ fun NeriboNavHost() {
             HomeScreen(
                 onOpenVault = { route -> navController.navigate(route) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                onOpenSearch = { navController.navigate(Routes.SEARCH) },
+                onOpenRecent = { navController.navigate(Routes.RECENT) },
+            )
+        }
+        composable(Routes.SEARCH) {
+            PlaceholderScreen(
+                title = "Search",
+                message = "Search across every vault arrives in a later update.",
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.RECENT) {
+            PlaceholderScreen(
+                title = "Recent",
+                message = "Your recently opened items will appear here in a later update.",
+                onBack = { navController.popBackStack() },
             )
         }
         notesGraph(navController)

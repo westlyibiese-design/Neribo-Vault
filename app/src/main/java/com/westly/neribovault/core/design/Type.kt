@@ -11,21 +11,28 @@ private val Sans = FontFamily.SansSerif
 
 val NeriboTypography = Typography(
     // Serif: editorial, notebook feel
+    headlineLarge = TextStyle(
+        fontFamily = Serif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 34.sp,
+        lineHeight = 42.sp,
+        letterSpacing = (-0.5).sp,
+    ),
     headlineMedium = TextStyle(
         fontFamily = Serif,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 28.sp,
         lineHeight = 36.sp,
     ),
     headlineSmall = TextStyle(
         fontFamily = Serif,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 24.sp,
         lineHeight = 32.sp,
     ),
     titleLarge = TextStyle(
         fontFamily = Serif,
-        fontWeight = FontWeight.Normal,
+        fontWeight = FontWeight.SemiBold,
         fontSize = 22.sp,
         lineHeight = 28.sp,
     ),
