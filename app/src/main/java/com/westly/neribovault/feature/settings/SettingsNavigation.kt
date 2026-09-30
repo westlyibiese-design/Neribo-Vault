@@ -106,16 +106,33 @@ private fun SettingsScreen(
                         color = colors.onSurface,
                     )
                     Text(
-                        text = "Version ${BuildConfig.VERSION_NAME}",
+                        text = "Version $ABOUT_VERSION",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
                     )
-                    Spacer(modifier = Modifier.height(spacing.sm))
+                    Spacer(modifier = Modifier.height(spacing.md))
                     Text(
-                        text = "Built by Westly Ibiese in Benin City, Nigeria",
+                        text = "Built by Neribo Group",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurface,
+                    )
+                    Text(
+                        text = "Secure storage, privacy, and control \u2014 designed with simplicity in mind.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
                     )
+                    Spacer(modifier = Modifier.height(spacing.md))
+                    Text(
+                        text = "\u00A9 2026 Neribo Group. All rights reserved.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                // Placeholder entries: static text only. They are deliberately not clickable and
+                // have no chevron, so they can be wired to real pages later without a redesign.
+                ABOUT_ITEMS.forEach { item ->
+                    NeriboDivider()
+                    AboutInfoRow(label = item.label, value = item.value)
                 }
             }
             Spacer(modifier = Modifier.height(spacing.xxl))
@@ -178,5 +195,52 @@ private fun SettingsRow(
             modifier = Modifier.size(20.dp),
             tint = colors.outline,
         )
+    }
+}
+
+/** Version shown in the About section. */
+private const val ABOUT_VERSION = "0.0.16"
+
+private data class AboutItem(val label: String, val value: String? = null)
+
+private val ABOUT_ITEMS: List<AboutItem> = listOf(
+    AboutItem("Website"),
+    AboutItem("Privacy Policy"),
+    AboutItem("Terms of Service"),
+    AboutItem("Open Source Licenses"),
+    AboutItem("Contact Support"),
+    AboutItem("Security & Privacy"),
+    AboutItem("Build Number", "Build 16"),
+)
+
+/** A static About list row: a label and an optional value. Not clickable. */
+@Composable
+private fun AboutInfoRow(label: String, value: String?) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .padding(horizontal = spacing.lg, vertical = spacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = colors.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (value != null) {
+            Spacer(modifier = Modifier.width(spacing.sm))
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
     }
 }
