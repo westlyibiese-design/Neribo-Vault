@@ -1,8 +1,7 @@
 package com.westly.neribovault.feature.notes
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +19,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
@@ -39,12 +40,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -64,6 +72,7 @@ import com.westly.neribovault.core.util.countWords
 import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.core.util.shareText
 import com.westly.neribovault.feature.notes.components.TagEditor
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private const val TITLE_PLACEHOLDER = "Title"
@@ -178,6 +187,7 @@ private fun subtitleFor(state: NoteEditorUiState): String? {
         .ifEmpty { null }
 }
 
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun EditorContent(
     vm: NoteEditorViewModel,
@@ -190,13 +200,38 @@ private fun EditorContent(
     // The two fields keep their own text so typing is never delayed; every change is also
     // sent to the ViewModel, which owns saving. rememberSaveable keeps the text across rotation.
     var titleValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(vm.currentTitle))
+        mutableStateOf(TextFieldValue(vm.currentTitle, TextRange(vm.currentTitle.length)))
     }
     var bodyValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
-        mutableStateOf(TextFieldValue(vm.currentBody))
+        mutableStateOf(TextFieldValue(vm.currentBody, TextRange(vm.currentBody.length)))
     }
     val titleFocus = remember { FocusRequester() }
     val bodyFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    val bodyBringIntoView = remember { BringIntoViewRequester() }
+    val bodyLayout = remember { mutableStateOf<TextLayoutResult?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    val windowInfo = LocalWindowInfo.current
+
+    // Which field the editor currently considers focused: 0 = none, 1 = title, 2 = body.
+    var focusedField by remember { mutableStateOf(0) }
+
+    // Root-cause fix for "the keyboard stops responding": when another window (the Add tag
+    // dialog, a floating app you copied from) takes the keyboard and then gives focus back,
+    // the field still believes it is focused, so tapping it never reopens the keyboard.
+    // When our window regains focus we restart the field's input session and show the keyboard.
+    LaunchedEffect(windowInfo) {
+        snapshotFlow { windowInfo.isWindowFocused }.collect { windowFocused ->
+            if (windowFocused && focusedField != 0) {
+                val target = if (focusedField == 1) titleFocus else bodyFocus
+                focusManager.clearFocus(force = true)
+                delay(50)
+                runCatching { target.requestFocus() }
+                keyboard?.show()
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         // A no-op unless the text was restored after the process was killed.
@@ -232,7 +267,16 @@ private fun EditorContent(
                     titleValue = cleaned
                     vm.onTitleChange(cleaned.text)
                 },
-                modifier = Modifier.fillMaxWidth().focusRequester(titleFocus),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(titleFocus)
+                    .onFocusChanged { focus ->
+                        if (focus.isFocused) {
+                            focusedField = 1
+                        } else if (focusedField == 1) {
+                            focusedField = 0
+                        }
+                    },
                 textStyle = titleStyle,
                 cursorBrush = SolidColor(colors.primary),
                 keyboardOptions = KeyboardOptions(
@@ -262,24 +306,37 @@ private fun EditorContent(
                     bodyValue = new
                     vm.onBodyChange(new.text)
                 },
-                modifier = Modifier.fillMaxWidth().focusRequester(bodyFocus),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // The field itself is at least this tall, so tapping the empty space below
+                    // the text puts the cursor at the end, and taps on the text place the cursor
+                    // exactly where you touched.
+                    .heightIn(min = 220.dp)
+                    .bringIntoViewRequester(bodyBringIntoView)
+                    .focusRequester(bodyFocus)
+                    .onFocusChanged { focus ->
+                        if (focus.isFocused) {
+                            focusedField = 2
+                            // Once the keyboard has opened, scroll so the cursor is on screen.
+                            scope.launch {
+                                delay(300)
+                                val layout = bodyLayout.value ?: return@launch
+                                val offset = bodyValue.selection.end
+                                    .coerceIn(0, layout.layoutInput.text.length)
+                                runCatching {
+                                    bodyBringIntoView.bringIntoView(layout.getCursorRect(offset))
+                                }
+                            }
+                        } else if (focusedField == 2) {
+                            focusedField = 0
+                        }
+                    },
                 textStyle = bodyStyle,
+                onTextLayout = { bodyLayout.value = it },
                 cursorBrush = SolidColor(colors.primary),
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 decorationBox = { inner ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 220.dp)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                            ) {
-                                // Tapping the empty space below the text puts the cursor at the end.
-                                bodyValue = bodyValue.copy(selection = TextRange(bodyValue.text.length))
-                                runCatching { bodyFocus.requestFocus() }
-                            },
-                    ) {
+                    Box(modifier = Modifier.fillMaxWidth()) {
                         if (bodyValue.text.isEmpty()) {
                             Text(
                                 text = BODY_PLACEHOLDER,

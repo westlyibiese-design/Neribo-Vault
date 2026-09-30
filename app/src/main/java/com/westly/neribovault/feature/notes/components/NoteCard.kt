@@ -83,7 +83,9 @@ fun NoteCard(
                 color = if (hasTitle) colors.onSurface else colors.onSurfaceVariant,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
+                // Own vertical padding, so a two-line title has room above the preview
+                // instead of relying on the taller three-dots button to create it.
+                modifier = Modifier.weight(1f).padding(vertical = spacing.sm),
             )
             if (note.isPinned) {
                 Spacer(modifier = Modifier.width(spacing.sm))
