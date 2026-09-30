@@ -63,7 +63,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                     Spacer(modifier = Modifier.height(spacing.md))
                     SectionHeader(text = "Self-test results")
                 }
-                items(state.results, key = { it.name }) { result ->
+                items(state.results, key = { "result:" + it.name }) { result ->
                     ResultRow(result)
                 }
             }
@@ -71,7 +71,7 @@ fun DiagnosticsScreen(onBack: () -> Unit) {
                 Spacer(modifier = Modifier.height(spacing.md))
                 SectionHeader(text = "Row counts")
             }
-            items(state.counts, key = { it.label }) { row ->
+            items(state.counts, key = { "count:" + it.label }) { row ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -17,64 +18,48 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
-import com.westly.neribovault.core.ui.components.NeriboTopBar
+import com.westly.neribovault.core.ui.components.ButtonStyle
+import com.westly.neribovault.core.ui.components.NeriboButton
 import kotlinx.coroutines.delay
 
-/**
- * Optional extra PIN for one vault (for example the Diary). If the vault has no lock, or it is
- * already unlocked this session, [content] is shown. Otherwise a calm unlock screen appears.
- * A vault re-locks whenever the app locks or goes to the background.
- */
+/** The screen shown whenever the app is locked. */
 @Composable
-fun VaultLockGate(
-    vaultId: String,
-    vaultName: String,
-    onBack: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    val manager = rememberLockManager()
-    val enabledIds by manager.vaultEnabledIds.collectAsStateWithLifecycle()
-    val unlockedIds by manager.unlockedVaults.collectAsStateWithLifecycle()
-    if (vaultId !in enabledIds || vaultId in unlockedIds) {
-        content()
-    } else {
-        VaultUnlockScreen(
-            manager = manager,
-            vaultId = vaultId,
-            vaultName = vaultName,
-            onBack = onBack,
-        )
-    }
-}
-
-@Composable
-private fun VaultUnlockScreen(
-    manager: AppLockManager,
-    vaultId: String,
-    vaultName: String,
-    onBack: () -> Unit,
-) {
+internal fun LockScreen(manager: AppLockManager, onForgotPin: () -> Unit) {
     val context = LocalContext.current
     val activity = remember(context) { context.findActivity() as? FragmentActivity }
     val biometricsOn by manager.biometricsEnabled.collectAsStateWithLifecycle()
+    val lockoutUntil by manager.lockoutUntil.collectAsStateWithLifecycle()
     val input = rememberPinInput()
     var shake by remember { mutableIntStateOf(0) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     val biometricAvailable = remember { BiometricAuth.isAvailable(context) }
     val canUseBiometrics = biometricsOn && activity != null && biometricAvailable
+
+    // Countdown while the lockout is active.
+    LaunchedEffect(lockoutUntil) {
+        while (true) {
+            nowMs = System.currentTimeMillis()
+            if (nowMs >= lockoutUntil) break
+            delay(250)
+        }
+    }
+    val secondsLeft = if (lockoutUntil > nowMs) ((lockoutUntil - nowMs + 999) / 1000).toInt() else 0
+    val lockedOut = secondsLeft > 0
 
     val launchBiometric: () -> Unit = {
         if (activity != null) {
             BiometricAuth.authenticate(
                 activity = activity,
-                title = "Unlock $vaultName",
+                title = "Unlock Neribo Vault",
                 subtitle = null,
-                onSuccess = { manager.unlockVault(vaultId) },
+                onSuccess = { manager.markUnlocked() },
                 onCancel = {},
             )
         }
     }
 
+    // Show the system prompt once when the lock screen opens (not again after a rotation).
     var autoPrompted by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(canUseBiometrics) {
         if (canUseBiometrics && !autoPrompted) {
@@ -87,29 +72,35 @@ private fun VaultUnlockScreen(
     LaunchedEffect(input.value) {
         if (input.value.isNotEmpty()) errorText = null
         if (input.isComplete) {
-            val result = manager.verifyVaultPin(vaultId, input.value)
+            val result = manager.checkPin(input.value)
             if (result is PinResult.Success) {
-                manager.unlockVault(vaultId)
+                manager.markUnlocked()
             } else {
-                errorText = pinErrorText(result)
+                errorText = if (result is PinResult.LockedOut) null else pinErrorText(result)
                 shake += 1
                 input.clear()
             }
         }
     }
 
-    LockSurface(
-        topBar = { NeriboTopBar(title = vaultName, onBack = onBack) },
-    ) {
-        LockHeader(icon = Icons.Outlined.Lock, title = "$vaultName is locked")
+    val message = when {
+        lockedOut -> "Try again in $secondsLeft ${if (secondsLeft == 1) "second" else "seconds"}"
+        errorText != null -> errorText
+        else -> "Enter your PIN"
+    }
+
+    LockSurface {
+        LockHeader(icon = Icons.Outlined.Lock, title = "Neribo Vault")
         PinEntryPanel(
             input = input,
-            message = errorText ?: "Enter the PIN for this vault",
-            isError = errorText != null,
+            message = message,
+            isError = lockedOut || errorText != null,
             shakeTrigger = shake,
+            enabled = !lockedOut,
             showBiometric = canUseBiometrics,
             onBiometric = launchBiometric,
         )
         Spacer(modifier = Modifier.height(NeriboTheme.spacing.lg))
+        NeriboButton(text = "Forgot PIN?", onClick = onForgotPin, style = ButtonStyle.Text)
     }
 }
