@@ -81,6 +81,10 @@ fun NotesScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val searchFocus = remember { FocusRequester() }
+    // Set only by the user tapping the search icon. Search state lives in the ViewModel and
+    // survives navigation, so focusing on "isSearchOpen" alone re-opened the keyboard every
+    // time you came back to this screen.
+    var focusSearchOnOpen by rememberSaveable { mutableStateOf(false) }
 
     // The text field edits this local copy so typing is never delayed by the database;
     // every change is forwarded to the ViewModel, which owns the real query.
@@ -105,8 +109,11 @@ fun NotesScreen(
         }
     }
 
-    LaunchedEffect(state.isSearchOpen) {
-        if (state.isSearchOpen) runCatching { searchFocus.requestFocus() }
+    LaunchedEffect(state.isSearchOpen, focusSearchOnOpen) {
+        if (state.isSearchOpen && focusSearchOnOpen) {
+            focusSearchOnOpen = false
+            runCatching { searchFocus.requestFocus() }
+        }
     }
 
     BackHandler(enabled = state.isSearchOpen) {
@@ -183,6 +190,7 @@ fun NotesScreen(
                                 localQuery = ""
                                 vm.closeSearch()
                             } else {
+                                focusSearchOnOpen = true
                                 vm.openSearch()
                             }
                         },

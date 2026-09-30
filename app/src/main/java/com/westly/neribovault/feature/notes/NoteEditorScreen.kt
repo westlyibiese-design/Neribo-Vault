@@ -1,8 +1,10 @@
 package com.westly.neribovault.feature.notes
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,14 +15,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
@@ -34,6 +36,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,8 +50,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -73,6 +80,7 @@ import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.core.util.shareText
 import com.westly.neribovault.feature.notes.components.TagEditor
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 private const val TITLE_PLACEHOLDER = "Title"
@@ -187,7 +195,7 @@ private fun subtitleFor(state: NoteEditorUiState): String? {
         .ifEmpty { null }
 }
 
-@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun EditorContent(
     vm: NoteEditorViewModel,
@@ -207,9 +215,18 @@ private fun EditorContent(
     }
     val titleFocus = remember { FocusRequester() }
     val bodyFocus = remember { FocusRequester() }
-    val scope = rememberCoroutineScope()
-    val bodyBringIntoView = remember { BringIntoViewRequester() }
     val bodyLayout = remember { mutableStateOf<TextLayoutResult?>(null) }
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+    // Height of the visible scroll area (it shrinks when the keyboard opens) and the body
+    // field's top edge inside the scrolled content. Together with the cursor rectangle from the
+    // text layout they tell us whether the cursor is on screen.
+    var viewportHeight by remember { mutableStateOf(0) }
+    var bodyTopInContent by remember { mutableStateOf(0) }
+    val imeVisible = WindowInsets.isImeVisible
+    val imeVisibleNow by androidx.compose.runtime.rememberUpdatedState(imeVisible)
+    // Whether the keyboard was up the last time this window had focus.
+    var imeWasUp by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
     val windowInfo = LocalWindowInfo.current
@@ -217,19 +234,60 @@ private fun EditorContent(
     // Which field the editor currently considers focused: 0 = none, 1 = title, 2 = body.
     var focusedField by remember { mutableStateOf(0) }
 
-    // Root-cause fix for "the keyboard stops responding": when another window (the Add tag
-    // dialog, a floating app you copied from) takes the keyboard and then gives focus back,
-    // the field still believes it is focused, so tapping it never reopens the keyboard.
-    // When our window regains focus we restart the field's input session and show the keyboard.
+    // Remember whether the keyboard was open while we owned the window focus.
+    LaunchedEffect(windowInfo) {
+        snapshotFlow { windowInfo.isWindowFocused to imeVisibleNow }.collect { (focused, ime) ->
+            if (focused) imeWasUp = ime
+        }
+    }
+
+    // When another window (the Add tag dialog, a floating app) takes the keyboard and then gives
+    // focus back, the field still believes it is focused and tapping it would never reopen the
+    // keyboard. On regaining focus we restart the field's input session, but only bring the
+    // keyboard back if it was actually open before. Otherwise the keyboard stays closed.
     LaunchedEffect(windowInfo) {
         snapshotFlow { windowInfo.isWindowFocused }.collect { windowFocused ->
-            if (windowFocused && focusedField != 0) {
+            if (windowFocused && focusedField != 0 && imeWasUp) {
                 val target = if (focusedField == 1) titleFocus else bodyFocus
                 focusManager.clearFocus(force = true)
                 delay(50)
                 runCatching { target.requestFocus() }
                 keyboard?.show()
             }
+        }
+    }
+
+    // Keep the cursor in view. Runs whenever the cursor moves, the text re-lays-out (Enter,
+    // spaces, wrapping) or the visible area changes (keyboard opening/closing). Does nothing
+    // while the cursor is already comfortably visible.
+    val marginPx = with(density) { 28.dp.toPx() }
+    LaunchedEffect(scrollState) {
+        snapshotFlow {
+            Triple(
+                bodyLayout.value,
+                bodyValue.selection.end,
+                Triple(viewportHeight, bodyTopInContent, focusedField),
+            )
+        }.collectLatest { (layout, cursorOffset, _) ->
+            if (focusedField != 2 || layout == null || viewportHeight <= 0) return@collectLatest
+            // Let this frame's layout finish so the scroll range is up to date.
+            withFrameNanos { }
+            val length = layout.layoutInput.text.length
+            val rect = runCatching { layout.getCursorRect(cursorOffset.coerceIn(0, length)) }
+                .getOrNull() ?: return@collectLatest
+            val cursorTop = bodyTopInContent + rect.top
+            val cursorBottom = bodyTopInContent + rect.bottom
+            val viewTop = scrollState.value.toFloat()
+            val viewBottom = viewTop + viewportHeight
+            val target = when {
+                cursorBottom + marginPx > viewBottom -> cursorBottom + marginPx - viewportHeight
+                cursorTop - marginPx < viewTop -> cursorTop - marginPx
+                else -> return@collectLatest
+            }
+            scrollState.animateScrollTo(
+                target.toInt().coerceAtLeast(0),
+                animationSpec = tween(durationMillis = 120),
+            )
         }
     }
 
@@ -257,7 +315,8 @@ private fun EditorContent(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
+                .onSizeChanged { viewportHeight = it.height }
+                .verticalScroll(scrollState)
                 .padding(horizontal = spacing.screen),
         ) {
             BasicTextField(
@@ -312,21 +371,11 @@ private fun EditorContent(
                     // the text puts the cursor at the end, and taps on the text place the cursor
                     // exactly where you touched.
                     .heightIn(min = 220.dp)
-                    .bringIntoViewRequester(bodyBringIntoView)
+                    .onGloballyPositioned { bodyTopInContent = it.positionInParent().y.toInt() }
                     .focusRequester(bodyFocus)
                     .onFocusChanged { focus ->
                         if (focus.isFocused) {
                             focusedField = 2
-                            // Once the keyboard has opened, scroll so the cursor is on screen.
-                            scope.launch {
-                                delay(300)
-                                val layout = bodyLayout.value ?: return@launch
-                                val offset = bodyValue.selection.end
-                                    .coerceIn(0, layout.layoutInput.text.length)
-                                runCatching {
-                                    bodyBringIntoView.bringIntoView(layout.getCursorRect(offset))
-                                }
-                            }
                         } else if (focusedField == 2) {
                             focusedField = 0
                         }
