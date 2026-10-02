@@ -1,5 +1,10 @@
 package com.westly.neribovault.feature.cloud
 
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -16,6 +22,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -27,11 +35,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.westly.neribovault.R
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.lock.findActivity
@@ -66,6 +78,15 @@ fun CloudScreen(onBack: () -> Unit) {
     ) { padding ->
         if (state.loading) {
             LoadingState(modifier = Modifier.fillMaxSize().padding(padding))
+        } else if (state.hasProject && !state.signedIn && state.googleAvailable) {
+            GoogleSignInPage(
+                state = state,
+                onGoogleSignIn = {
+                    if (activity != null) vm.signInWithGoogle(activity) else vm.onGoogleUnavailable()
+                },
+                onUseOwn = vm::useOwnProject,
+                modifier = Modifier.padding(padding),
+            )
         } else {
             Column(
                 modifier = Modifier
@@ -88,9 +109,6 @@ fun CloudScreen(onBack: () -> Unit) {
                     )
                     !state.signedIn -> SignedOutSection(
                         state = state,
-                        onGoogleSignIn = {
-                            if (activity != null) vm.signInWithGoogle(activity) else vm.onGoogleUnavailable()
-                        },
                         onChangeProject = vm::changeProject,
                         onUseShared = vm::useSharedProject,
                         onUseOwn = vm::useOwnProject,
@@ -199,32 +217,13 @@ private fun NotConfiguredSection(
 @Composable
 private fun SignedOutSection(
     state: CloudUiState,
-    onGoogleSignIn: () -> Unit,
     onChangeProject: () -> Unit,
     onUseShared: () -> Unit,
     onUseOwn: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
-    if (state.googleAvailable) {
-        BodyText("Sign in with your Google account to sync your vaults. Your vaults stay on this phone until you do.")
-        Spacer(modifier = Modifier.height(spacing.sm))
-        SmallNote(
-            "Synced data is stored in the Neribo cloud and is not end-to-end encrypted. " +
-                "If you would rather keep it in a project only you control, use your own Supabase project below.",
-        )
-        MessageLines(error = state.error, info = state.info)
-        Spacer(modifier = Modifier.height(spacing.lg))
-        NeriboButton(
-            text = "Continue with Google",
-            onClick = onGoogleSignIn,
-            enabled = !state.working,
-            style = ButtonStyle.Primary,
-            modifier = Modifier.fillMaxWidth(),
-        )
-    } else {
-        BodyText("Google sign-in works with the Neribo cloud only. Switch back to the Neribo cloud to sign in.")
-        MessageLines(error = state.error, info = state.info)
-    }
+    BodyText("Google sign-in works with the Neribo cloud only. Switch back to the Neribo cloud to sign in.")
+    MessageLines(error = state.error, info = state.info)
     Spacer(modifier = Modifier.height(spacing.sm))
     if (state.usingOwnProject) {
         NeriboButton(
@@ -251,6 +250,110 @@ private fun SignedOutSection(
             style = ButtonStyle.Text,
             modifier = Modifier.fillMaxWidth(),
         )
+    }
+}
+
+/** The Google sign-in page: everything centered on the screen, with the Google logo on the button. */
+@Composable
+private fun GoogleSignInPage(
+    state: CloudUiState,
+    onGoogleSignIn: () -> Unit,
+    onUseOwn: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        val minHeight = maxHeight
+        Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = minHeight)
+                    .padding(horizontal = spacing.screen, vertical = spacing.lg),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "Sign in with your Google account to sync your vaults. Your vaults stay on this phone until you do.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = colors.onSurface,
+                    textAlign = TextAlign.Center,
+                )
+                Spacer(modifier = Modifier.height(spacing.md))
+                Text(
+                    text = "Synced data is stored in the Neribo cloud and is not end-to-end encrypted. " +
+                        "If you would rather keep it in a project only you control, use your own Supabase project below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+                if (state.error != null) {
+                    Spacer(modifier = Modifier.height(spacing.md))
+                    Text(
+                        text = state.error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.error,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                if (state.info != null) {
+                    Spacer(modifier = Modifier.height(spacing.md))
+                    Text(
+                        text = state.info,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = colors.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+                Spacer(modifier = Modifier.height(spacing.xl))
+                GoogleSignInButton(
+                    onClick = onGoogleSignIn,
+                    enabled = !state.working,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(spacing.md))
+                NeriboButton(
+                    text = "Use my own Supabase project instead",
+                    onClick = onUseOwn,
+                    enabled = !state.working,
+                    style = ButtonStyle.Text,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+}
+
+/** A white "Continue with Google" button with the four-colour Google logo, readable in light and dark themes. */
+@Composable
+private fun GoogleSignInButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val spacing = NeriboTheme.spacing
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.heightIn(min = 52.dp),
+        shape = MaterialTheme.shapes.medium,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = Color.White,
+            contentColor = Color(0xFF1F1F1F),
+            disabledContainerColor = Color.White.copy(alpha = 0.6f),
+            disabledContentColor = Color(0xFF1F1F1F).copy(alpha = 0.6f),
+        ),
+        border = BorderStroke(1.dp, Color(0xFF747775)),
+        elevation = null,
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.ic_google_logo),
+            contentDescription = null,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(modifier = Modifier.width(spacing.md))
+        Text(text = "Continue with Google", style = MaterialTheme.typography.labelLarge)
     }
 }
 
