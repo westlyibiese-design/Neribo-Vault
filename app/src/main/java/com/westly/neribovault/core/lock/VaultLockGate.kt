@@ -7,6 +7,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,15 +36,20 @@ fun VaultLockGate(
     val manager = rememberLockManager()
     val enabledIds by manager.vaultEnabledIds.collectAsStateWithLifecycle()
     val unlockedIds by manager.unlockedVaults.collectAsStateWithLifecycle()
+    val lockEpoch = LocalAppLockEpoch.current
     if (vaultId !in enabledIds || vaultId in unlockedIds) {
         content()
     } else {
-        VaultUnlockScreen(
-            manager = manager,
-            vaultId = vaultId,
-            vaultName = vaultName,
-            onBack = onBack,
-        )
+        // A new epoch gives the unlock screen fresh saved state, so nothing about a previous
+        // unlock (such as "already asked for biometrics") is restored after the app locks.
+        key(lockEpoch) {
+            VaultUnlockScreen(
+                manager = manager,
+                vaultId = vaultId,
+                vaultName = vaultName,
+                onBack = onBack,
+            )
+        }
     }
 }
 
