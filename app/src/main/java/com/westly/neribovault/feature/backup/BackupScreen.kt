@@ -4,20 +4,31 @@ import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -31,17 +42,30 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusEvent
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
@@ -55,6 +79,8 @@ import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.SectionHeader
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Create an encrypted backup of everything, or restore one onto this phone. */
 @Composable
@@ -68,6 +94,19 @@ fun BackupScreen(onBack: () -> Unit) {
     // Leaving mid-way could cut a backup short, so back does nothing while work is running.
     BackHandler(enabled = busy) {}
 
+    // Restart: cover the screen first, then relaunch the app in a fresh process.
+    var isRestarting by remember { mutableStateOf(false) }
+    var restartFailed by remember { mutableStateOf(false) }
+    LaunchedEffect(isRestarting) {
+        if (isRestarting) {
+            delay(RESTART_COVER_DELAY_MS)
+            if (!restartApp(context)) {
+                restartFailed = true
+                isRestarting = false
+            }
+        }
+    }
+
     val createLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri: Uri? -> if (uri != null) vm.createBackup(uri) }
@@ -76,27 +115,39 @@ fun BackupScreen(onBack: () -> Unit) {
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? -> if (uri != null) vm.onRestoreFilePicked(uri, displayNameOf(context, uri)) }
 
-    NeriboScaffold(
-        topBar = { NeriboTopBar(title = "Backup and restore", onBack = if (busy) null else onBack) },
-    ) { padding ->
-        when (phase) {
-            is BackupPhase.Working -> WorkingView(
-                message = phase.message,
-                modifier = Modifier.padding(padding),
-            )
-            is BackupPhase.RestoreDone -> RestoreDoneView(
-                warnings = phase.warnings,
-                onRestart = { findActivity(context)?.recreate() },
-                modifier = Modifier.padding(padding),
-            )
-            else -> FormsView(
-                state = state,
-                vm = vm,
-                onChooseSave = {
-                    if (vm.canStartCreate()) createLauncher.launch(vm.suggestedFileName())
-                },
-                onChooseFile = { openLauncher.launch(arrayOf("*/*")) },
-                modifier = Modifier.padding(padding),
+    Box(modifier = Modifier.fillMaxSize()) {
+        NeriboScaffold(
+            topBar = { NeriboTopBar(title = "Backup and restore", onBack = if (busy) null else onBack) },
+        ) { padding ->
+            when (phase) {
+                is BackupPhase.Working -> WorkingView(
+                    message = phase.message,
+                    modifier = Modifier.padding(padding),
+                )
+                is BackupPhase.RestoreDone -> RestoreDoneView(
+                    warnings = phase.warnings,
+                    restartFailed = restartFailed,
+                    onRestart = { if (!isRestarting) isRestarting = true },
+                    modifier = Modifier.padding(padding),
+                )
+                else -> FormsView(
+                    state = state,
+                    vm = vm,
+                    onChooseSave = {
+                        if (vm.canStartCreate()) createLauncher.launch(vm.suggestedFileName())
+                    },
+                    onChooseFile = { openLauncher.launch(arrayOf("*/*")) },
+                    contentPadding = padding,
+                )
+            }
+        }
+        if (isRestarting) {
+            // Opaque cover so nothing flashes while the app closes and opens again.
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFF141414))
+                    .pointerInput(Unit) {},
             )
         }
     }
@@ -121,14 +172,21 @@ private fun FormsView(
     vm: BackupViewModel,
     onChooseSave: () -> Unit,
     onChooseFile: () -> Unit,
-    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues,
 ) {
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
+    val layoutDirection = LocalLayoutDirection.current
+    // The scaffold's bottom padding is only the navigation bar. Use the larger of the keyboard
+    // and the navigation bar once, so the keyboard is never padded twice.
+    val imeBottom = WindowInsets.ime.asPaddingValues().calculateBottomPadding()
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val bottomInset = maxOf(imeBottom, navBottom)
     var showPasswords by rememberSaveable { mutableStateOf(false) }
     val transformation: VisualTransformation =
         if (showPasswords) VisualTransformation.None else PasswordVisualTransformation()
-    val passwordOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
+    val passwordNextOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Next)
+    val passwordDoneOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done)
     val eye: @Composable () -> Unit = {
         NeriboIconButton(
             icon = if (showPasswords) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
@@ -139,8 +197,14 @@ private fun FormsView(
     val done = state.phase as? BackupPhase.BackupDone
 
     Column(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxSize()
+            .padding(
+                start = contentPadding.calculateStartPadding(layoutDirection),
+                top = contentPadding.calculateTopPadding(),
+                end = contentPadding.calculateEndPadding(layoutDirection),
+                bottom = bottomInset,
+            )
             .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.screen, vertical = spacing.lg),
     ) {
@@ -168,9 +232,10 @@ private fun FormsView(
                 NeriboTextField(
                     value = state.password,
                     onValueChange = vm::onPassword,
+                    modifier = Modifier.revealOnFocus(extraBelow = 160.dp),
                     label = "Backup password",
                     placeholder = "At least $MIN_PASSWORD_LENGTH characters",
-                    keyboardOptions = passwordOptions,
+                    keyboardOptions = passwordNextOptions,
                     visualTransformation = transformation,
                     isError = state.passwordTooShort,
                     supportingText = if (state.passwordTooShort) "Use at least $MIN_PASSWORD_LENGTH characters" else null,
@@ -179,8 +244,9 @@ private fun FormsView(
                 NeriboTextField(
                     value = state.confirmPassword,
                     onValueChange = vm::onConfirmPassword,
+                    modifier = Modifier.revealOnFocus(extraBelow = 180.dp),
                     label = "Repeat the password",
-                    keyboardOptions = passwordOptions,
+                    keyboardOptions = passwordDoneOptions,
                     visualTransformation = transformation,
                     isError = state.passwordsDiffer,
                     supportingText = if (state.passwordsDiffer) "The two passwords do not match" else null,
@@ -234,8 +300,9 @@ private fun FormsView(
                     NeriboTextField(
                         value = state.restorePassword,
                         onValueChange = vm::onRestorePassword,
+                        modifier = Modifier.revealOnFocus(extraBelow = 140.dp),
                         label = "Backup password",
-                        keyboardOptions = passwordOptions,
+                        keyboardOptions = passwordDoneOptions,
                         visualTransformation = transformation,
                         trailingIcon = eye,
                     )
@@ -320,6 +387,7 @@ private fun WorkingView(message: String, modifier: Modifier = Modifier) {
 @Composable
 private fun RestoreDoneView(
     warnings: List<String>,
+    restartFailed: Boolean,
     onRestart: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -355,6 +423,15 @@ private fun RestoreDoneView(
                 textAlign = TextAlign.Center,
             )
         }
+        if (restartFailed) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            Text(
+                text = "Close the app and open it again.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
         Spacer(modifier = Modifier.height(spacing.xl))
         NeriboButton(text = "Restart", onClick = onRestart)
     }
@@ -367,6 +444,50 @@ private fun displayNameOf(context: Context, uri: Uri): String? = runCatching {
     }
 }.getOrNull()
 
+/**
+ * Keeps this field, and [extraBelow] of whatever sits under it (the next field or the action
+ * button), visible above the keyboard when the field gains focus.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun Modifier.revealOnFocus(extraBelow: Dp): Modifier {
+    val requester = remember { BringIntoViewRequester() }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    return this
+        .onSizeChanged { size = it }
+        .bringIntoViewRequester(requester)
+        .onFocusEvent { focusState ->
+            if (focusState.isFocused) {
+                scope.launch {
+                    // Let the keyboard finish opening before measuring what must stay visible.
+                    delay(KEYBOARD_SETTLE_DELAY_MS)
+                    val extra = with(density) { extraBelow.toPx() }
+                    requester.bringIntoView(Rect(0f, 0f, size.width.toFloat(), size.height + extra))
+                }
+            }
+        }
+}
+
+/**
+ * Starts a fresh copy of the app and ends this process, so the restored database is opened from
+ * scratch. Returns false, without doing anything, when the system gives no launch intent.
+ */
+private fun restartApp(context: Context): Boolean {
+    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        ?: return false
+    launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+    context.startActivity(launchIntent)
+    findActivity(context)?.finishAffinity()
+    Runtime.getRuntime().exit(0)
+    return true
+}
+
+private const val RESTART_COVER_DELAY_MS = 150L
+private const val KEYBOARD_SETTLE_DELAY_MS = 250L
+
+/** The hosting Activity, found by walking wrapped contexts; null when there is none. */
 private fun findActivity(context: Context): Activity? {
     var current: Context? = context
     while (current is ContextWrapper) {
