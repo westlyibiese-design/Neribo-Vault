@@ -80,6 +80,7 @@ import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboSearchField
@@ -93,13 +94,8 @@ import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.feature.developer.tasks.reminders.TaskReminderScheduler
 import kotlinx.coroutines.launch
 
-private val TITLE_PLACEHOLDERS = listOf(
-    "Fix the receipt rounding bug",
-    "Send the invoice to the Lagos client",
-    "Renew the domain before Friday",
-    "Test sync on MTN data",
-)
-private const val NOTES_PLACEHOLDER = "Notes, a link, or the very next small step."
+private const val TITLE_PLACEHOLDER = "Title"
+private const val NOTES_PLACEHOLDER = "Write your notes"
 private const val UNDO_MESSAGE = "Moved to Recently deleted"
 
 /** The menu every task row offers: open it, or move it to Recently deleted. */
@@ -179,7 +175,7 @@ fun ProjectTasksTab(
             )
             Spacer(modifier = Modifier.height(spacing.sm))
             QuickAddField(
-                placeholder = "Quick add, e.g. Fix the receipt rounding",
+                placeholder = "Quick add a task",
                 onAdd = { title -> vm.quickAdd(title) },
                 modifier = Modifier.padding(horizontal = spacing.screen),
             )
@@ -367,7 +363,7 @@ fun TasksOverviewScreen(
                 Spacer(modifier = Modifier.height(spacing.xs))
             }
             QuickAddField(
-                placeholder = "Quick add a task with no project",
+                placeholder = "Quick add a task",
                 onAdd = { title -> vm.quickAdd(title) },
                 modifier = Modifier.padding(horizontal = spacing.screen),
             )
@@ -633,7 +629,6 @@ private fun TaskEditorContent(
     var showTimePicker by rememberSaveable { mutableStateOf(false) }
     var showProjectSheet by rememberSaveable { mutableStateOf(false) }
 
-    val titlePlaceholder = remember { TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val notesFocus = remember { FocusRequester() }
 
@@ -661,6 +656,9 @@ private fun TaskEditorContent(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.screen),
     ) {
+        Spacer(modifier = Modifier.height(spacing.md))
+        SectionHeader("Title")
+        Spacer(modifier = Modifier.height(spacing.sm))
         TaskBorderlessField(
             value = titleValue,
             onValueChange = { new ->
@@ -669,7 +667,7 @@ private fun TaskEditorContent(
                 vm.onTitleChange(cleaned.text)
             },
             textStyle = titleStyle,
-            placeholder = titlePlaceholder,
+            placeholder = TITLE_PLACEHOLDER,
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(titleFocus),
@@ -680,8 +678,12 @@ private fun TaskEditorContent(
             keyboardActions = KeyboardActions(
                 onNext = { runCatching { notesFocus.requestFocus() } },
             ),
-            maxLines = 4,
+            maxLines = 3,
         )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        NeriboDivider()
+        Spacer(modifier = Modifier.height(spacing.lg))
+        SectionHeader("Notes")
         Spacer(modifier = Modifier.height(spacing.sm))
         TaskBorderlessField(
             value = notesValue,
@@ -693,7 +695,7 @@ private fun TaskEditorContent(
             placeholder = NOTES_PLACEHOLDER,
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 96.dp)
+                .heightIn(min = 240.dp)
                 .focusRequester(notesFocus),
         )
 

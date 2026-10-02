@@ -108,13 +108,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-private val TITLE_PLACEHOLDERS = listOf(
-    "Harmattan sale reminder",
-    "Sunday service recap",
-    "Benin City tech meetup",
-)
-private const val CAPTION_PLACEHOLDER = "Write the caption the way you would say it out loud."
-private const val NOTES_PLACEHOLDER = "Private notes: visuals to shoot, who to tag, a link to save."
+private const val TITLE_PLACEHOLDER = "Title"
+private const val CAPTION_PLACEHOLDER = "Write your caption"
+private const val NOTES_PLACEHOLDER = "Write private notes"
 
 /**
  * Full-screen post editor: platform chips, a borderless serif working title, a large caption
@@ -352,7 +348,6 @@ private fun EditorContent(
     var showTimePicker by rememberSaveable { mutableStateOf(false) }
     var pendingPickerMillis by rememberSaveable { mutableStateOf<Long?>(null) }
 
-    val titlePlaceholder = remember { TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val captionFocus = remember { FocusRequester() }
     val captionLayout = remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -472,7 +467,9 @@ private fun EditorContent(
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(spacing.md))
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BorderlessField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -481,7 +478,7 @@ private fun EditorContent(
                     vm.onTitleChange(cleaned.text)
                 },
                 textStyle = titleStyle,
-                placeholder = titlePlaceholder,
+                placeholder = TITLE_PLACEHOLDER,
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(titleFocus)
@@ -499,8 +496,12 @@ private fun EditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { captionFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Caption")
             Spacer(modifier = Modifier.height(spacing.sm))
             BorderlessField(
                 value = captionValue,
@@ -514,7 +515,7 @@ private fun EditorContent(
                     .fillMaxWidth()
                     // The field itself is at least this tall, so tapping the empty space below
                     // the text puts the cursor at the end.
-                    .heightIn(min = 200.dp)
+                    .heightIn(min = 240.dp)
                     .onGloballyPositioned { captionTopInContent = it.positionInParent().y.toInt() }
                     .focusRequester(captionFocus)
                     .onFocusChanged { focus ->
@@ -803,7 +804,7 @@ private fun BorderlessField(
                 if (value.text.isEmpty()) {
                     Text(
                         text = placeholder,
-                        style = textStyle.copy(color = colors.onSurfaceVariant),
+                        style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                     )
                 }
                 inner()

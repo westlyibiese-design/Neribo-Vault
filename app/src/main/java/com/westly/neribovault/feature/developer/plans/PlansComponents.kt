@@ -254,7 +254,7 @@ internal fun PlanBorderlessField(
                 if (value.text.isEmpty()) {
                     Text(
                         text = placeholder,
-                        style = textStyle.copy(color = colors.onSurfaceVariant),
+                        style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                     )
                 }
                 inner()

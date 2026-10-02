@@ -138,7 +138,8 @@ private fun AddIdeaTagDialog(
                 value = input,
                 onValueChange = { input = it.take(MAX_IDEA_TAG_LENGTH) },
                 modifier = Modifier.focusRequester(focusRequester),
-                placeholder = "e.g. onitsha",
+                label = "Tag",
+                placeholder = "Tag name",
                 isError = isDuplicate,
                 supportingText = if (isDuplicate) {
                     "You already added that tag"

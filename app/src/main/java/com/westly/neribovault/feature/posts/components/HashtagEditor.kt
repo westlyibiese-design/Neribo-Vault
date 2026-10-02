@@ -159,8 +159,8 @@ private fun HashtagInput(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     if (value.isEmpty()) {
                         Text(
-                            text = "Add a hashtag, e.g. benincity",
-                            style = textStyle.copy(color = colors.onSurfaceVariant),
+                            text = "Add a hashtag",
+                            style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                         )
                     }
                     inner()

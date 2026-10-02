@@ -61,6 +61,7 @@ import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
@@ -72,17 +73,10 @@ import com.westly.neribovault.core.util.shareText
 import com.westly.neribovault.data.local.entity.BugEntity
 import kotlinx.coroutines.launch
 
-private val TITLE_PLACEHOLDERS = listOf(
-    "Receipt total shows \u20A60 after applying a discount",
-    "Sync fails on MTN data but works on Wi-Fi",
-    "App closes when I rotate the invoice screen",
-)
-private const val DESCRIPTION_PLACEHOLDER =
-    "What happened, and what did you expect instead?"
-private const val STEPS_PLACEHOLDER =
-    "1. Open the POS screen\n2. Add two items to the cart\n3. Apply the 10% discount"
-private const val RESOLUTION_PLACEHOLDER =
-    "What fixed it? A commit, a config change, a note for next time."
+private const val TITLE_PLACEHOLDER = "Title"
+private const val DESCRIPTION_PLACEHOLDER = "Write here"
+private const val STEPS_PLACEHOLDER = "List the steps"
+private const val RESOLUTION_PLACEHOLDER = "Write how it was fixed"
 
 /**
  * The Bugs tab of a project: a "Report a bug" button, Open / Resolved / All chips and the bug
@@ -365,7 +359,6 @@ private fun BugEditorContent(
         mutableStateOf(TextFieldValue(vm.currentResolution, TextRange(vm.currentResolution.length)))
     }
 
-    val titlePlaceholder = remember { TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val descriptionFocus = remember { FocusRequester() }
 
@@ -394,6 +387,9 @@ private fun BugEditorContent(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.screen),
     ) {
+        Spacer(modifier = Modifier.height(spacing.md))
+        SectionHeader("Title")
+        Spacer(modifier = Modifier.height(spacing.sm))
         BugBorderlessField(
             value = titleValue,
             onValueChange = { new ->
@@ -402,7 +398,7 @@ private fun BugEditorContent(
                 vm.onTitleChange(cleaned.text)
             },
             textStyle = titleStyle,
-            placeholder = titlePlaceholder,
+            placeholder = TITLE_PLACEHOLDER,
             modifier = Modifier
                 .fillMaxWidth()
                 .focusRequester(titleFocus),
@@ -413,8 +409,10 @@ private fun BugEditorContent(
             keyboardActions = KeyboardActions(
                 onNext = { runCatching { descriptionFocus.requestFocus() } },
             ),
-            maxLines = 4,
+            maxLines = 3,
         )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        NeriboDivider()
         Spacer(modifier = Modifier.height(spacing.lg))
         SectionHeader("SEVERITY")
         BugChipRow {
@@ -458,7 +456,7 @@ private fun BugEditorContent(
             placeholder = DESCRIPTION_PLACEHOLDER,
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 96.dp)
+                .heightIn(min = 240.dp)
                 .focusRequester(descriptionFocus),
         )
         Spacer(modifier = Modifier.height(spacing.lg))

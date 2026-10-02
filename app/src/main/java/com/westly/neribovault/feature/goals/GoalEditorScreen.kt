@@ -181,7 +181,7 @@ private fun GoalFormContent(
                         if (title.isNotBlank()) showTitleError = false
                     },
                     modifier = Modifier.focusRequester(titleFocus),
-                    label = "Goal",
+                    label = "Title",
                     placeholder = goalTitleHint(category),
                     singleLine = false,
                     maxLines = 3,
@@ -194,7 +194,7 @@ private fun GoalFormContent(
                     value = description,
                     onValueChange = { description = it },
                     label = "Why it matters",
-                    placeholder = "What will done look like? Who is it for?",
+                    placeholder = "Write here",
                     singleLine = false,
                     minLines = 3,
                     maxLines = 8,

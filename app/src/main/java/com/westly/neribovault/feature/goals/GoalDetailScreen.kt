@@ -267,7 +267,7 @@ private fun DetailContent(
         if (milestones.isEmpty()) {
             item(key = "steps-empty") {
                 Text(
-                    text = "Break it into small steps. For example: compare prices at Computer Village, then set aside \u20A650,000 each month.",
+                    text = "Break it into small steps you can tick off one by one.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = spacing.sm),
@@ -428,7 +428,7 @@ private fun AddStepField(onAdd: (String) -> Unit, modifier: Modifier = Modifier)
                         Text(
                             text = "Add a step",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = colors.onSurfaceVariant,
+                            color = colors.onSurfaceVariant.copy(alpha = 0.55f),
                         )
                     }
                     inner()
@@ -471,7 +471,8 @@ private fun EditStepDialog(
                 value = input,
                 onValueChange = { input = it.replace("\n", "").take(MAX_STEP_LENGTH) },
                 modifier = Modifier.focusRequester(focusRequester),
-                placeholder = "What needs to happen?",
+                label = "Step",
+                placeholder = "Describe the step",
                 singleLine = false,
                 maxLines = 4,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),

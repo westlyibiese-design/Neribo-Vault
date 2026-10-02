@@ -34,13 +34,6 @@ internal fun goalStatusLabel(value: String): String = when (value) {
     else -> value.replaceFirstChar { it.uppercase() }
 }
 
-/** A grounded example for the title field, matched to the chosen category. */
-internal fun goalTitleHint(category: String): String = when (category) {
-    "finance" -> "Save \u20A6500,000 for a laptop"
-    "spiritual" -> "Read the Bible through by December"
-    "career" -> "Ship the first version of my app"
-    "health" -> "Walk for 30 minutes every morning"
-    "learning" -> "Finish a course in UI design"
-    "relationships" -> "Call my mother every Sunday"
-    else -> "Learn to cook a proper pot of egusi"
-}
+/** A short instruction for the title field. No sample goals: a hint must never look like real content. */
+@Suppress("UNUSED_PARAMETER")
+internal fun goalTitleHint(category: String): String = "Name your goal"

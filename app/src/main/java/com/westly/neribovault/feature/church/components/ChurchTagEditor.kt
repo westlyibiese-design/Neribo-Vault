@@ -138,7 +138,8 @@ private fun AddTagDialog(
                 value = input,
                 onValueChange = { input = it.take(MAX_TAG_LENGTH) },
                 modifier = Modifier.focusRequester(focusRequester),
-                placeholder = "e.g. faith",
+                label = "Tag",
+                placeholder = "Tag name",
                 isError = isDuplicate,
                 supportingText = if (isDuplicate) {
                     "You already added that tag"

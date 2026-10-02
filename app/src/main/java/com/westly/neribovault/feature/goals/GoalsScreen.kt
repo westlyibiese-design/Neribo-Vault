@@ -352,7 +352,7 @@ private fun GoalsEmptyState(
         else -> EmptyState(
             icon = Icons.Outlined.Flag,
             title = "No goals yet",
-            message = "What are you working toward? Save \u20A6500,000 for a laptop, or finish the first draft of your book.",
+            message = "Goals give your plans a place to grow. Add your first goal and break it into small steps.",
             modifier = Modifier.fillMaxSize(),
             actionLabel = "New goal",
             onAction = onNewGoal,

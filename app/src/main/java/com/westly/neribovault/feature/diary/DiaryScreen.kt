@@ -260,7 +260,7 @@ fun DiaryScreen(
                     state.entries.isEmpty() -> EmptyState(
                         icon = Icons.Outlined.Book,
                         title = "Your first page",
-                        message = "Write a few lines about today: the rain, the light, who you spoke to.",
+                        message = "A quiet place for your day. Write your first entry whenever you are ready.",
                         modifier = Modifier.fillMaxSize(),
                         actionLabel = "Write today's entry",
                         onAction = { onNewEntry(null) },
@@ -343,7 +343,7 @@ private fun TodayPrompt(onClick: () -> Unit) {
                     color = colors.onSurfaceVariant,
                 )
                 Text(
-                    text = "How was your day? Write a few lines.",
+                    text = "Write today's entry",
                     style = MaterialTheme.typography.bodyLarge,
                     color = colors.onSurface,
                 )

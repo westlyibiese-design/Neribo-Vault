@@ -85,12 +85,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-private val TITLE_PLACEHOLDERS = listOf(
-    "A mobile-money tool for market women in Onitsha",
-    "Short story about a danfo driver in Lagos",
-)
-private const val DESCRIPTION_PLACEHOLDER =
-    "What is the spark? Who is it for? What could the first small step be?"
+private const val TITLE_PLACEHOLDER = "Title"
+private const val DESCRIPTION_PLACEHOLDER = "Write here"
 
 /**
  * Full-screen idea editor: borderless serif title, a large description, category and status
@@ -198,7 +194,6 @@ private fun EditorContent(
             TextFieldValue(vm.currentDescription, TextRange(vm.currentDescription.length)),
         )
     }
-    val titlePlaceholder = remember { TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val descriptionFocus = remember { FocusRequester() }
     val descriptionLayout = remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -307,6 +302,9 @@ private fun EditorContent(
                 .verticalScroll(scrollState)
                 .padding(horizontal = spacing.screen),
         ) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -333,19 +331,23 @@ private fun EditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { descriptionFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
                 decorationBox = { inner ->
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (titleValue.text.isEmpty()) {
                             Text(
-                                text = titlePlaceholder,
-                                style = titleStyle.copy(color = colors.onSurfaceVariant),
+                                text = TITLE_PLACEHOLDER,
+                                style = titleStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
                     }
                 },
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Content")
             Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = descriptionValue,
@@ -358,7 +360,7 @@ private fun EditorContent(
                     // The field itself is at least this tall, so tapping the empty space below
                     // the text puts the cursor at the end, and taps on the text place the cursor
                     // exactly where you touched.
-                    .heightIn(min = 200.dp)
+                    .heightIn(min = 240.dp)
                     .onGloballyPositioned { descriptionTopInContent = it.positionInParent().y.toInt() }
                     .focusRequester(descriptionFocus)
                     .onFocusChanged { focus ->
@@ -377,7 +379,7 @@ private fun EditorContent(
                         if (descriptionValue.text.isEmpty()) {
                             Text(
                                 text = DESCRIPTION_PLACEHOLDER,
-                                style = bodyStyle.copy(color = colors.onSurfaceVariant),
+                                style = bodyStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()

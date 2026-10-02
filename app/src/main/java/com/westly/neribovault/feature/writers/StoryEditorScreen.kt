@@ -44,8 +44,6 @@ import com.westly.neribovault.core.ui.components.SectionHeader
 private const val MAX_TITLE_LENGTH = 120
 private const val MAX_TARGET_DIGITS = 7
 
-private val TITLE_HINTS = listOf("The Bride Price of Ugheli", "Harmattan Nights")
-
 /**
  * The story form: title, synopsis, genre, status and an optional target word count. Saves on
  * the explicit Save button. A new story left empty is simply discarded; leaving with unsaved
@@ -106,7 +104,6 @@ private fun StoryFormContent(
     var showTitleError by rememberSaveable { mutableStateOf(false) }
     var showDiscard by rememberSaveable { mutableStateOf(false) }
     val titleFocus = remember { FocusRequester() }
-    val titleHint = remember { TITLE_HINTS.random() }
 
     val hasChanges = title != initial.title ||
         synopsis != initial.synopsis ||
@@ -173,7 +170,7 @@ private fun StoryFormContent(
                     },
                     modifier = Modifier.focusRequester(titleFocus),
                     label = "Title",
-                    placeholder = titleHint,
+                    placeholder = "Name your story",
                     singleLine = false,
                     maxLines = 3,
                     isError = showTitleError,
@@ -185,7 +182,7 @@ private fun StoryFormContent(
                     value = synopsis,
                     onValueChange = { synopsis = it },
                     label = "Synopsis",
-                    placeholder = "Who is this story about, and what do they stand to lose?",
+                    placeholder = "Write a short synopsis",
                     singleLine = false,
                     minLines = 4,
                     maxLines = 10,
@@ -219,7 +216,7 @@ private fun StoryFormContent(
                     value = target,
                     onValueChange = { new -> target = new.filter { it.isDigit() }.take(MAX_TARGET_DIGITS) },
                     label = "Target word count (optional)",
-                    placeholder = "60000",
+                    placeholder = "Number of words",
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
                 Spacer(modifier = Modifier.height(spacing.xl))

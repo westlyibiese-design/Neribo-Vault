@@ -320,7 +320,7 @@ private fun IdeasEmptyState(
         else -> EmptyState(
             icon = Icons.Outlined.Lightbulb,
             title = "No sparks yet",
-            message = "Catch the next one before it fades. A mobile-money tool for market women in Onitsha, or a short story about a danfo driver in Lagos.",
+            message = "Catch the next spark before it fades. Your ideas will gather here.",
             modifier = Modifier.fillMaxSize(),
             actionLabel = "New idea",
             onAction = onNewIdea,

@@ -146,7 +146,7 @@ fun SecretEditorScreen(
                     value = state.label,
                     onValueChange = vm::onLabelChange,
                     label = "Label",
-                    placeholder = "Paystack live secret key",
+                    placeholder = "Name of the secret",
                     isError = state.labelError,
                     supportingText = if (state.labelError) "Give this a label" else null,
                     keyboardOptions = KeyboardOptions(
@@ -179,7 +179,7 @@ fun SecretEditorScreen(
                     value = state.value,
                     onValueChange = vm::onValueChange,
                     label = "Value",
-                    placeholder = if (state.isSecret) "sk_live_\u2026" else "adaeze@westlystores.ng",
+                    placeholder = "Type or paste the value",
                     singleLine = false,
                     maxLines = 6,
                     isError = state.valueError,

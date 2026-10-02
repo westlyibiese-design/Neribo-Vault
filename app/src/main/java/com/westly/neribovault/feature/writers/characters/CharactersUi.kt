@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -62,6 +63,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -75,6 +77,7 @@ import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
@@ -133,7 +136,7 @@ fun StoryCharactersTab(
             state.characters.isEmpty() -> EmptyState(
                 icon = Icons.Outlined.Person,
                 title = "No characters yet",
-                message = "Who walks through this story?",
+                message = "Characters you add will gather here, with their roles and traits.",
                 modifier = Modifier.fillMaxSize(),
                 actionLabel = "Add character",
                 onAction = { onOpenCharacter(NEW_ID) },
@@ -351,6 +354,7 @@ private fun CharacterEditorContent(
     var backstory by rememberSaveable { mutableStateOf(vm.currentDraft.backstory) }
     var showAddTrait by rememberSaveable { mutableStateOf(false) }
     val nameFocus = remember { FocusRequester() }
+    val descriptionFocus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
         // A no-op unless the text was restored after the process was killed.
@@ -372,6 +376,9 @@ private fun CharacterEditorContent(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.screen),
     ) {
+        Spacer(modifier = Modifier.height(spacing.md))
+        SectionHeader(text = "Name")
+        Spacer(modifier = Modifier.height(spacing.sm))
         EditorField(
             value = name,
             onValueChange = { value ->
@@ -379,11 +386,14 @@ private fun CharacterEditorContent(
                 name = cleaned
                 vm.onNameChange(cleaned)
             },
-            placeholder = "Adaeze Okonkwo",
+            placeholder = "Character name",
             textStyle = MaterialTheme.typography.titleLarge,
             modifier = Modifier.focusRequester(nameFocus),
             capitalization = KeyboardCapitalization.Words,
+            onNext = { runCatching { descriptionFocus.requestFocus() } },
         )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        NeriboDivider()
         Spacer(modifier = Modifier.height(spacing.lg))
 
         SectionHeader(text = "Role")
@@ -413,8 +423,9 @@ private fun CharacterEditorContent(
                 description = value
                 vm.onDescriptionChange(value)
             },
-            placeholder = "28, a fearless market trader from Onitsha",
+            placeholder = "Write a short description",
             textStyle = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.focusRequester(descriptionFocus),
             minHeight = 56.dp,
         )
         Spacer(modifier = Modifier.height(spacing.lg))
@@ -455,7 +466,7 @@ private fun CharacterEditorContent(
                 backstory = value
                 vm.onBackstoryChange(value)
             },
-            placeholder = "Pa Osagie, the village chief who keeps a secret. Where did it begin?",
+            placeholder = "Write the backstory",
             textStyle = MaterialTheme.typography.bodyLarge,
             minHeight = 240.dp,
         )
@@ -483,6 +494,7 @@ private fun EditorField(
     modifier: Modifier = Modifier,
     capitalization: KeyboardCapitalization = KeyboardCapitalization.Sentences,
     minHeight: Dp = 0.dp,
+    onNext: (() -> Unit)? = null,
 ) {
     val colors = MaterialTheme.colorScheme
     val style = textStyle.copy(color = colors.onBackground)
@@ -494,13 +506,17 @@ private fun EditorField(
             .heightIn(min = minHeight),
         textStyle = style,
         cursorBrush = SolidColor(colors.primary),
-        keyboardOptions = KeyboardOptions(capitalization = capitalization),
+        keyboardOptions = KeyboardOptions(
+            capitalization = capitalization,
+            imeAction = if (onNext != null) ImeAction.Next else ImeAction.Default,
+        ),
+        keyboardActions = KeyboardActions(onNext = { onNext?.invoke() }),
         decorationBox = { inner ->
             Box(modifier = Modifier.fillMaxWidth()) {
                 if (value.isEmpty()) {
                     Text(
                         text = placeholder,
-                        style = style.copy(color = colors.onSurfaceVariant),
+                        style = style.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                     )
                 }
                 inner()
@@ -574,7 +590,8 @@ private fun AddTraitDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
             NeriboTextField(
                 value = text,
                 onValueChange = { text = it.take(MAX_TRAIT_LENGTH) },
-                placeholder = "fearless, stubborn, generous\u2026",
+                label = "Trait",
+                placeholder = "Type a trait",
             )
         },
         shape = MaterialTheme.shapes.large,

@@ -483,7 +483,7 @@ internal fun QuickAddField(
                     if (text.isEmpty()) {
                         Text(
                             text = placeholder,
-                            style = textStyle.copy(color = colors.onSurfaceVariant),
+                            style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -745,7 +745,7 @@ internal fun TaskBorderlessField(
                 if (value.text.isEmpty()) {
                     Text(
                         text = placeholder,
-                        style = textStyle.copy(color = colors.onSurfaceVariant),
+                        style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                     )
                 }
                 inner()

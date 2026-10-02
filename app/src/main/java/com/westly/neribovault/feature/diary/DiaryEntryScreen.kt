@@ -71,6 +71,7 @@ import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.core.util.LifecycleSaveEffect
 import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.core.util.countWords
@@ -84,9 +85,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
-private const val TITLE_PLACEHOLDER = "Title (optional)"
-private const val BODY_PLACEHOLDER =
-    "What happened today? The rain, the light, who you spoke to..."
+private const val TITLE_PLACEHOLDER = "Title"
+private const val BODY_PLACEHOLDER = "Write here"
 
 /**
  * Full-screen diary entry: the day, an optional serif title, a roomy body, mood, tags and a slim
@@ -307,6 +307,8 @@ private fun EditorContent(
                     .heightIn(min = 48.dp)
                     .padding(vertical = spacing.md),
             )
+            SectionHeader("Title (optional)")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -333,19 +335,23 @@ private fun EditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { bodyFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
                 decorationBox = { inner ->
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (titleValue.text.isEmpty()) {
                             Text(
                                 text = TITLE_PLACEHOLDER,
-                                style = titleStyle.copy(color = colors.onSurfaceVariant),
+                                style = titleStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
                     }
                 },
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Entry")
             Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = bodyValue,
@@ -377,7 +383,7 @@ private fun EditorContent(
                         if (bodyValue.text.isEmpty()) {
                             Text(
                                 text = BODY_PLACEHOLDER,
-                                style = bodyStyle.copy(color = colors.onSurfaceVariant),
+                                style = bodyStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()

@@ -356,18 +356,19 @@ private fun EditorContent(
             }
             Spacer(modifier = Modifier.height(spacing.sm))
             EditorField(
+                label = "Title",
                 value = titleValue,
                 onValueChange = { new ->
                     val cleaned = if ('\n' in new.text) new.copy(text = new.text.replace('\n', ' ')) else new
                     titleValue = cleaned
                     vm.onTitleChange(cleaned.text)
                 },
-                placeholder = "Title of the message",
+                placeholder = "Title",
                 textStyle = titleStyle,
                 focusRequester = requesters[FIELD_TITLE - 1],
                 onFocusChange = { handleFocus(FIELD_TITLE, it) },
                 singleLine = false,
-                maxLines = 4,
+                maxLines = 3,
                 capitalization = KeyboardCapitalization.Sentences,
                 onNext = { runCatching { requesters[FIELD_SPEAKER - 1].requestFocus() } },
             )
@@ -382,7 +383,7 @@ private fun EditorContent(
                     speakerValue = new
                     vm.onSpeakerChange(new.text)
                 },
-                placeholder = "e.g. Pastor Ifeoma",
+                placeholder = "Name of the speaker",
                 textStyle = fieldStyle,
                 focusRequester = requesters[FIELD_SPEAKER - 1],
                 onFocusChange = { handleFocus(FIELD_SPEAKER, it) },
@@ -395,7 +396,7 @@ private fun EditorContent(
                     churchValue = new
                     vm.onChurchChange(new.text)
                 },
-                placeholder = "Where did you hear it?",
+                placeholder = "Church or place",
                 textStyle = fieldStyle,
                 focusRequester = requesters[FIELD_CHURCH - 1],
                 onFocusChange = { handleFocus(FIELD_CHURCH, it) },
@@ -409,7 +410,7 @@ private fun EditorContent(
                     scriptureValue = cleaned
                     vm.onScriptureChange(cleaned.text)
                 },
-                placeholder = "e.g. John 3:16-21; Romans 8:28",
+                placeholder = "Book, chapter and verse",
                 textStyle = fieldStyle,
                 focusRequester = requesters[FIELD_SCRIPTURE - 1],
                 onFocusChange = { handleFocus(FIELD_SCRIPTURE, it) },
@@ -434,7 +435,7 @@ private fun EditorContent(
                     summaryValue = new
                     vm.onSummaryChange(new.text)
                 },
-                placeholder = "The one-sentence takeaway",
+                placeholder = "Write a short summary",
                 textStyle = fieldStyle,
                 focusRequester = requesters[FIELD_SUMMARY - 1],
                 onFocusChange = { handleFocus(FIELD_SUMMARY, it) },
@@ -471,8 +472,8 @@ private fun EditorContent(
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (notesValue.text.isEmpty()) {
                             Text(
-                                text = "Write as you listen. Points, verses, the words that stayed with you...",
-                                style = fieldStyle.copy(color = colors.onSurfaceVariant),
+                                text = "Write your notes",
+                                style = fieldStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
@@ -581,7 +582,7 @@ private fun EditorField(
                     if (value.text.isEmpty()) {
                         Text(
                             text = placeholder,
-                            style = textStyle.copy(color = colors.onSurfaceVariant),
+                            style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                         )
                     }
                     inner()

@@ -89,21 +89,11 @@ import com.westly.neribovault.core.util.shareText
 import com.westly.neribovault.core.util.snippet
 import kotlinx.coroutines.launch
 
-private val DOC_TITLE_PLACEHOLDERS = listOf(
-    "README for the Ariaria market POS",
-    "Paystack webhook notes",
-    "Changelog for version 1.2",
-)
-private const val DOC_BODY_PLACEHOLDER =
-    "# Project name\n\nWhat it does, how to run it locally and how to deploy it."
+private const val DOC_TITLE_PLACEHOLDER = "Title"
+private const val DOC_BODY_PLACEHOLDER = "Write here"
 
-private val PROMPT_TITLE_PLACEHOLDERS = listOf(
-    "Fix a build error",
-    "Review a function for bugs",
-    "Explain this code to Tunde",
-)
-private const val PROMPT_BODY_PLACEHOLDER =
-    "Fix this build error in {{project}}: {{error}}\n\nReview this {{language}} function for bugs and edge cases."
+private const val PROMPT_TITLE_PLACEHOLDER = "Title"
+private const val PROMPT_BODY_PLACEHOLDER = "Write your prompt"
 
 private const val UNDO_MESSAGE = "Moved to Recently deleted"
 
@@ -417,7 +407,6 @@ private fun ProjectDocEditorContent(
     var bodyValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(vm.currentBody, TextRange(vm.currentBody.length)))
     }
-    val titlePlaceholder = remember { DOC_TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val bodyFocus = remember { FocusRequester() }
 
@@ -447,6 +436,9 @@ private fun ProjectDocEditorContent(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = spacing.screen),
         ) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             DocBorderlessField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -459,7 +451,7 @@ private fun ProjectDocEditorContent(
                     vm.onTitleChange(cleaned.text)
                 },
                 textStyle = titleStyle,
-                placeholder = titlePlaceholder,
+                placeholder = DOC_TITLE_PLACEHOLDER,
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(titleFocus),
@@ -470,9 +462,11 @@ private fun ProjectDocEditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { bodyFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
             )
-            Spacer(modifier = Modifier.height(spacing.md))
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -488,7 +482,9 @@ private fun ProjectDocEditorContent(
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(spacing.md))
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Content")
+            Spacer(modifier = Modifier.height(spacing.sm))
             DocBorderlessField(
                 value = bodyValue,
                 onValueChange = { new ->
@@ -648,7 +644,6 @@ private fun PromptEditorContent(
     var bodyValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(vm.currentBody, TextRange(vm.currentBody.length)))
     }
-    val titlePlaceholder = remember { PROMPT_TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val bodyFocus = remember { FocusRequester() }
 
@@ -683,6 +678,9 @@ private fun PromptEditorContent(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = spacing.screen),
         ) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             DocBorderlessField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -695,7 +693,7 @@ private fun PromptEditorContent(
                     vm.onTitleChange(cleaned.text)
                 },
                 textStyle = titleStyle,
-                placeholder = titlePlaceholder,
+                placeholder = PROMPT_TITLE_PLACEHOLDER,
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(titleFocus),
@@ -708,7 +706,9 @@ private fun PromptEditorContent(
                 ),
                 maxLines = 3,
             )
-            Spacer(modifier = Modifier.height(spacing.md))
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -753,6 +753,8 @@ private fun PromptEditorContent(
                     modifier = Modifier.size(24.dp),
                 )
             }
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Content")
             Spacer(modifier = Modifier.height(spacing.sm))
             DocBorderlessField(
                 value = bodyValue,

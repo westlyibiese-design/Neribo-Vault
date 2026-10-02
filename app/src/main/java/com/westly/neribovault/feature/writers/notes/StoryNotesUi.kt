@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -50,6 +51,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -62,6 +64,7 @@ import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
@@ -360,6 +363,7 @@ private fun NoteEditorContent(
     var title by rememberSaveable { mutableStateOf(vm.currentDraft.title) }
     var body by rememberSaveable { mutableStateOf(vm.currentDraft.body) }
     val titleFocus = remember { FocusRequester() }
+    val bodyFocus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
         // A no-op unless the text was restored after the process was killed.
@@ -383,6 +387,9 @@ private fun NoteEditorContent(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = spacing.screen),
     ) {
+        Spacer(modifier = Modifier.height(spacing.md))
+        SectionHeader(text = "Title")
+        Spacer(modifier = Modifier.height(spacing.sm))
         BasicTextField(
             value = title,
             onValueChange = { value ->
@@ -395,19 +402,28 @@ private fun NoteEditorContent(
                 .focusRequester(titleFocus),
             textStyle = titleStyle,
             cursorBrush = SolidColor(colors.primary),
-            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.Words,
+                imeAction = ImeAction.Next,
+            ),
+            keyboardActions = KeyboardActions(
+                onNext = { runCatching { bodyFocus.requestFocus() } },
+            ),
+            maxLines = 3,
             decorationBox = { inner ->
                 Box(modifier = Modifier.fillMaxWidth()) {
                     if (title.isEmpty()) {
                         Text(
-                            text = "Note title, e.g. Onitsha market in the 1990s",
-                            style = titleStyle.copy(color = colors.onSurfaceVariant),
+                            text = "Title",
+                            style = titleStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                         )
                     }
                     inner()
                 }
             },
         )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        NeriboDivider()
         Spacer(modifier = Modifier.height(spacing.lg))
 
         SectionHeader(text = "Category")
@@ -429,6 +445,8 @@ private fun NoteEditorContent(
         }
         Spacer(modifier = Modifier.height(spacing.lg))
 
+        SectionHeader(text = "Content")
+        Spacer(modifier = Modifier.height(spacing.sm))
         BasicTextField(
             value = body,
             onValueChange = { value ->
@@ -437,7 +455,8 @@ private fun NoteEditorContent(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 320.dp),
+                .heightIn(min = 320.dp)
+                .focusRequester(bodyFocus),
             textStyle = bodyStyle,
             cursorBrush = SolidColor(colors.primary),
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
@@ -445,8 +464,8 @@ private fun NoteEditorContent(
                 Box(modifier = Modifier.fillMaxWidth()) {
                     if (body.isEmpty()) {
                         Text(
-                            text = "Plot beats, a place to remember, research from the library in Benin City\u2026",
-                            style = bodyStyle.copy(color = colors.onSurfaceVariant),
+                            text = "Write here",
+                            style = bodyStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                         )
                     }
                     inner()

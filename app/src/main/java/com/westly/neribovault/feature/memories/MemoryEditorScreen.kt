@@ -70,6 +70,7 @@ import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.ButtonStyle
 import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
@@ -242,20 +243,23 @@ private fun EditorContent(
                 .padding(horizontal = spacing.screen),
         ) {
             EditorField(
+                label = "Title",
                 value = titleValue,
                 onValueChange = { new ->
                     val cleaned = if ('\n' in new.text) new.copy(text = new.text.replace('\n', ' ')) else new
                     titleValue = cleaned
                     vm.onTitleChange(cleaned.text)
                 },
-                placeholder = "Give this moment a name",
+                placeholder = "Title",
                 textStyle = titleStyle,
                 modifier = Modifier.focusRequester(titleFocus),
                 singleLine = false,
-                maxLines = 4,
+                maxLines = 3,
                 capitalization = KeyboardCapitalization.Sentences,
                 onNext = { runCatching { placeFocus.requestFocus() } },
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
             DateRow(
                 text = formatDateLong(state.memoryDate),
                 onClick = { showDatePicker = true },
@@ -268,7 +272,7 @@ private fun EditorContent(
                     placeValue = cleaned
                     vm.onLocationChange(cleaned.text)
                 },
-                placeholder = "e.g. Benin City",
+                placeholder = "Name of the place",
                 textStyle = fieldStyle,
                 modifier = Modifier.focusRequester(placeFocus),
                 capitalization = KeyboardCapitalization.Words,
@@ -280,10 +284,10 @@ private fun EditorContent(
                     storyValue = new
                     vm.onDescriptionChange(new.text)
                 },
-                placeholder = "Who was there, what was said, how it felt...",
+                placeholder = "Write the story",
                 textStyle = fieldStyle,
                 singleLine = false,
-                minHeight = 160.dp,
+                minHeight = 240.dp,
                 capitalization = KeyboardCapitalization.Sentences,
             )
             SectionLabel(text = "People")
@@ -291,7 +295,7 @@ private fun EditorContent(
                 items = state.people,
                 addLabel = "Add person",
                 dialogTitle = "Add person",
-                placeholder = "e.g. Adaeze",
+                placeholder = "Name of the person",
                 maxItems = MAX_PEOPLE,
                 maxLength = MAX_PERSON_LENGTH,
                 normalize = { normalizePerson(it) },
@@ -304,7 +308,7 @@ private fun EditorContent(
                 items = state.tags,
                 addLabel = "Add tag",
                 dialogTitle = "Add tag",
-                placeholder = "e.g. family",
+                placeholder = "Tag name",
                 maxItems = MAX_TAGS,
                 maxLength = MAX_TAG_LENGTH,
                 normalize = { normalizeTag(it) },
@@ -515,7 +519,7 @@ private fun EditorField(
                     if (value.text.isEmpty()) {
                         Text(
                             text = placeholder,
-                            style = textStyle.copy(color = colors.onSurfaceVariant),
+                            style = textStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                         )
                     }
                     inner()

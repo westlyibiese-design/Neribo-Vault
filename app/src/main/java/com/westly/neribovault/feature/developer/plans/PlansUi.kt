@@ -76,21 +76,11 @@ import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.core.util.shareText
 import kotlinx.coroutines.launch
 
-private val DOC_TITLE_PLACEHOLDERS = listOf(
-    "Offline sync for the Ariaria market POS",
-    "Q4 roadmap for the dispatch app",
-    "How the Benin City booking flow fits together",
-)
-private const val DOC_BODY_PLACEHOLDER =
-    "Write the plan here.\n\n- [ ] Sketch the invoice screen\n- [ ] Test on a low-end phone\n- [ ] Send to Adaeze for feedback"
+private const val DOC_TITLE_PLACEHOLDER = "Title"
+private const val DOC_BODY_PLACEHOLDER = "Write here"
 
-private val FOLDER_TITLE_PLACEHOLDERS = listOf(
-    "Efe's boutique storefront",
-    "Lagos dispatch API",
-    "Church bulletin website",
-)
-private const val OUTLINE_PLACEHOLDER =
-    "src/\n  components/\n    Navbar.tsx\n  App.tsx\npackage.json"
+private const val FOLDER_TITLE_PLACEHOLDER = "Title"
+private const val OUTLINE_PLACEHOLDER = "Type the folder outline"
 
 private const val CHECKLIST_VIEW_ON = "Edit view"
 private const val CHECKLIST_VIEW_OFF = "Checklist view"
@@ -409,7 +399,6 @@ private fun PlanningDocEditorContent(
     var bodyValue by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(vm.currentBody, TextRange(vm.currentBody.length)))
     }
-    val titlePlaceholder = remember { DOC_TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val bodyFocus = remember { FocusRequester() }
 
@@ -456,6 +445,9 @@ private fun PlanningDocEditorContent(
                         .verticalScroll(rememberScrollState())
                         .padding(horizontal = spacing.screen),
                 ) {
+                    Spacer(modifier = Modifier.height(spacing.md))
+                    SectionHeader("Title")
+                    Spacer(modifier = Modifier.height(spacing.sm))
                     PlanBorderlessField(
                         value = titleValue,
                         onValueChange = { new ->
@@ -468,7 +460,7 @@ private fun PlanningDocEditorContent(
                             vm.onTitleChange(cleaned.text)
                         },
                         textStyle = titleStyle,
-                        placeholder = titlePlaceholder,
+                        placeholder = DOC_TITLE_PLACEHOLDER,
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(titleFocus),
@@ -479,9 +471,11 @@ private fun PlanningDocEditorContent(
                         keyboardActions = KeyboardActions(
                             onNext = { runCatching { bodyFocus.requestFocus() } },
                         ),
-                        maxLines = 4,
+                        maxLines = 3,
                     )
-                    Spacer(modifier = Modifier.height(spacing.md))
+                    Spacer(modifier = Modifier.height(spacing.sm))
+                    NeriboDivider()
+                    Spacer(modifier = Modifier.height(spacing.lg))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -497,7 +491,9 @@ private fun PlanningDocEditorContent(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(spacing.md))
+                    Spacer(modifier = Modifier.height(spacing.lg))
+                    SectionHeader("Content")
+                    Spacer(modifier = Modifier.height(spacing.sm))
                     PlanBorderlessField(
                         value = bodyValue,
                         onValueChange = { new ->
@@ -695,7 +691,6 @@ private fun FolderPlanEditorContent(
     }
     var showPreview by rememberSaveable { mutableStateOf(false) }
 
-    val titlePlaceholder = remember { FOLDER_TITLE_PLACEHOLDERS.random() }
     val titleFocus = remember { FocusRequester() }
     val outlineFocus = remember { FocusRequester() }
 
@@ -765,6 +760,8 @@ private fun FolderPlanEditorContent(
                         style = ButtonStyle.Text,
                     )
                 }
+                SectionHeader("Outline")
+                Spacer(modifier = Modifier.height(spacing.sm))
                 PlanBorderlessField(
                     value = outlineValue,
                     onValueChange = applyOutline,
@@ -772,7 +769,7 @@ private fun FolderPlanEditorContent(
                     placeholder = OUTLINE_PLACEHOLDER,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 200.dp)
+                        .heightIn(min = 240.dp)
                         .focusRequester(outlineFocus),
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.None,
@@ -825,6 +822,9 @@ private fun FolderPlanEditorContent(
             .imePadding(),
     ) {
         Column(modifier = Modifier.padding(horizontal = spacing.screen)) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             PlanBorderlessField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -837,7 +837,7 @@ private fun FolderPlanEditorContent(
                     vm.onTitleChange(cleaned.text)
                 },
                 textStyle = titleStyle,
-                placeholder = titlePlaceholder,
+                placeholder = FOLDER_TITLE_PLACEHOLDER,
                 modifier = Modifier
                     .fillMaxWidth()
                     .focusRequester(titleFocus),
@@ -850,6 +850,8 @@ private fun FolderPlanEditorContent(
                 ),
                 maxLines = 3,
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
             Spacer(modifier = Modifier.height(spacing.sm))
         }
         BoxWithConstraints(

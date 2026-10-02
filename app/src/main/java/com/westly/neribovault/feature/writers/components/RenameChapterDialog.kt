@@ -62,7 +62,8 @@ fun RenameChapterDialog(
                 value = title,
                 onValueChange = { new -> title = new.replace("\n", " ").take(MAX_CHAPTER_TITLE) },
                 modifier = Modifier.focusRequester(focus),
-                placeholder = "The Night the Generator Died",
+                label = "Title",
+                placeholder = "Chapter title",
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
         },

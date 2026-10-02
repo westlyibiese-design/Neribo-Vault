@@ -73,6 +73,7 @@ import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.core.util.LifecycleSaveEffect
 import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.core.util.countWords
@@ -84,8 +85,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 private const val TITLE_PLACEHOLDER = "Title"
-private const val BODY_PLACEHOLDER =
-    "Start writing. A verse, a to-do list, the plan for Saturday's owambe..."
+private const val BODY_PLACEHOLDER = "Write here"
 
 /**
  * Full-screen note editor: borderless serif title, body, tags and a slim footer.
@@ -319,6 +319,9 @@ private fun EditorContent(
                 .verticalScroll(scrollState)
                 .padding(horizontal = spacing.screen),
         ) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -345,19 +348,23 @@ private fun EditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { bodyFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
                 decorationBox = { inner ->
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (titleValue.text.isEmpty()) {
                             Text(
                                 text = TITLE_PLACEHOLDER,
-                                style = titleStyle.copy(color = colors.onSurfaceVariant),
+                                style = titleStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
                     }
                 },
             )
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Content")
             Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = bodyValue,
@@ -370,7 +377,7 @@ private fun EditorContent(
                     // The field itself is at least this tall, so tapping the empty space below
                     // the text puts the cursor at the end, and taps on the text place the cursor
                     // exactly where you touched.
-                    .heightIn(min = 220.dp)
+                    .heightIn(min = 240.dp)
                     .onGloballyPositioned { bodyTopInContent = it.positionInParent().y.toInt() }
                     .focusRequester(bodyFocus)
                     .onFocusChanged { focus ->
@@ -389,7 +396,7 @@ private fun EditorContent(
                         if (bodyValue.text.isEmpty()) {
                             Text(
                                 text = BODY_PLACEHOLDER,
-                                style = bodyStyle.copy(color = colors.onSurfaceVariant),
+                                style = bodyStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()

@@ -57,9 +57,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.MenuAction
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.core.util.LifecycleSaveEffect
 import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.core.util.countWords
@@ -69,9 +71,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val TITLE_PLACEHOLDER = "Chapter title"
-private const val BODY_PLACEHOLDER =
-    "Begin the scene. Harmattan dust, a danfo horn, a letter that changes everything..."
+private const val TITLE_PLACEHOLDER = "Title"
+private const val BODY_PLACEHOLDER = "Write here"
 
 /** How long typing must pause before the live word count is recalculated. */
 private const val WORD_COUNT_DELAY_MS = 150L
@@ -290,6 +291,9 @@ private fun ChapterEditorContent(
                 .verticalScroll(scrollState)
                 .padding(horizontal = spacing.screen),
         ) {
+            Spacer(modifier = Modifier.height(spacing.md))
+            SectionHeader("Title")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = titleValue,
                 onValueChange = { new ->
@@ -309,20 +313,24 @@ private fun ChapterEditorContent(
                 keyboardActions = KeyboardActions(
                     onNext = { runCatching { bodyFocus.requestFocus() } },
                 ),
-                maxLines = 4,
+                maxLines = 3,
                 decorationBox = { inner ->
                     Box(modifier = Modifier.fillMaxWidth()) {
                         if (titleValue.text.isEmpty()) {
                             Text(
                                 text = TITLE_PLACEHOLDER,
-                                style = titleStyle.copy(color = colors.onSurfaceVariant),
+                                style = titleStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
                     }
                 },
             )
-            Spacer(modifier = Modifier.height(spacing.md))
+            Spacer(modifier = Modifier.height(spacing.sm))
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
+            SectionHeader("Content")
+            Spacer(modifier = Modifier.height(spacing.sm))
             BasicTextField(
                 value = bodyValue,
                 onValueChange = { new ->
@@ -347,7 +355,7 @@ private fun ChapterEditorContent(
                         if (bodyValue.text.isEmpty()) {
                             Text(
                                 text = BODY_PLACEHOLDER,
-                                style = bodyStyle.copy(color = colors.onSurfaceVariant),
+                                style = bodyStyle.copy(color = colors.onSurfaceVariant.copy(alpha = 0.55f)),
                             )
                         }
                         inner()
