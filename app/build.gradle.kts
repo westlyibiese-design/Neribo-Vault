@@ -4,6 +4,10 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+// Release signing comes from environment variables so no secret ever lives in the repository.
+// When RELEASE_KEYSTORE_PATH is not set (ordinary debug CI), the release build type stays unsigned.
+val releaseKeystorePath: String? = System.getenv("RELEASE_KEYSTORE_PATH")?.takeIf { it.isNotBlank() }
+
 android {
     namespace = "com.westly.neribovault"
     compileSdk = 34
@@ -12,8 +16,10 @@ android {
         applicationId = "com.westly.neribovault"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // The release workflow sets VERSION_CODE and VERSION_NAME. Without them the values
+        // are the same as before, so ordinary debug builds keep installing over each other.
+        versionCode = System.getenv("VERSION_CODE")?.trim()?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME")?.trim()?.takeIf { it.isNotEmpty() } ?: "0.1.0"
 
         // The shared Neribo cloud project. Read from the SUPABASE_URL and SUPABASE_ANON_KEY
         // environment variables (GitHub Actions secrets) or Gradle properties, never from source.
@@ -37,6 +43,15 @@ android {
             keyAlias = "neribodebug"
             keyPassword = "android"
         }
+        val releaseKeystore = releaseKeystorePath
+        if (releaseKeystore != null) {
+            create("neriboRelease") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -46,7 +61,15 @@ android {
             }
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            if (releaseKeystorePath != null) {
+                signingConfig = signingConfigs.getByName("neriboRelease")
+            }
         }
     }
 
@@ -84,6 +107,7 @@ dependencies {
 
     // AndroidX
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.fragment:fragment-ktx:1.7.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.3")

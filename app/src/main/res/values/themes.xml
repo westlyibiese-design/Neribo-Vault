@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+        Launch theme (applied to the app in the manifest). The compat splash screen shows
+        this on every Android version from 7.0 up, then switches to Theme.NeriboVault.
+
+        The background is the same fixed charcoal in light and dark on purpose: a cold start
+        continues straight into the animated logo, which is drawn on #141414 whatever the
+        theme. A paper-coloured splash in light mode would flash light, then dark. The icon
+        is transparent because the logo animation draws the logo itself; showing a static
+        copy here would make it vanish and redraw.
+    -->
+    <style name="Theme.NeriboVault.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/neribo_splash_bg</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_transparent_icon</item>
+        <item name="postSplashScreenTheme">@style/Theme.NeriboVault</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+
     <style name="Theme.NeriboVault" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/neribo_splash_bg</item>
         <item name="android:statusBarColor">@android:color/transparent</item>

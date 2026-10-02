@@ -281,7 +281,7 @@ internal fun PromptRow(
                     if (prompt.isFavorite) {
                         Icon(
                             imageVector = Icons.Filled.Star,
-                            contentDescription = "Favorite",
+                            contentDescription = "Favourite",
                             tint = colors.primary,
                             modifier = Modifier
                                 .padding(end = spacing.xs)

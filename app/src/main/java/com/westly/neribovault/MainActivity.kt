@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
@@ -35,6 +36,8 @@ class MainActivity : FragmentActivity() {
     private var isFreshStart: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Must run before super.onCreate. Shows the launch theme, then switches to the app theme.
+        installSplashScreen()
         super.onCreate(savedInstanceState)
         isFreshStart = savedInstanceState == null
         if (isFreshStart) {

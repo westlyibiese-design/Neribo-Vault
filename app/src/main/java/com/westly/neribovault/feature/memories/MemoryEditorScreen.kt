@@ -444,11 +444,11 @@ private fun PhotoThumbnail(path: String, position: Int, onRemove: () -> Unit) {
                 .fillMaxSize()
                 .clip(MaterialTheme.shapes.small),
         )
-        // A 40dp touch area around a small round control in the corner.
+        // A 48dp touch area around a small round control in the corner.
         Box(
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .size(40.dp)
+                .size(48.dp)
                 .clickable(onClickLabel = "Remove photo $position", role = Role.Button, onClick = onRemove),
             contentAlignment = Alignment.Center,
         ) {

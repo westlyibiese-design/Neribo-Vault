@@ -246,7 +246,7 @@ fun ProjectDocsTab(
                                     icon = Icons.Outlined.Edit,
                                 ),
                                 MenuAction(
-                                    label = if (prompt.isFavorite) "Remove favorite" else "Favorite",
+                                    label = if (prompt.isFavorite) "Remove favourite" else "Favourite",
                                     onClick = { vm.toggleFavorite(prompt.id) },
                                     icon = Icons.Outlined.Star,
                                 ),

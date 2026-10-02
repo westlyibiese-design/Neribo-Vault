@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Monochrome layer for Android 13+ themed icons: the logo silhouette (ring, two arrows,
+    coin with keyhole) in one colour. The system recolours it, so only the shape matters.
+    Scaled to sit inside the 66dp safe zone of the 108dp adaptive canvas.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="0.0873"
+        android:scaleY="0.0873"
+        android:translateX="4.46"
+        android:translateY="14.97">
+        <!-- Ring: 238 degree arc, round caps -->
+        <path
+            android:pathData="M638.18,269.88 A202.5,202.5 0 1 0 638.18,624.12"
+            android:strokeColor="#000000"
+            android:strokeWidth="67"
+            android:strokeLineCap="round" />
+        <!-- Two side arrows -->
+        <path
+            android:fillColor="#000000"
+            android:pathData="M655,296 L655,396 L822,346 Z M655,497 L655,598 L822,548 Z" />
+        <!-- Coin with a keyhole cut out -->
+        <path
+            android:fillColor="#000000"
+            android:fillType="evenOdd"
+            android:pathData="M681,447 A75,75 0 1 1 831,447 A75,75 0 1 1 681,447 Z M744.5,446.1 A16,16 0 1 1 767.5,446.1 L773,478 L739,478 Z" />
+    </group>
+</vector>

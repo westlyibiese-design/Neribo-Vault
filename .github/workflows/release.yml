@@ -1,0 +1,87 @@
+name: Build Neribo Vault release
+
+# Builds the signed release APK and AAB. Run by hand from the Actions tab.
+# Needs four repository secrets (see docs/RELEASE.md):
+#   RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: "Version name shown to people, for example 1.0.0"
+        required: true
+        type: string
+      version_code:
+        description: "Version code (whole number, must go up with every upload). Leave empty to use the run number."
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        env:
+          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KS_KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in KS_B64 KS_PASS KS_ALIAS KS_KEY_PASS; do
+            if [ -z "${!name}" ]; then
+              case "$name" in
+                KS_B64) secret=RELEASE_KEYSTORE_BASE64 ;;
+                KS_PASS) secret=RELEASE_KEYSTORE_PASSWORD ;;
+                KS_ALIAS) secret=RELEASE_KEY_ALIAS ;;
+                KS_KEY_PASS) secret=RELEASE_KEY_PASSWORD ;;
+              esac
+              echo "Missing repository secret: $secret. Add it in Settings > Secrets and variables > Actions, then run this workflow again."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Decode release keystore
+        env:
+          KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/neribo-release.keystore"
+          if [ ! -s "$RUNNER_TEMP/neribo-release.keystore" ]; then
+            echo "The keystore secret could not be decoded. Create RELEASE_KEYSTORE_BASE64 again with: base64 -w0 neribo-release.keystore"
+            exit 1
+          fi
+
+      - name: Build release APK and AAB
+        env:
+          RELEASE_KEYSTORE_PATH: ${{ runner.temp }}/neribo-release.keystore
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code || github.run_number }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          GOOGLE_WEB_CLIENT_ID: ${{ secrets.GOOGLE_WEB_CLIENT_ID }}
+        run: gradle assembleRelease bundleRelease --stacktrace
+
+      - name: Delete decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/neribo-release.keystore"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeriboVault-release
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/mapping/release/mapping.txt
