@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.ChevronRight
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -53,6 +54,7 @@ fun NavGraphBuilder.settingsGraph(navController: NavHostController) {
         SettingsScreen(
             onBack = { navController.popBackStack() },
             onOpenSecurity = { navController.navigate(Routes.SECURITY) },
+            onOpenCloud = { navController.navigate(Routes.CLOUD) },
             onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
         )
     }
@@ -62,6 +64,7 @@ fun NavGraphBuilder.settingsGraph(navController: NavHostController) {
 private fun SettingsScreen(
     onBack: () -> Unit,
     onOpenSecurity: () -> Unit,
+    onOpenCloud: () -> Unit,
     onOpenDiagnostics: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
@@ -84,6 +87,13 @@ private fun SettingsScreen(
                     title = "Security",
                     subtitle = "App lock and vault PINs",
                     onClick = onOpenSecurity,
+                )
+                NeriboDivider(modifier = Modifier.padding(start = 68.dp))
+                SettingsRow(
+                    icon = Icons.Outlined.Cloud,
+                    title = "Cloud sync",
+                    subtitle = "Back up and sync with your Supabase project",
+                    onClick = onOpenCloud,
                 )
                 if (BuildConfig.DEBUG) {
                     NeriboDivider(modifier = Modifier.padding(start = 68.dp))

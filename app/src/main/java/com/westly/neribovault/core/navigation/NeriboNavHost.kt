@@ -13,6 +13,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.westly.neribovault.core.ui.components.PlaceholderScreen
 import com.westly.neribovault.feature.church.churchGraph
+import com.westly.neribovault.feature.cloud.cloudGraph
 import com.westly.neribovault.feature.developer.developerGraph
 import com.westly.neribovault.feature.diagnostics.diagnosticsGraph
 import com.westly.neribovault.feature.diary.diaryGraph
@@ -93,5 +94,6 @@ fun NeriboNavHost() {
         settingsGraph(navController)
         securityGraph(navController)
         diagnosticsGraph(navController)
+        cloudGraph(navController)
     }
 }

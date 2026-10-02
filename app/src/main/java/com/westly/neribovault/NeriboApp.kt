@@ -3,6 +3,7 @@ package com.westly.neribovault
 import android.app.Application
 import android.util.Log
 import com.westly.neribovault.core.di.AppContainer
+import com.westly.neribovault.data.cloud.SyncScheduler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,6 +19,7 @@ class NeriboApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        SyncScheduler.start(this)
         appScope.launch {
             try {
                 container.purgeExpiredTrash(System.currentTimeMillis() - TRASH_RETENTION_MILLIS)

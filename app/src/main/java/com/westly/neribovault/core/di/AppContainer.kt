@@ -1,6 +1,8 @@
 package com.westly.neribovault.core.di
 
 import android.content.Context
+import com.westly.neribovault.data.cloud.CloudAuth
+import com.westly.neribovault.data.cloud.SyncEngine
 import com.westly.neribovault.data.local.NeriboDatabase
 import com.westly.neribovault.data.repository.AuditRepository
 import com.westly.neribovault.data.repository.BugsRepository
@@ -52,6 +54,9 @@ class AppContainer(context: Context) {
     val promptsRepository: PromptsRepository = PromptsRepository(db.promptDao())
     val projectDocumentsRepository: ProjectDocumentsRepository = ProjectDocumentsRepository(db.projectDocumentDao())
     val auditRepository: AuditRepository = AuditRepository(db.auditLogDao())
+
+    val cloudAuth: CloudAuth = CloudAuth(context.applicationContext, db)
+    val syncEngine: SyncEngine = SyncEngine(context.applicationContext, db, cloudAuth)
 
     /** Permanently removes everything that has been in the trash since before [cutoffMillis]. */
     suspend fun purgeExpiredTrash(cutoffMillis: Long) {
