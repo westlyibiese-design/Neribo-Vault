@@ -83,6 +83,7 @@ fun CloudScreen(onBack: () -> Unit) {
                         onUrlChange = vm::onUrlChange,
                         onKeyChange = vm::onKeyChange,
                         onSave = vm::saveProject,
+                        onUseShared = vm::useSharedProject,
                         onCopySql = {
                             context.copyToClipboard("Neribo Vault SQL script", SQL_SCRIPT)
                             scope.launch { snackbar.showSnackbar("Script copied") }
@@ -96,6 +97,8 @@ fun CloudScreen(onBack: () -> Unit) {
                         onSignIn = vm::signIn,
                         onCreateAccount = vm::createAccount,
                         onChangeProject = vm::changeProject,
+                        onUseShared = vm::useSharedProject,
+                        onUseOwn = vm::useOwnProject,
                     )
                     else -> SignedInSection(
                         state = state,
@@ -126,6 +129,7 @@ private fun NotConfiguredSection(
     onUrlChange: (String) -> Unit,
     onKeyChange: (String) -> Unit,
     onSave: () -> Unit,
+    onUseShared: () -> Unit,
     onCopySql: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
@@ -185,6 +189,16 @@ private fun NotConfiguredSection(
     )
     Spacer(modifier = Modifier.height(spacing.md))
     SmallNote("The URL and key are stored encrypted on this phone. They are never part of the app's code.")
+    if (state.sharedAvailable) {
+        Spacer(modifier = Modifier.height(spacing.md))
+        NeriboButton(
+            text = "Use the Neribo cloud instead",
+            onClick = onUseShared,
+            enabled = !state.working,
+            style = ButtonStyle.Text,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 @Composable
@@ -196,12 +210,26 @@ private fun SignedOutSection(
     onSignIn: () -> Unit,
     onCreateAccount: () -> Unit,
     onChangeProject: () -> Unit,
+    onUseShared: () -> Unit,
+    onUseOwn: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
-    BodyText(
-        "Your Supabase project is connected. Sign in, or create an account, to start syncing. " +
-            "Your vaults stay on this phone until you do.",
-    )
+    if (state.usingOwnProject) {
+        BodyText(
+            "Your own Supabase project is connected. Sign in, or create an account, to start " +
+                "syncing. Your vaults stay on this phone until you do.",
+        )
+    } else {
+        BodyText(
+            "Sign in, or create an account, to back up and sync your vaults. " +
+                "Your vaults stay on this phone until you do.",
+        )
+        Spacer(modifier = Modifier.height(spacing.sm))
+        SmallNote(
+            "Synced data is stored in the Neribo cloud and is not end-to-end encrypted. " +
+                "If you would rather keep it in a project only you control, use your own Supabase project below.",
+        )
+    }
     Spacer(modifier = Modifier.height(spacing.xl))
     NeriboTextField(
         value = state.emailInput,
@@ -248,16 +276,35 @@ private fun SignedOutSection(
         modifier = Modifier.fillMaxWidth(),
     )
     Spacer(modifier = Modifier.height(spacing.sm))
-    NeriboButton(
-        text = "Change project",
-        onClick = onChangeProject,
-        enabled = !state.working,
-        style = ButtonStyle.Text,
-        modifier = Modifier.fillMaxWidth(),
-    )
+    if (state.usingOwnProject) {
+        NeriboButton(
+            text = "Change project",
+            onClick = onChangeProject,
+            enabled = !state.working,
+            style = ButtonStyle.Text,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (state.sharedAvailable) {
+            NeriboButton(
+                text = "Use the Neribo cloud instead",
+                onClick = onUseShared,
+                enabled = !state.working,
+                style = ButtonStyle.Text,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    } else {
+        NeriboButton(
+            text = "Use my own Supabase project instead",
+            onClick = onUseOwn,
+            enabled = !state.working,
+            style = ButtonStyle.Text,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
     Spacer(modifier = Modifier.height(spacing.md))
     SmallNote(
-        "If your project asks for email confirmation, open the link in your inbox after creating " +
+        "If an email confirmation is required, open the link in your inbox after creating " +
             "the account, then come back and sign in.",
     )
 }
@@ -277,6 +324,12 @@ private fun SignedInSection(
                 text = state.email,
                 style = MaterialTheme.typography.titleMedium,
                 color = colors.onSurface,
+            )
+            Spacer(modifier = Modifier.height(spacing.xs))
+            Text(
+                text = if (state.usingOwnProject) "Your own Supabase project" else "Neribo cloud",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.height(spacing.xs))
             Text(
@@ -303,7 +356,7 @@ private fun SignedInSection(
             if (index > 0) NeriboDivider()
             VaultSwitchRow(
                 label = vault.label,
-                note = vaultNote(vault.id),
+                note = vaultNote(vault.id, state.usingOwnProject),
                 checked = state.vaultEnabled[vault.id] ?: vault.defaultEnabled,
                 onCheckedChange = { enabled -> onVaultToggle(vault.id, enabled) },
             )
@@ -332,10 +385,14 @@ private fun SignedInSection(
                     "on every device.",
             )
             BulletLine("Signing out keeps all your data on this phone.")
-            BulletLine(
-                "To remove your cloud copy, open your Supabase dashboard, then Table editor, then " +
-                    "vault_items, and delete the rows. You can also delete the whole project there.",
-            )
+            if (state.usingOwnProject) {
+                BulletLine(
+                    "To remove your cloud copy, open your Supabase dashboard, then Table editor, then " +
+                        "vault_items, and delete the rows. You can also delete the whole project there.",
+                )
+            } else {
+                BulletLine("Deleting your cloud copy from inside the app is not available yet.")
+            }
         }
     }
     Spacer(modifier = Modifier.height(spacing.xl))
@@ -348,8 +405,12 @@ private fun SignedInSection(
 }
 
 /** The note shown under a vault switch, if it has one. */
-private fun vaultNote(vaultId: String): String? = when (vaultId) {
-    "diary" -> "Cloud data is stored in your own Supabase project and is not end-to-end encrypted."
+private fun vaultNote(vaultId: String, usingOwnProject: Boolean): String? = when (vaultId) {
+    "diary" -> if (usingOwnProject) {
+        "Cloud data is stored in your own Supabase project and is not end-to-end encrypted."
+    } else {
+        "Cloud data is stored in the Neribo cloud and is not end-to-end encrypted."
+    }
     "developer" -> "Projects, bugs, tasks, plans, prompts and documents. Secrets never sync."
     else -> null
 }

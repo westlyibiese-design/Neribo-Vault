@@ -23,6 +23,8 @@ data class CloudUiState(
     val hasProject: Boolean = false,
     val signedIn: Boolean = false,
     val email: String = "",
+    val usingOwnProject: Boolean = false,
+    val sharedAvailable: Boolean = false,
     val vaultEnabled: Map<String, Boolean> = emptyMap(),
     val statusText: String = "",
     val statusIsError: Boolean = false,
@@ -77,6 +79,8 @@ class CloudViewModel(
             hasProject = config.hasProject,
             signedIn = config.signedIn,
             email = config.email,
+            usingOwnProject = config.usingOwnProject,
+            sharedAvailable = config.sharedAvailable,
             vaultEnabled = config.vaultEnabled,
             statusText = status.first,
             statusIsError = status.second,
@@ -141,6 +145,26 @@ class CloudViewModel(
         if (form.value.working) return
         viewModelScope.launch {
             auth.changeProject()
+            form.update { CloudForm() }
+            engine.clearStatus()
+        }
+    }
+
+    /** Switches to the shared Neribo cloud. Only offered while signed out. */
+    fun useSharedProject() {
+        if (form.value.working) return
+        viewModelScope.launch {
+            auth.useSharedProject()
+            form.update { CloudForm() }
+            engine.clearStatus()
+        }
+    }
+
+    /** Switches to the owner's own Supabase project. Only offered while signed out. */
+    fun useOwnProject() {
+        if (form.value.working) return
+        viewModelScope.launch {
+            auth.useOwnProject()
             form.update { CloudForm() }
             engine.clearStatus()
         }

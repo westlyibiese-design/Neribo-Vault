@@ -92,17 +92,41 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
     }
 
     /**
-     * Forgets the project and starts the cursors from zero for the next one. Only valid while
-     * signed out. Local vault data is untouched.
+     * Forgets the owner's own project and starts the cursors from zero for the next one. Only
+     * valid while signed out. Local vault data is untouched.
      */
     suspend fun changeProject() {
         withContext(Dispatchers.IO) {
-            config.clearSession()
+            if (config.isSignedIn()) return@withContext
             config.clearProject()
-            resetSyncProgress()
-            config.cursorUserId = null
-            SyncScheduler.cancel(appContext)
+            resetForBackendChange()
         }
+    }
+
+    /** Switches to the shared Neribo cloud. Only valid while signed out. Vault data is untouched. */
+    suspend fun useSharedProject() {
+        withContext(Dispatchers.IO) {
+            if (config.isSignedIn() || !config.sharedAvailable) return@withContext
+            config.setUseOwnProject(false)
+            resetForBackendChange()
+        }
+    }
+
+    /** Switches to the owner's own Supabase project. Only valid while signed out. */
+    suspend fun useOwnProject() {
+        withContext(Dispatchers.IO) {
+            if (config.isSignedIn()) return@withContext
+            config.setUseOwnProject(true)
+            resetForBackendChange()
+        }
+    }
+
+    /** Cursors and pending delete markers describe one cloud copy, so a new backend starts clean. */
+    private fun resetForBackendChange() {
+        config.clearSession()
+        resetSyncProgress()
+        config.cursorUserId = null
+        SyncScheduler.cancel(appContext)
     }
 
     // ---- Account -------------------------------------------------------------------------

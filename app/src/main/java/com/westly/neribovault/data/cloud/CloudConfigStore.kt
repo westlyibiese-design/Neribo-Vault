@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.westly.neribovault.BuildConfig
 import java.io.IOException
 import java.security.GeneralSecurityException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,11 +28,20 @@ data class CloudConfigState(
     val email: String = "",
     val vaultEnabled: Map<String, Boolean> = emptyMap(),
     val lastSyncAt: Long = 0L,
+    /** True when syncing through the owner's own Supabase project instead of the Neribo cloud. */
+    val usingOwnProject: Boolean = false,
+    /** True when this build carries the shared Neribo cloud project. */
+    val sharedAvailable: Boolean = false,
 )
 
 /**
  * Keeps the Supabase URL and anon key, the session tokens, the account email and id, the
  * per-vault switches and the sync cursors in EncryptedSharedPreferences (AES256_GCM).
+ *
+ * There are two backends. The shared Neribo cloud project comes from the build (GitHub secrets
+ * baked into BuildConfig). Alternatively the owner can point the app at their own Supabase
+ * project; that URL and key are typed in and stored here. [projectUrl] and [anonKey] always
+ * return the ones for the backend currently in use.
  *
  * Every function that reads or writes preferences is blocking: call it off the main thread.
  * Nothing stored here is ever logged.
@@ -42,6 +52,15 @@ class CloudConfigStore(context: Context) {
 
     @Volatile
     private var cachedPrefs: SharedPreferences? = null
+
+    /** The shared Neribo cloud project from the build, or null in builds without it. */
+    private val sharedUrl: String? =
+        BuildConfig.SUPABASE_URL.trim().trimEnd('/').takeIf { it.startsWith("https://") }
+
+    private val sharedKey: String? = BuildConfig.SUPABASE_ANON_KEY.trim().takeIf { it.isNotEmpty() }
+
+    /** True when this build carries the shared Neribo cloud project. */
+    val sharedAvailable: Boolean get() = sharedUrl != null && sharedKey != null
 
     private val _state = MutableStateFlow(CloudConfigState())
 
@@ -100,28 +119,58 @@ class CloudConfigStore(context: Context) {
             !p.getString(KEY_USER_ID, null).isNullOrEmpty()
         return CloudConfigState(
             loaded = true,
-            hasProject = !p.getString(KEY_URL, null).isNullOrEmpty() &&
-                !p.getString(KEY_ANON_KEY, null).isNullOrEmpty(),
+            hasProject = projectUrl != null && anonKey != null,
             signedIn = signedIn,
             email = if (signedIn) p.getString(KEY_EMAIL, "").orEmpty() else "",
             vaultEnabled = SyncTables.VAULTS.associate { it.id to vaultEnabled(it.id) },
             lastSyncAt = p.getLong(KEY_LAST_SYNC_AT, 0L),
+            usingOwnProject = usingOwnProject(),
+            sharedAvailable = sharedAvailable,
         )
     }
 
     // ---- Project -------------------------------------------------------------------------
 
-    val projectUrl: String? get() = prefs().getString(KEY_URL, null)?.takeIf { it.isNotEmpty() }
+    private val ownUrl: String? get() = prefs().getString(KEY_URL, null)?.takeIf { it.isNotEmpty() }
 
-    val anonKey: String? get() = prefs().getString(KEY_ANON_KEY, null)?.takeIf { it.isNotEmpty() }
+    private val ownKey: String? get() = prefs().getString(KEY_ANON_KEY, null)?.takeIf { it.isNotEmpty() }
 
+    /**
+     * Which backend is in use. Unless the owner chose one explicitly, a project they saved earlier
+     * wins, otherwise the shared Neribo cloud is used. Builds without the shared project always
+     * use the owner's own project.
+     */
+    fun usingOwnProject(): Boolean = when (prefs().getString(KEY_MODE, null)) {
+        MODE_OWN -> true
+        MODE_SHARED -> !sharedAvailable
+        else -> !sharedAvailable || ownUrl != null
+    }
+
+    /** The project URL of the backend in use, without a trailing slash. */
+    val projectUrl: String? get() = if (usingOwnProject()) ownUrl else sharedUrl
+
+    /** The anon (public) key of the backend in use. */
+    val anonKey: String? get() = if (usingOwnProject()) ownKey else sharedKey
+
+    /** Saves the owner's own project and switches to it. */
     fun saveProject(url: String, anonKey: String) {
-        prefs().edit().putString(KEY_URL, url).putString(KEY_ANON_KEY, anonKey).commit()
+        prefs().edit()
+            .putString(KEY_URL, url)
+            .putString(KEY_ANON_KEY, anonKey)
+            .putString(KEY_MODE, MODE_OWN)
+            .commit()
         refresh()
     }
 
+    /** Forgets the owner's own project URL and key. */
     fun clearProject() {
         prefs().edit().remove(KEY_URL).remove(KEY_ANON_KEY).commit()
+        refresh()
+    }
+
+    /** Chooses the backend: the owner's own project, or the shared Neribo cloud. */
+    fun setUseOwnProject(own: Boolean) {
+        prefs().edit().putString(KEY_MODE, if (own) MODE_OWN else MODE_SHARED).commit()
         refresh()
     }
 
@@ -236,6 +285,9 @@ class CloudConfigStore(context: Context) {
     private companion object {
         const val PREFS_NAME = "neribo_cloud_prefs"
         const val MASTER_KEY_ALIAS = "neribo_cloud_master_key"
+        const val KEY_MODE = "backend_mode"
+        const val MODE_OWN = "own"
+        const val MODE_SHARED = "shared"
         const val KEY_URL = "project_url"
         const val KEY_ANON_KEY = "anon_key"
         const val KEY_ACCESS_TOKEN = "access_token"

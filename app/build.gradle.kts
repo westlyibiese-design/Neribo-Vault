@@ -14,6 +14,16 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+
+        // The shared Neribo cloud project. Read from the SUPABASE_URL and SUPABASE_ANON_KEY
+        // environment variables (GitHub Actions secrets) or Gradle properties, never from source.
+        // Both are empty in builds without them, and the app then only offers "your own project".
+        fun cleanBuildValue(name: String): String {
+            val raw = System.getenv(name) ?: (project.findProperty(name) as? String) ?: ""
+            return raw.trim().replace("\\", "").replace("\"", "")
+        }
+        buildConfigField("String", "SUPABASE_URL", "\"${cleanBuildValue("SUPABASE_URL")}\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${cleanBuildValue("SUPABASE_ANON_KEY")}\"")
     }
 
     // Stable debug key so every build installs over the previous one and keeps its data.
