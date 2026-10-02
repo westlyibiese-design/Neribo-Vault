@@ -13,6 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
@@ -30,7 +31,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
+import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.core.ui.components.MenuAction
+import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboIconButton
@@ -43,11 +46,14 @@ import com.westly.neribovault.core.util.formatDateLong
 import com.westly.neribovault.data.local.entity.PersonalDocumentEntity
 import com.westly.neribovault.feature.documents.components.AttachmentThumbnail
 import com.westly.neribovault.feature.documents.components.ExpiryBanner
+import com.westly.neribovault.feature.documents.components.rememberFileExists
+import java.io.File
 import kotlinx.coroutines.launch
 
 /**
  * One document, read-only: the serif title, a status banner in the right tone, a clean list of
- * its details and the attachment as a thumbnail card that opens the viewer.
+ * its details and the attachment as a thumbnail card, with a **View file** button whenever a file
+ * is saved for it.
  */
 @Composable
 fun DocumentDetailScreen(
@@ -55,6 +61,7 @@ fun DocumentDetailScreen(
     onBack: () -> Unit,
     onEdit: () -> Unit,
     onOpenAttachment: () -> Unit,
+    onViewFile: () -> Unit,
     onDeleted: (deletedId: String?) -> Unit,
 ) {
     val appContext = LocalContext.current.applicationContext
@@ -141,8 +148,24 @@ fun DocumentDetailScreen(
                 SectionHeader("ATTACHMENT")
                 Spacer(modifier = Modifier.height(spacing.sm))
                 val path = document.fileUri
-                if (path != null) {
-                    AttachmentThumbnail(path = path, onClick = onOpenAttachment)
+                if (path != null && path.isNotBlank()) {
+                    // Our encrypted files have no photo to preview, so the card opens the file
+                    // viewer. The older photos and PDFs keep opening the older viewer.
+                    val isSecure = SecureFileStore.isSecure(File(path))
+                    AttachmentThumbnail(
+                        path = path,
+                        onClick = if (isSecure) onViewFile else onOpenAttachment,
+                    )
+                    val exists by rememberFileExists(path)
+                    if (exists == true) {
+                        Spacer(modifier = Modifier.height(spacing.md))
+                        NeriboButton(
+                            text = "View file",
+                            onClick = onViewFile,
+                            modifier = Modifier.fillMaxWidth(),
+                            leadingIcon = Icons.Outlined.Description,
+                        )
+                    }
                 } else {
                     Text(
                         text = "No file attached. Edit this document to add a photo or a PDF.",

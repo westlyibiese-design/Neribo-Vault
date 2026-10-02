@@ -5,6 +5,7 @@ import android.util.JsonReader
 import android.util.JsonToken
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteStatement
+import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.data.local.NeriboDatabase
 import com.westly.neribovault.feature.developer.secrets.SecretsBackup
@@ -15,6 +16,7 @@ import java.io.InputStreamReader
 import java.util.concurrent.Callable
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
+import kotlinx.coroutines.runBlocking
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -222,12 +224,22 @@ class BackupReader(
             val entry = entries.nextElement()
             if (entry.isDirectory) continue
             val name = BackupFormat.fileNameInDir(entry.name, dir) ?: continue
+            val staged = File(target, name)
             zip.getInputStream(entry).use { input ->
-                File(target, name).outputStream().use { out ->
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        out.write(buffer, 0, read)
+                if (dir == BackupFormat.DIR_DOCUMENTS && SecureFileStore.isSecure(staged)) {
+                    // A backup holds the readable content of an encrypted file. Encrypt it again
+                    // here, under the identical name (the name is part of the encryption), so it
+                    // can later move into place without being renamed. The entry stream stays
+                    // open and ends with this entry; a failure ends the restore with nothing
+                    // changed, like any other file that cannot be copied.
+                    runBlocking { SecureFileStore.encryptTo(context, input, staged) }
+                } else {
+                    staged.outputStream().use { out ->
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            out.write(buffer, 0, read)
+                        }
                     }
                 }
             }

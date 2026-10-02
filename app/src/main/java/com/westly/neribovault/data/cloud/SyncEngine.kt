@@ -209,6 +209,8 @@ class SyncEngine(
 
     /** Applies one remote row. Returns 1 when the local table changed, otherwise 0. */
     private fun applyRow(db: SupportSQLiteDatabase, table: String, columns: List<SyncColumn>, row: RemoteRow): Int {
+        // A document saved as an encrypted file never takes part in sync, in either direction.
+        if (isPrivateFileDocument(db, table, row)) return 0
         val localUpdatedAt = localUpdatedAt(db, table, row.id)
 
         if (row.isTombstone) {
@@ -317,11 +319,13 @@ class SyncEngine(
     private fun readLocalPage(db: SupportSQLiteDatabase, table: String, timestamp: Long, afterId: String?): List<LocalRow> {
         val sql: String
         val args: Array<Any?>
+        // Documents saved as encrypted files (fileUri ends in .nvenc) are never uploaded.
+        val privateFilter = if (table == PERSONAL_DOCUMENTS_TABLE) PRIVATE_FILE_FILTER else ""
         if (afterId == null) {
-            sql = "SELECT * FROM \"$table\" WHERE updatedAt > ? ORDER BY updatedAt, id LIMIT $PUSH_PAGE_SIZE"
+            sql = "SELECT * FROM \"$table\" WHERE updatedAt > ?$privateFilter ORDER BY updatedAt, id LIMIT $PUSH_PAGE_SIZE"
             args = arrayOf<Any?>(timestamp)
         } else {
-            sql = "SELECT * FROM \"$table\" WHERE updatedAt > ? OR (updatedAt = ? AND id > ?) " +
+            sql = "SELECT * FROM \"$table\" WHERE (updatedAt > ? OR (updatedAt = ? AND id > ?))$privateFilter " +
                 "ORDER BY updatedAt, id LIMIT $PUSH_PAGE_SIZE"
             args = arrayOf<Any?>(timestamp, timestamp, afterId)
         }
@@ -444,6 +448,17 @@ class SyncEngine(
             if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
         }
 
+    /**
+     * True for a personal document that is saved as an encrypted file (its `fileUri` ends in
+     * `.nvenc`), whether the remote row or the local row says so. Such documents are left out of
+     * every download; [PRIVATE_FILE_FILTER] leaves them out of every upload.
+     */
+    private fun isPrivateFileDocument(db: SupportSQLiteDatabase, table: String, row: RemoteRow): Boolean {
+        if (table != PERSONAL_DOCUMENTS_TABLE) return false
+        if (row.data.optString("fileUri", "").endsWith(PRIVATE_FILE_SUFFIX)) return true
+        return readTextColumn(db, table, "fileUri", row.id).orEmpty().endsWith(PRIVATE_FILE_SUFFIX)
+    }
+
     private fun countRows(db: SupportSQLiteDatabase, table: String): Long =
         db.query("SELECT COUNT(*) FROM \"$table\"").use { cursor ->
             if (cursor.moveToFirst()) cursor.getLong(0) else 0L
@@ -456,5 +471,8 @@ class SyncEngine(
         const val PUSH_BATCH_SIZE = 100
         const val GUARD_MIN_ROWS = 10
         const val GUARD_PERCENT = 30
+        const val PERSONAL_DOCUMENTS_TABLE = "personal_documents"
+        const val PRIVATE_FILE_SUFFIX = ".nvenc"
+        const val PRIVATE_FILE_FILTER = " AND (fileUri IS NULL OR fileUri NOT LIKE '%.nvenc')"
     }
 }

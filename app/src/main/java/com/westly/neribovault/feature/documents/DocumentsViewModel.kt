@@ -1,12 +1,17 @@
 package com.westly.neribovault.feature.documents
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.westly.neribovault.core.files.ImportResult as FileImportResult
+import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.data.local.entity.PersonalDocumentEntity
 import com.westly.neribovault.data.repository.PersonalDocumentsRepository
 import com.westly.neribovault.feature.documents.reminders.DocumentReminderScheduler
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -15,6 +20,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -50,6 +56,12 @@ data class DocumentsUiState(
     val expiringSoonCount: Int = 0,
     val hasAnyDocuments: Boolean = false,
     val isLoading: Boolean = true,
+    /** True while a picked file is being saved into the app. */
+    val isSavingFile: Boolean = false,
+    /** A one-off message for the snackbar (for example a refused file). Cleared once shown. */
+    val message: String? = null,
+    /** The id of a file just saved, to open in the viewer. Cleared once the screen has used it. */
+    val openViewerId: String? = null,
 ) {
     val isEmpty: Boolean get() = sections.isEmpty()
     val isFiltering: Boolean
@@ -62,6 +74,16 @@ private data class Controls(
     val isSearchOpen: Boolean,
     val filter: DocumentFilter,
 )
+
+/** The progress and outcome of "Add a file", kept in the ViewModel so rotating never loses it. */
+private data class FileSaveState(
+    val isSaving: Boolean = false,
+    val message: String? = null,
+    val openViewerId: String? = null,
+)
+
+private const val MSG_FILE_TOO_LARGE = "This file is too large. The limit is 50 MB."
+private const val MSG_FILE_FAILED = "Couldn't save this file."
 
 private val GROUP_ORDER = listOf(
     ExpiryState.Expired,
@@ -111,7 +133,9 @@ class DocumentsViewModel(
             Controls(query = query, isSearchOpen = open, filter = filter)
         }
 
-    val state: StateFlow<DocumentsUiState> = combine(controls, repository.observeAll()) { c, all ->
+    private val fileSaveFlow = MutableStateFlow(FileSaveState())
+
+    val state: StateFlow<DocumentsUiState> = combine(controls, repository.observeAll(), fileSaveFlow) { c, all, save ->
         val now = System.currentTimeMillis()
         val classified = all.map { doc -> doc to expiryState(doc.expiryDate, doc.remindDaysBefore, now) }
         val expiredCount = classified.count { it.second == ExpiryState.Expired }
@@ -174,6 +198,9 @@ class DocumentsViewModel(
             expiringSoonCount = soonCount,
             hasAnyDocuments = all.isNotEmpty(),
             isLoading = false,
+            isSavingFile = save.isSaving,
+            message = save.message,
+            openViewerId = save.openViewerId,
         )
     }
         .flowOn(Dispatchers.Default)
@@ -208,6 +235,71 @@ class DocumentsViewModel(
 
     fun clearFilter() {
         filterFlow.value = DocumentFilter.All
+    }
+
+    /**
+     * Saves the picked file into the app (encrypted) and makes a document for it. The work runs in
+     * [viewModelScope], so rotating the phone does not stop it. A second call while one save is
+     * running is ignored. Raises [DocumentsUiState.openViewerId] when done, or a message when the
+     * file was refused or could not be saved; in that case nothing is left behind.
+     */
+    fun addFile(uri: Uri) {
+        if (fileSaveFlow.value.isSaving) return
+        fileSaveFlow.value = FileSaveState(isSaving = true)
+        viewModelScope.launch {
+            fileSaveFlow.value = saveFile(uri)
+        }
+    }
+
+    /** Called once the snackbar has shown [message]. */
+    fun onMessageShown(message: String) {
+        fileSaveFlow.update { if (it.message == message) it.copy(message = null) else it }
+    }
+
+    /** Called once the screen has opened the viewer for [id], so it never opens a second time. */
+    fun onViewerOpened(id: String) {
+        fileSaveFlow.update { if (it.openViewerId == id) it.copy(openViewerId = null) else it }
+    }
+
+    private suspend fun saveFile(uri: Uri): FileSaveState {
+        val result = try {
+            SecureFileStore.importFrom(appContext, uri)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            FileImportResult.Failed
+        }
+        return when (result) {
+            is FileImportResult.Saved -> {
+                val now = System.currentTimeMillis()
+                // Every other field starts the way the "Add document" form starts a new document.
+                val document = PersonalDocumentEntity(
+                    id = result.id,
+                    createdAt = now,
+                    updatedAt = now,
+                    title = result.displayName,
+                    category = "",
+                    issuer = "",
+                    issueDate = null,
+                    expiryDate = null,
+                    remindDaysBefore = DEFAULT_REMIND_DAYS,
+                    fileUri = result.file.absolutePath,
+                    notes = "",
+                )
+                // Finish even if the screen goes away, so a saved file is never left without a record.
+                withContext(NonCancellable + Dispatchers.IO) {
+                    try {
+                        repository.upsert(document)
+                        FileSaveState(openViewerId = result.id)
+                    } catch (e: Exception) {
+                        runCatching { result.file.delete() }
+                        FileSaveState(message = MSG_FILE_FAILED)
+                    }
+                }
+            }
+            FileImportResult.TooLarge -> FileSaveState(message = MSG_FILE_TOO_LARGE)
+            FileImportResult.Failed -> FileSaveState(message = MSG_FILE_FAILED)
+        }
     }
 
     /** Soft-deletes a document (its file stays for Undo) and cancels its reminder. */

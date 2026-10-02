@@ -1,6 +1,10 @@
 package com.westly.neribovault.feature.documents
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -17,12 +22,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarDuration
@@ -39,10 +47,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
@@ -51,6 +62,7 @@ import com.westly.neribovault.core.lock.rememberVaultLockEnabled
 import com.westly.neribovault.core.ui.components.ButtonStyle
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.MenuAction
+import com.westly.neribovault.core.ui.components.NeriboBottomSheet
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboChip
@@ -81,6 +93,7 @@ fun DocumentsScreen(
     onOpenDocument: (String) -> Unit,
     onEditDocument: (String) -> Unit,
     onNewDocument: () -> Unit,
+    onOpenViewer: (String) -> Unit,
     onOpenTrash: () -> Unit,
 ) {
     val appContext = LocalContext.current.applicationContext
@@ -95,6 +108,13 @@ fun DocumentsScreen(
     // pops the keyboard open on its own.
     var focusSearchOnOpen by rememberSaveable { mutableStateOf(false) }
     var showLockSheet by rememberSaveable { mutableStateOf(false) }
+    var showAddSheet by rememberSaveable { mutableStateOf(false) }
+
+    // The system picker needs no storage permission. The file is copied into the app straight away.
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+        onResult = { uri: Uri? -> if (uri != null) vm.addFile(uri) },
+    )
 
     // The text field edits this local copy so typing is never delayed by the database.
     var localQuery by rememberSaveable { mutableStateOf(state.query) }
@@ -115,6 +135,25 @@ fun DocumentsScreen(
                 onDeletedIdConsumed()
                 showUndo("Moved to Recently deleted", { vm.restore(id) })
             }
+        }
+    }
+
+    // A file that was just saved opens in the viewer exactly once, even after a rotation.
+    LaunchedEffect(state.openViewerId) {
+        val id = state.openViewerId
+        if (id != null) {
+            vm.onViewerOpened(id)
+            onOpenViewer(id)
+        }
+    }
+
+    // Held in the state so a message survives rotation; cleared only after it has been shown.
+    LaunchedEffect(state.message) {
+        val message = state.message
+        if (message != null) {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+            vm.onMessageShown(message)
         }
     }
 
@@ -174,7 +213,7 @@ fun DocumentsScreen(
             )
         },
         floatingActionButton = {
-            NeriboFab(onClick = onNewDocument, contentDescription = "Add document")
+            NeriboFab(onClick = { showAddSheet = true }, contentDescription = "Add to Documents")
         },
         snackbarHostState = snackbarHostState,
     ) { padding ->
@@ -189,7 +228,7 @@ fun DocumentsScreen(
                     modifier = Modifier
                         .padding(horizontal = spacing.screen)
                         .focusRequester(searchFocus),
-                    placeholder = "Title, category, issuer or notes",
+                    placeholder = "Search documents",
                 )
             }
             if (state.hasAnyDocuments) {
@@ -246,6 +285,89 @@ fun DocumentsScreen(
             onDismiss = { showLockSheet = false },
         )
     }
+
+    if (showAddSheet) {
+        NeriboBottomSheet(onDismiss = { showAddSheet = false }) {
+            AddRow(
+                icon = Icons.Outlined.Description,
+                label = "Add document",
+                onClick = {
+                    showAddSheet = false
+                    onNewDocument()
+                },
+            )
+            AddRow(
+                icon = Icons.Outlined.AttachFile,
+                label = "Add a file",
+                onClick = {
+                    showAddSheet = false
+                    filePicker.launch(arrayOf("*/*"))
+                },
+            )
+        }
+    }
+
+    if (state.isSavingFile) {
+        SavingDialog()
+    }
+}
+
+/** One tall, clearly labelled row of the add sheet. */
+@Composable
+private fun AddRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(MaterialTheme.shapes.medium)
+            .clickable(onClick = onClick)
+            .padding(horizontal = spacing.sm),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(24.dp),
+            tint = colors.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.width(spacing.lg))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyLarge,
+            color = colors.onSurface,
+        )
+    }
+}
+
+/** Shown while a picked file is being saved. It cannot be dismissed, so the save is never cut short. */
+@Composable
+private fun SavingDialog() {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = {},
+        confirmButton = {},
+        properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+        shape = MaterialTheme.shapes.large,
+        containerColor = colors.surface,
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    color = colors.primary,
+                    strokeWidth = 2.dp,
+                )
+                Spacer(modifier = Modifier.width(spacing.lg))
+                Text(
+                    text = "Saving to your Documents\u2026",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = colors.onSurface,
+                )
+            }
+        },
+    )
 }
 
 @Composable

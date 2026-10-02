@@ -65,9 +65,9 @@ import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
-import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.ui.components.SectionHeader
@@ -75,6 +75,7 @@ import com.westly.neribovault.core.util.formatDateLong
 import com.westly.neribovault.core.util.startOfDayMillis
 import com.westly.neribovault.feature.documents.components.AttachmentThumbnail
 import com.westly.neribovault.feature.documents.components.DocumentDatePickerDialog
+import com.westly.neribovault.feature.documents.components.LabeledField
 import com.westly.neribovault.feature.documents.reminders.DocumentReminderScheduler
 
 private const val PICKER_NONE = ""
@@ -278,18 +279,21 @@ private fun EditorContent(
             verticalArrangement = Arrangement.spacedBy(spacing.md),
         ) {
             Spacer(modifier = Modifier.height(spacing.xs))
-            NeriboTextField(
+            LabeledField(
+                label = "Title",
                 value = title,
                 onValueChange = { value ->
                     title = value
                     vm.onTitleChange(value)
                 },
-                label = "Title",
-                placeholder = "e.g. My international passport",
+                placeholder = "Document title",
+                textStyle = MaterialTheme.typography.titleLarge,
                 isError = state.titleError != null,
                 supportingText = state.titleError,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
+            NeriboDivider()
+            Spacer(modifier = Modifier.height(spacing.lg))
 
             SectionHeader("CATEGORY")
             Row(
@@ -310,7 +314,9 @@ private fun EditorContent(
                     )
                 }
             }
-            NeriboTextField(
+            // The CATEGORY heading above the chips already names this field.
+            LabeledField(
+                label = null,
                 value = category,
                 onValueChange = { value ->
                     category = value
@@ -320,14 +326,14 @@ private fun EditorContent(
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
 
-            NeriboTextField(
+            LabeledField(
+                label = "Issuer",
                 value = issuer,
                 onValueChange = { value ->
                     issuer = value
                     vm.onIssuerChange(value)
                 },
-                label = "Issuer",
-                placeholder = "e.g. Nigeria Immigration Service",
+                placeholder = "Who issued it",
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
             )
 
@@ -383,16 +389,16 @@ private fun EditorContent(
                 onRemove = { vm.removeAttachment() },
             )
 
-            NeriboTextField(
+            LabeledField(
+                label = "Notes",
                 value = notes,
                 onValueChange = { value ->
                     notes = value
                     vm.onNotesChange(value)
                 },
-                label = "Notes",
-                placeholder = "Document number, where the original is kept, renewal steps...",
+                placeholder = "Add notes here",
                 singleLine = false,
-                minLines = 3,
+                minHeight = 240.dp,
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
             )
             Spacer(modifier = Modifier.height(spacing.md))

@@ -24,8 +24,9 @@ data class DocumentsTrashUiState(
 
 /**
  * State and actions for the Documents "Recently deleted" screen. Restore keeps the attachment and
- * schedules the reminder again; Delete forever and Empty trash remove the attachment file, cancel
- * the reminder and then delete the document.
+ * schedules the reminder again. Delete forever and Empty trash delete the document record first
+ * and then its file (a crash in between leaves a harmless stray file, never a record that points at
+ * a missing one). This works for the encrypted `.nvenc` files as well as the older photos and PDFs.
  */
 class DocumentsTrashViewModel(
     private val appContext: Context,
@@ -48,8 +49,9 @@ class DocumentsTrashViewModel(
     fun deleteForever(id: String) {
         viewModelScope.launch {
             withContext(NonCancellable + Dispatchers.IO) {
-                removeForGood(repository.getById(id))
+                val document = repository.getById(id)
                 repository.deletePermanently(id)
+                removeForGood(document)
             }
         }
     }
@@ -59,17 +61,22 @@ class DocumentsTrashViewModel(
         viewModelScope.launch {
             withContext(NonCancellable + Dispatchers.IO) {
                 repository.observeTrashed().first().forEach { document ->
-                    removeForGood(document)
                     repository.deletePermanently(document.id)
+                    removeForGood(document)
                 }
             }
         }
     }
 
-    /** Deletes the attachment file and cancels the reminder of [document] (a no-op for null). */
+    /**
+     * Deletes the attachment file and cancels the reminder of [document] (a no-op for null). The
+     * file store only deletes a file that sits directly inside `filesDir/documents/`, whatever the
+     * stored path says, and a failure to delete never stops anything else.
+     */
     private fun removeForGood(document: PersonalDocumentEntity?) {
         if (document == null) return
-        document.fileUri?.let { fileStore.delete(it) }
-        DocumentReminderScheduler.forget(appContext, document.id)
+        val path = document.fileUri
+        if (!path.isNullOrBlank()) runCatching { fileStore.delete(path) }
+        runCatching { DocumentReminderScheduler.forget(appContext, document.id) }
     }
 }

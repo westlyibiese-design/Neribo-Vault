@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.util.JsonWriter
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.westly.neribovault.BuildConfig
+import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.data.local.NeriboDatabase
 import com.westly.neribovault.feature.developer.secrets.SecretsBackup
 import java.io.BufferedOutputStream
@@ -14,6 +15,7 @@ import java.io.OutputStream
 import java.io.OutputStreamWriter
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 
 /**
@@ -41,7 +43,17 @@ class BackupWriter(
         val counted = CountingOutputStream(BufferedOutputStream(output))
         val db = database.openHelper.readableDatabase
         val tables = BackupFormat.backedUpTables(db)
-        val files = BackupFormat.FILE_DIRS.associateWith { dir -> listFiles(dir) }
+        // Encrypted document files that cannot be read are left out here, before any zip entry for
+        // them is started, so a bad file never leaves a half-written entry behind.
+        val selection = try {
+            selectFiles(progress, checkActive)
+        } catch (e: Throwable) {
+            // [output] is documented as closed by this function, also when the backup is cancelled.
+            runCatching { output.close() }
+            throw e
+        }
+        val files = selection.files
+        val skippedFiles = selection.skipped
         val photoCount = files.getValue(BackupFormat.DIR_MEMORIES).size
         val documentCount = files.getValue(BackupFormat.DIR_DOCUMENTS).size
 
@@ -55,7 +67,10 @@ class BackupWriter(
                 for (table in tables) counts[table] = countRows(db, table)
 
                 zip.putNextEntry(ZipEntry(BackupFormat.ENTRY_MANIFEST))
-                zip.write(manifestJson(db, counts, photoCount, documentCount).toByteArray(Charsets.UTF_8))
+                zip.write(
+                    manifestJson(db, counts, photoCount, documentCount, skippedFiles)
+                        .toByteArray(Charsets.UTF_8),
+                )
                 zip.closeEntry()
 
                 zip.putNextEntry(ZipEntry(BackupFormat.ENTRY_DATA))
@@ -88,6 +103,7 @@ class BackupWriter(
         counts: Map<String, Int>,
         photoCount: Int,
         documentCount: Int,
+        skippedFiles: Int,
     ): String {
         val tables = JSONObject()
         for ((table, count) in counts) tables.put(table, count)
@@ -102,6 +118,7 @@ class BackupWriter(
             .put("createdAt", System.currentTimeMillis())
             .put("tables", tables)
             .put("files", fileCounts)
+            .put("skippedFiles", skippedFiles)
             .toString()
     }
 
@@ -168,16 +185,53 @@ class BackupWriter(
                 checkActive()
                 progress("Adding $label (${index + 1} of ${list.size})\u2026")
                 zip.putNextEntry(ZipEntry(BackupFormat.entryName(dir, file.name)))
-                file.inputStream().use { input ->
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read < 0) break
-                        zip.write(buffer, 0, read)
+                if (SecureFileStore.isSecure(file)) {
+                    // The backup carries the readable content: the whole backup file is encrypted,
+                    // and the phone's own key would be gone after clearing the app's data.
+                    runBlocking { SecureFileStore.decryptTo(context, file, zip) }
+                } else {
+                    file.inputStream().use { input ->
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            zip.write(buffer, 0, read)
+                        }
                     }
                 }
                 zip.closeEntry()
             }
         }
+    }
+
+    /** The files that will go into the backup, and how many encrypted files were left out. */
+    private class FileSelection(val files: Map<String, List<File>>, val skipped: Int)
+
+    /**
+     * Lists the files of every folder. An encrypted (`.nvenc`) document file is checked by reading
+     * it through once; one that cannot be decrypted is skipped and counted.
+     */
+    private fun selectFiles(progress: (String) -> Unit, checkActive: () -> Unit): FileSelection {
+        var skipped = 0
+        val selected = LinkedHashMap<String, List<File>>()
+        for (dir in BackupFormat.FILE_DIRS) {
+            val all = listFiles(dir)
+            if (dir != BackupFormat.DIR_DOCUMENTS || all.none { SecureFileStore.isSecure(it) }) {
+                selected[dir] = all
+                continue
+            }
+            progress("Checking your document files\u2026")
+            val readable = ArrayList<File>()
+            for (file in all) {
+                checkActive()
+                if (SecureFileStore.isSecure(file) && SecureFileStore.plainSize(context, file) < 0L) {
+                    skipped++
+                } else {
+                    readable.add(file)
+                }
+            }
+            selected[dir] = readable
+        }
+        return FileSelection(selected, skipped)
     }
 
     /** The finished files of [dir] (half-written `.part` files are left out). */

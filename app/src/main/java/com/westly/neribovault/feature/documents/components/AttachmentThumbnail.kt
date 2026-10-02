@@ -29,6 +29,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.westly.neribovault.core.design.NeriboTheme
+import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.feature.documents.isPdfPath
 import java.io.File
@@ -62,6 +63,8 @@ fun AttachmentThumbnail(
     val spacing = NeriboTheme.spacing
     val exists by rememberFileExists(path)
     val isPdf = isPdfPath(path)
+    // An encrypted file cannot be previewed here: show a plain tile instead of a broken photo.
+    val isSavedFile = SecureFileStore.isSecure(File(path))
 
     NeriboCard(modifier = modifier.fillMaxWidth(), onClick = onClick) {
         Box(
@@ -88,6 +91,22 @@ fun AttachmentThumbnail(
                     Text(
                         text = "This file is no longer on the phone",
                         style = MaterialTheme.typography.bodySmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                }
+                isSavedFile -> Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(spacing.xs),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Description,
+                        contentDescription = null,
+                        modifier = Modifier.size(36.dp),
+                        tint = colors.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "Saved file",
+                        style = MaterialTheme.typography.labelLarge,
                         color = colors.onSurfaceVariant,
                     )
                 }
@@ -128,7 +147,11 @@ fun AttachmentThumbnail(
                 tint = colors.onSurfaceVariant,
             )
             Spacer(modifier = Modifier.width(spacing.xs))
-            val kind = if (isPdf) "PDF document" else "Photo"
+            val kind = when {
+                isSavedFile -> "Saved file"
+                isPdf -> "PDF document"
+                else -> "Photo"
+            }
             Text(
                 text = if (onClick != null) "$kind \u00B7 tap to open" else kind,
                 style = MaterialTheme.typography.bodySmall,
