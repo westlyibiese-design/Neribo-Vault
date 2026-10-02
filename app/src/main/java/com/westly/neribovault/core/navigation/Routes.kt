@@ -9,6 +9,7 @@ object Routes {
     const val SECURITY = "settings/security"
     const val DIAGNOSTICS = "settings/diagnostics"
     const val CLOUD = "settings/cloud"
+    const val BACKUP = "settings/backup"
     const val NOTES = "notes"
     const val IDEAS = "ideas"
     const val GOALS = "goals"

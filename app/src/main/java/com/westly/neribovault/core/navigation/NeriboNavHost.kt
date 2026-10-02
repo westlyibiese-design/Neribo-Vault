@@ -11,7 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.westly.neribovault.core.ui.components.PlaceholderScreen
+import com.westly.neribovault.feature.backup.backupGraph
 import com.westly.neribovault.feature.church.churchGraph
 import com.westly.neribovault.feature.cloud.cloudGraph
 import com.westly.neribovault.feature.developer.developerGraph
@@ -24,6 +24,8 @@ import com.westly.neribovault.feature.ideas.ideasGraph
 import com.westly.neribovault.feature.memories.memoriesGraph
 import com.westly.neribovault.feature.notes.notesGraph
 import com.westly.neribovault.feature.posts.postsGraph
+import com.westly.neribovault.feature.recent.recentGraph
+import com.westly.neribovault.feature.search.searchGraph
 import com.westly.neribovault.feature.security.securityGraph
 import com.westly.neribovault.feature.settings.settingsGraph
 import com.westly.neribovault.feature.writers.writersGraph
@@ -67,20 +69,8 @@ fun NeriboNavHost() {
                 onOpenRecent = { navController.navigate(Routes.RECENT) },
             )
         }
-        composable(Routes.SEARCH) {
-            PlaceholderScreen(
-                title = "Search",
-                message = "Search across every vault arrives in a later update.",
-                onBack = { navController.popBackStack() },
-            )
-        }
-        composable(Routes.RECENT) {
-            PlaceholderScreen(
-                title = "Recent",
-                message = "Your recently opened items will appear here in a later update.",
-                onBack = { navController.popBackStack() },
-            )
-        }
+        searchGraph(navController)
+        recentGraph(navController)
         notesGraph(navController)
         ideasGraph(navController)
         goalsGraph(navController)
@@ -95,5 +85,6 @@ fun NeriboNavHost() {
         securityGraph(navController)
         diagnosticsGraph(navController)
         cloudGraph(navController)
+        backupGraph(navController)
     }
 }
