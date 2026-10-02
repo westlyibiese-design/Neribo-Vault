@@ -4,5 +4,8 @@
         <item name="android:windowBackground">@color/neribo_splash_bg</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBackground">@color/neribo_splash_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_transparent_icon</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/neribo_splash_bg</item>
     </style>
 </resources>
