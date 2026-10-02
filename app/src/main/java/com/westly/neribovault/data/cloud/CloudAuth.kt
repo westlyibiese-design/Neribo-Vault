@@ -1,6 +1,8 @@
 package com.westly.neribovault.data.cloud
 
+import android.app.Activity
 import android.content.Context
+import com.westly.neribovault.BuildConfig
 import com.westly.neribovault.data.local.NeriboDatabase
 import java.io.IOException
 import java.security.GeneralSecurityException
@@ -14,19 +16,19 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.json.JSONException
 import org.json.JSONObject
 
-/** The result of a sign-in or sign-up attempt. */
+/** The result of a sign-in attempt. */
 sealed interface AuthOutcome {
     /** A session was stored; the user is signed in. */
     object SignedIn : AuthOutcome
 
-    /** The account was created but the email must be confirmed first. */
-    object ConfirmEmail : AuthOutcome
+    /** The person closed the Google sheet without choosing. Not an error. */
+    object Cancelled : AuthOutcome
 
     data class Failed(val message: String) : AuthOutcome
 }
 
 /**
- * Supabase account handling through the Auth REST API: sign up, sign in, token refresh and
+ * Supabase account handling through the Auth REST API: Google sign-in, token refresh and
  * sign out. Signing out only forgets the session; local vault data is never touched.
  */
 class CloudAuth(context: Context, private val database: NeriboDatabase) {
@@ -131,46 +133,48 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
 
     // ---- Account -------------------------------------------------------------------------
 
-    suspend fun signIn(email: String, password: String): AuthOutcome = withContext(Dispatchers.IO) {
-        try {
-            val body = credentials(email, password)
-            val response = api.authPost("auth/v1/token", mapOf("grant_type" to "password"), body, null)
-            if (!response.isSuccess) return@withContext AuthOutcome.Failed(authMessage(response))
-            val session = parseSession(response.body, email)
-                ?: return@withContext AuthOutcome.Failed(UNEXPECTED_REPLY)
-            startSession(session)
-            AuthOutcome.SignedIn
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: CloudException) {
-            AuthOutcome.Failed(e.message.orEmpty())
-        } catch (e: GeneralSecurityException) {
-            AuthOutcome.Failed(STORAGE_ERROR)
-        } catch (e: IOException) {
-            AuthOutcome.Failed(STORAGE_ERROR)
-        }
-    }
+    /**
+     * True when Google sign-in can be offered: the shared Neribo project is active, this build
+     * carries it, and the Web client ID was baked in. Blocking (reads preferences): call it off
+     * the main thread.
+     */
+    fun googleSignInAvailable(): Boolean =
+        !config.usingOwnProject() && config.sharedAvailable && BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank()
 
-    suspend fun signUp(email: String, password: String): AuthOutcome = withContext(Dispatchers.IO) {
-        try {
-            val body = credentials(email, password)
-            val response = api.authPost("auth/v1/signup", emptyMap(), body, null)
-            if (!response.isSuccess) return@withContext AuthOutcome.Failed(authMessage(response))
-            val session = parseSession(response.body, email)
-            if (session != null) {
+    /**
+     * Signs in with Google through Credential Manager, then trades the Google ID token for a
+     * Supabase session. [activity] is only used during this call and is never kept.
+     */
+    suspend fun signInWithGoogle(activity: Activity): AuthOutcome {
+        val available = withContext(Dispatchers.IO) { googleSignInAvailable() }
+        if (!available) return AuthOutcome.Failed(GOOGLE_UNAVAILABLE)
+        // Credential Manager shows UI, so it runs on the calling (main) thread, not on IO.
+        val token = when (val result = requestGoogleIdToken(activity, BuildConfig.GOOGLE_WEB_CLIENT_ID.trim())) {
+            is GoogleTokenResult.Token -> result
+            GoogleTokenResult.Cancelled -> return AuthOutcome.Cancelled
+            is GoogleTokenResult.Failed -> return AuthOutcome.Failed(result.message)
+        }
+        return withContext(Dispatchers.IO) {
+            try {
+                val body = JSONObject()
+                    .put("provider", "google")
+                    .put("id_token", token.idToken)
+                    .put("nonce", token.rawNonce)
+                val response = api.authPost("auth/v1/token", mapOf("grant_type" to "id_token"), body, null)
+                if (!response.isSuccess) return@withContext AuthOutcome.Failed(googleMessage(response))
+                val session = parseSession(response.body, token.email.orEmpty())
+                    ?: return@withContext AuthOutcome.Failed(UNEXPECTED_REPLY)
                 startSession(session)
                 AuthOutcome.SignedIn
-            } else {
-                AuthOutcome.ConfirmEmail
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: CloudException) {
+                AuthOutcome.Failed(e.message.orEmpty())
+            } catch (e: GeneralSecurityException) {
+                AuthOutcome.Failed(STORAGE_ERROR)
+            } catch (e: IOException) {
+                AuthOutcome.Failed(STORAGE_ERROR)
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: CloudException) {
-            AuthOutcome.Failed(e.message.orEmpty())
-        } catch (e: GeneralSecurityException) {
-            AuthOutcome.Failed(STORAGE_ERROR)
-        } catch (e: IOException) {
-            AuthOutcome.Failed(STORAGE_ERROR)
         }
     }
 
@@ -268,9 +272,6 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
         database.openHelper.writableDatabase.execSQL("DELETE FROM sync_tombstones")
     }
 
-    private fun credentials(email: String, password: String): JSONObject =
-        JSONObject().put("email", email.trim()).put("password", password)
-
     private fun parseSession(body: String, fallbackEmail: String): CloudSession? {
         val json = try {
             JSONObject(body)
@@ -290,38 +291,20 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
         return System.currentTimeMillis() + seconds * 1000L
     }
 
-    /** Maps a failed Auth response to a friendly message. */
-    private fun authMessage(response: ApiResponse): String {
+    /** Maps a failed Google token exchange to a friendly message. Never includes the response. */
+    private fun googleMessage(response: ApiResponse): String {
         val json = try {
             JSONObject(response.body)
         } catch (e: JSONException) {
             JSONObject()
         }
         val code = (json.stringOrNull("error_code") ?: json.stringOrNull("error")).orEmpty().lowercase()
-        val text = (
-            json.stringOrNull("msg") ?: json.stringOrNull("message") ?: json.stringOrNull("error_description")
-            ).orEmpty().lowercase()
         return when {
-            code == "invalid_credentials" || text.contains("invalid login credentials") ->
-                "Wrong email or password."
-            code == "email_not_confirmed" || text.contains("email not confirmed") ->
-                "Your email isn't confirmed yet. Check your inbox, then sign in."
-            code == "user_already_exists" || text.contains("already registered") ->
-                "An account with this email already exists. Try signing in."
-            code == "weak_password" || text.contains("password should be") ->
-                "That password is too weak. Use at least 6 characters."
-            code == "validation_failed" || text.contains("unable to validate email") ->
-                "That email address doesn't look right."
-            code == "signup_disabled" || text.contains("signups not allowed") ->
-                "New sign-ups are turned off in this Supabase project."
             code.contains("rate_limit") || response.code == 429 ->
                 "Too many attempts. Wait a minute and try again."
-            response.code == 401 || response.code == 403 ->
-                "Supabase rejected the project key. Check the URL and anon key under Change project."
-            response.code == 404 ->
-                "That project URL doesn't look like a Supabase project. Check it under Change project."
+            code == "signup_disabled" -> "New sign-ups are turned off in this Supabase project."
             response.code >= 500 -> SupabaseApi.SERVER_PROBLEM
-            else -> "Couldn't complete that. Check your details and try again."
+            else -> "Supabase didn't accept the Google sign-in. Check the Google settings in the Supabase project."
         }
     }
 
@@ -346,6 +329,7 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
         const val STORAGE_ERROR = "Secure storage isn't available on this device, so the account can't be saved."
         const val UNEXPECTED_REPLY = "Supabase sent an unexpected reply. Check the project URL and key."
         const val SESSION_EXPIRED = "Your session expired. Sign in again."
+        const val GOOGLE_UNAVAILABLE = "Google sign-in works with the Neribo cloud only."
     }
 }
 

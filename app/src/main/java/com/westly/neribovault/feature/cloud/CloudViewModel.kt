@@ -1,7 +1,9 @@
 package com.westly.neribovault.feature.cloud
 
+import android.app.Activity
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.westly.neribovault.BuildConfig
 import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.data.cloud.AuthOutcome
 import com.westly.neribovault.data.cloud.CloudAuth
@@ -25,6 +27,7 @@ data class CloudUiState(
     val email: String = "",
     val usingOwnProject: Boolean = false,
     val sharedAvailable: Boolean = false,
+    val googleAvailable: Boolean = false,
     val vaultEnabled: Map<String, Boolean> = emptyMap(),
     val statusText: String = "",
     val statusIsError: Boolean = false,
@@ -33,9 +36,6 @@ data class CloudUiState(
     val keyInput: String = "",
     val urlError: String? = null,
     val keyError: String? = null,
-    val emailInput: String = "",
-    val passwordInput: String = "",
-    val passwordVisible: Boolean = false,
     val working: Boolean = false,
     val error: String? = null,
     val info: String? = null,
@@ -48,9 +48,6 @@ internal data class CloudForm(
     val keyInput: String = "",
     val urlError: String? = null,
     val keyError: String? = null,
-    val emailInput: String = "",
-    val passwordInput: String = "",
-    val passwordVisible: Boolean = false,
     val working: Boolean = false,
     val error: String? = null,
     val info: String? = null,
@@ -81,6 +78,8 @@ class CloudViewModel(
             email = config.email,
             usingOwnProject = config.usingOwnProject,
             sharedAvailable = config.sharedAvailable,
+            googleAvailable = !config.usingOwnProject && config.sharedAvailable &&
+                BuildConfig.GOOGLE_WEB_CLIENT_ID.isNotBlank(),
             vaultEnabled = config.vaultEnabled,
             statusText = status.first,
             statusIsError = status.second,
@@ -89,9 +88,6 @@ class CloudViewModel(
             keyInput = f.keyInput,
             urlError = f.urlError,
             keyError = f.keyError,
-            emailInput = f.emailInput,
-            passwordInput = f.passwordInput,
-            passwordVisible = f.passwordVisible,
             working = f.working,
             error = f.error,
             info = f.info,
@@ -172,53 +168,28 @@ class CloudViewModel(
 
     // ---- Account -------------------------------------------------------------------------
 
-    fun onEmailChange(value: String) = form.update { it.copy(emailInput = value, error = null, info = null) }
-
-    fun onPasswordChange(value: String) = form.update { it.copy(passwordInput = value, error = null, info = null) }
-
-    fun togglePasswordVisible() = form.update { it.copy(passwordVisible = !it.passwordVisible) }
-
-    fun signIn() = authenticate(createAccount = false)
-
-    fun createAccount() = authenticate(createAccount = true)
-
-    private fun authenticate(createAccount: Boolean) {
-        val current = form.value
-        if (current.working) return
-        val email = current.emailInput.trim()
-        val problem = when {
-            email.isEmpty() || !email.contains('@') -> "Enter a valid email address."
-            current.passwordInput.isEmpty() -> "Enter your password."
-            createAccount && current.passwordInput.length < MIN_PASSWORD_LENGTH ->
-                "Use a password with at least $MIN_PASSWORD_LENGTH characters."
-            else -> null
-        }
-        if (problem != null) {
-            form.update { it.copy(error = problem, info = null) }
-            return
-        }
+    /** Starts Google sign-in. [activity] is used for this call only and is not kept. */
+    fun signInWithGoogle(activity: Activity) {
+        if (form.value.working) return
         form.update { it.copy(working = true, error = null, info = null) }
         viewModelScope.launch {
-            val outcome = if (createAccount) {
-                auth.signUp(email, current.passwordInput)
-            } else {
-                auth.signIn(email, current.passwordInput)
-            }
+            val outcome = auth.signInWithGoogle(activity)
             form.update {
                 when (outcome) {
                     AuthOutcome.SignedIn -> {
                         engine.clearStatus()
                         CloudForm()
                     }
-                    AuthOutcome.ConfirmEmail -> it.copy(
-                        working = false,
-                        passwordInput = "",
-                        info = "Check your email to confirm, then sign in.",
-                    )
+                    AuthOutcome.Cancelled -> it.copy(working = false)
                     is AuthOutcome.Failed -> it.copy(working = false, error = outcome.message)
                 }
             }
         }
+    }
+
+    /** The screen could not find an Activity to show the Google sheet on. */
+    fun onGoogleUnavailable() = form.update {
+        it.copy(error = "Couldn't open Google sign-in on this screen.", info = null)
     }
 
     // ---- Signed in -----------------------------------------------------------------------
@@ -256,6 +227,5 @@ class CloudViewModel(
 
     private companion object {
         const val STOP_TIMEOUT_MILLIS = 5_000L
-        const val MIN_PASSWORD_LENGTH = 6
     }
 }

@@ -16,8 +16,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -32,19 +30,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
+import com.westly.neribovault.core.lock.findActivity
 import com.westly.neribovault.core.ui.components.ButtonStyle
 import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.LoadingState
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboDivider
-import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
@@ -59,6 +55,7 @@ fun CloudScreen(onBack: () -> Unit) {
     val vm = neriboViewModel { c -> CloudViewModel(c.cloudAuth, c.syncEngine) }
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val spacing = NeriboTheme.spacing
@@ -91,11 +88,9 @@ fun CloudScreen(onBack: () -> Unit) {
                     )
                     !state.signedIn -> SignedOutSection(
                         state = state,
-                        onEmailChange = vm::onEmailChange,
-                        onPasswordChange = vm::onPasswordChange,
-                        onTogglePassword = vm::togglePasswordVisible,
-                        onSignIn = vm::signIn,
-                        onCreateAccount = vm::createAccount,
+                        onGoogleSignIn = {
+                            if (activity != null) vm.signInWithGoogle(activity) else vm.onGoogleUnavailable()
+                        },
                         onChangeProject = vm::changeProject,
                         onUseShared = vm::useSharedProject,
                         onUseOwn = vm::useOwnProject,
@@ -204,77 +199,32 @@ private fun NotConfiguredSection(
 @Composable
 private fun SignedOutSection(
     state: CloudUiState,
-    onEmailChange: (String) -> Unit,
-    onPasswordChange: (String) -> Unit,
-    onTogglePassword: () -> Unit,
-    onSignIn: () -> Unit,
-    onCreateAccount: () -> Unit,
+    onGoogleSignIn: () -> Unit,
     onChangeProject: () -> Unit,
     onUseShared: () -> Unit,
     onUseOwn: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
-    if (state.usingOwnProject) {
-        BodyText(
-            "Your own Supabase project is connected. Sign in, or create an account, to start " +
-                "syncing. Your vaults stay on this phone until you do.",
-        )
-    } else {
-        BodyText(
-            "Sign in, or create an account, to back up and sync your vaults. " +
-                "Your vaults stay on this phone until you do.",
-        )
+    if (state.googleAvailable) {
+        BodyText("Sign in with your Google account to sync your vaults. Your vaults stay on this phone until you do.")
         Spacer(modifier = Modifier.height(spacing.sm))
         SmallNote(
             "Synced data is stored in the Neribo cloud and is not end-to-end encrypted. " +
                 "If you would rather keep it in a project only you control, use your own Supabase project below.",
         )
+        MessageLines(error = state.error, info = state.info)
+        Spacer(modifier = Modifier.height(spacing.lg))
+        NeriboButton(
+            text = "Continue with Google",
+            onClick = onGoogleSignIn,
+            enabled = !state.working,
+            style = ButtonStyle.Primary,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    } else {
+        BodyText("Google sign-in works with the Neribo cloud only. Switch back to the Neribo cloud to sign in.")
+        MessageLines(error = state.error, info = state.info)
     }
-    Spacer(modifier = Modifier.height(spacing.xl))
-    NeriboTextField(
-        value = state.emailInput,
-        onValueChange = onEmailChange,
-        modifier = Modifier.fillMaxWidth(),
-        label = "Email",
-        placeholder = "adaeze@example.com",
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-    )
-    Spacer(modifier = Modifier.height(spacing.md))
-    NeriboTextField(
-        value = state.passwordInput,
-        onValueChange = onPasswordChange,
-        modifier = Modifier.fillMaxWidth(),
-        label = "Password",
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        visualTransformation = if (state.passwordVisible) {
-            VisualTransformation.None
-        } else {
-            PasswordVisualTransformation()
-        },
-        trailingIcon = {
-            NeriboIconButton(
-                icon = if (state.passwordVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                contentDescription = if (state.passwordVisible) "Hide password" else "Show password",
-                onClick = onTogglePassword,
-            )
-        },
-    )
-    MessageLines(error = state.error, info = state.info)
-    Spacer(modifier = Modifier.height(spacing.lg))
-    NeriboButton(
-        text = "Sign in",
-        onClick = onSignIn,
-        enabled = !state.working,
-        modifier = Modifier.fillMaxWidth(),
-    )
-    Spacer(modifier = Modifier.height(spacing.sm))
-    NeriboButton(
-        text = "Create account",
-        onClick = onCreateAccount,
-        enabled = !state.working,
-        style = ButtonStyle.Secondary,
-        modifier = Modifier.fillMaxWidth(),
-    )
     Spacer(modifier = Modifier.height(spacing.sm))
     if (state.usingOwnProject) {
         NeriboButton(
@@ -302,11 +252,6 @@ private fun SignedOutSection(
             modifier = Modifier.fillMaxWidth(),
         )
     }
-    Spacer(modifier = Modifier.height(spacing.md))
-    SmallNote(
-        "If an email confirmation is required, open the link in your inbox after creating " +
-            "the account, then come back and sign in.",
-    )
 }
 
 @Composable

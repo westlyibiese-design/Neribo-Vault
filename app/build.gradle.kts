@@ -24,6 +24,8 @@ android {
         }
         buildConfigField("String", "SUPABASE_URL", "\"${cleanBuildValue("SUPABASE_URL")}\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"${cleanBuildValue("SUPABASE_ANON_KEY")}\"")
+        // Web OAuth client ID for Google sign-in (GitHub secret GOOGLE_WEB_CLIENT_ID). Empty without it.
+        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"${cleanBuildValue("GOOGLE_WEB_CLIENT_ID")}\"")
     }
 
     // Stable debug key so every build installs over the previous one and keeps its data.
@@ -99,6 +101,11 @@ dependencies {
     // Security
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
+    // Google sign-in (Credential Manager)
+    implementation("androidx.credentials:credentials:1.3.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.3.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.1.1")
 
     // Other
     implementation("androidx.work:work-runtime-ktx:2.9.0")
