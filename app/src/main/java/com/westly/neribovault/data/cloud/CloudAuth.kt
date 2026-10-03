@@ -27,6 +27,22 @@ sealed interface AuthOutcome {
     data class Failed(val message: String) : AuthOutcome
 }
 
+/** The result of deleting the cloud data and account. Anything but [Deleted] leaves the phone signed in as before. */
+sealed interface DeleteOutcome {
+    /** The server confirmed. The account is gone and this phone is signed out. */
+    object Deleted : DeleteOutcome
+
+    object Offline : DeleteOutcome
+
+    /** The project does not have the delete_my_account function yet. */
+    object NeedsScript : DeleteOutcome
+
+    /** The sign-in had already ended, so nothing was deleted and the phone is signed out. */
+    object SessionEnded : DeleteOutcome
+
+    data class Failed(val message: String) : DeleteOutcome
+}
+
 /**
  * Supabase account handling through the Auth REST API: Google sign-in, token refresh and
  * sign out. Signing out only forgets the session; local vault data is never touched.
@@ -188,6 +204,41 @@ class CloudAuth(context: Context, private val database: NeriboDatabase) {
                 config.clearSession()
             }
         }
+    }
+
+    /**
+     * Deletes every synced row and the account itself on the server, then forgets the session and
+     * the sync progress on this phone. Vault data on the phone is never touched. Local state is
+     * only cleared after the server confirmed, so a failed attempt can simply be retried.
+     * Callers should hold the sync engine paused while this runs.
+     */
+    suspend fun deleteAccount(): DeleteOutcome = withContext(Dispatchers.IO) {
+        if (!config.isSignedIn()) return@withContext DeleteOutcome.Failed("You're not signed in.")
+        if (!isOnline(appContext)) return@withContext DeleteOutcome.Offline
+        try {
+            withToken { token -> api.deleteAccount(token) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: CloudException) {
+            return@withContext when (e.kind) {
+                CloudErrorKind.SetupMissing -> DeleteOutcome.NeedsScript
+                CloudErrorKind.Offline -> DeleteOutcome.Offline
+                CloudErrorKind.SessionExpired -> {
+                    // The refresh failed and the session was already cleared.
+                    SyncScheduler.cancel(appContext)
+                    DeleteOutcome.SessionEnded
+                }
+                CloudErrorKind.Unauthorized -> DeleteOutcome.Failed(
+                    "Supabase didn't accept your session. Sign out, sign in again, then try again.",
+                )
+                else -> DeleteOutcome.Failed(e.message.orEmpty())
+            }
+        }
+        SyncScheduler.cancel(appContext)
+        config.clearSession()
+        resetSyncProgress()
+        config.cursorUserId = null
+        DeleteOutcome.Deleted
     }
 
     private fun sendLogout() {

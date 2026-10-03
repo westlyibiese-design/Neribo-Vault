@@ -128,6 +128,30 @@ class SupabaseApi(context: Context, private val config: CloudConfigStore) {
         if (!response.isSuccess) throw restError(response)
     }
 
+    /**
+     * Deletes the signed-in user's rows and account through the `delete_my_account` function that
+     * supabase/neribo_vault_account_deletion.sql installs. The function only ever acts on the
+     * caller (it reads auth.uid()), so no user id is sent.
+     * @throws CloudException on any failure.
+     */
+    fun deleteAccount(token: String) {
+        val url = baseUrl().newBuilder().addPathSegments("rest/v1/rpc/delete_my_account").build()
+        val request = baseRequest(url, token)
+            .post("{}".toRequestBody(JSON_TYPE))
+            .build()
+        val response = execute(request)
+        if (response.isSuccess) return
+        throw when {
+            response.code == 401 -> CloudException(CloudErrorKind.Unauthorized, "Your session has expired. Sign in again.")
+            response.code == 404 || errorCodeOf(response.body) == "PGRST202" -> CloudException(
+                CloudErrorKind.SetupMissing,
+                DELETE_SCRIPT_MISSING,
+            )
+            response.code == 429 || response.code >= 500 -> restError(response)
+            else -> CloudException(CloudErrorKind.Other, "Supabase couldn't delete the account. Try again later.")
+        }
+    }
+
     private fun restUrl(): HttpUrl =
         baseUrl().newBuilder().addPathSegments("rest/v1/vault_items").build()
 
@@ -171,6 +195,9 @@ class SupabaseApi(context: Context, private val config: CloudConfigStore) {
         val errorCode = errorCodeOf(response.body)
         return when {
             code == 401 -> CloudException(CloudErrorKind.Unauthorized, "Your session has expired. Sign in again.")
+            // The only foreign key on vault_items points at the account, so this means the account
+            // was deleted (for example from another phone). Treat it like an ended session.
+            errorCode == "23503" -> CloudException(CloudErrorKind.Unauthorized, "Your session has expired. Sign in again.")
             errorCode == "PGRST205" || errorCode == "42P01" || code == 404 -> CloudException(
                 CloudErrorKind.SetupMissing,
                 "The cloud table isn't set up yet. Run the SQL script in your Supabase project first.",
@@ -199,6 +226,8 @@ class SupabaseApi(context: Context, private val config: CloudConfigStore) {
         const val OFFLINE_MESSAGE =
             "You're offline. Your changes are safe on this phone and will sync when you're back online."
         const val SERVER_PROBLEM = "Supabase had a problem. Try again in a little while."
+        const val DELETE_SCRIPT_MISSING =
+            "Your cloud project is missing the account deletion script. Run it in the Supabase SQL editor, then try again."
         private const val CONNECT_TIMEOUT_SECONDS = 15L
         private const val READ_TIMEOUT_SECONDS = 30L
         private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()

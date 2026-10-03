@@ -10,7 +10,7 @@ These answers match `docs/PRIVACY_POLICY.md`. Check each against the Play Consol
 |---|---|
 | Does your app collect or share any of the required user data types? | **Yes**, but only when the user turns on optional cloud sync (see below) |
 | Is all of the user data collected by your app encrypted in transit? | **Yes** (HTTPS) |
-| Do you provide a way for users to request that their data be deleted? | **Yes**, by emailing the contact address in the privacy policy. See the warning at the end about account deletion |
+| Do you provide a way for users to request that their data be deleted? | **Yes**: in the app (Settings, then Cloud sync) and on the public deletion page. See the section at the end |
 
 ## Section 2. Data types
 
@@ -41,6 +41,10 @@ Notes on how to answer:
 | Data used for advertising or analytics | No |
 | Data sold | No |
 
-## Warning: account deletion requirement
+## Account deletion requirement: done in the app
 
-Google Play requires apps that let people create an account to offer account deletion **inside the app** and a **web link** where people can ask for deletion. Signing in with Google creates an account record in the Neribo cloud. The app does not yet have an in-app "Delete my cloud data" button (the Cloud screen says so). You need to fix this before publishing, either by adding that feature in a new phase, or by removing cloud sync from the Play version. Until then the "yes, users can request deletion" answer is only true through email.
+Google Play requires apps that let people create an account to offer account deletion **inside the app** and a **web link** where people can ask for deletion.
+
+- **In the app:** Settings, then Cloud sync, then "Delete my cloud data and account" (added in Phase 18). It deletes the synced data and the account, and leaves the data on the phone alone.
+- **Web link:** publish `web/delete-account/index.html` as a public page, replace its `[CONTACT EMAIL]` placeholder, and paste that page's link into the Play Console's account deletion question.
+- Run `supabase/neribo_vault_account_deletion.sql` in the Supabase project before relying on the button.

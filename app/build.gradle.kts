@@ -10,12 +10,12 @@ val releaseKeystorePath: String? = System.getenv("RELEASE_KEYSTORE_PATH")?.takeI
 
 android {
     namespace = "com.westly.neribovault"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.westly.neribovault"
         minSdk = 24
-        targetSdk = 34
+        targetSdk = 36
         // The release workflow sets VERSION_CODE and VERSION_NAME. Without them the values
         // are the same as before, so ordinary debug builds keep installing over each other.
         versionCode = System.getenv("VERSION_CODE")?.trim()?.toIntOrNull() ?: 1

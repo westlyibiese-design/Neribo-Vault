@@ -105,6 +105,11 @@ Run this on a phone, ideally on the release APK. Tick each line. Run it in light
 - [ ] Sync now: a change on one phone shows up on the other. Photos and files do not sync, only text.
 - [ ] Offline: the app keeps working and syncs when back online.
 - [ ] Sign out keeps all data on the phone and stops syncing.
+- [ ] Delete my cloud data and account: the dialog says what is and is not deleted, and the confirm button stays off until DELETE is typed.
+- [ ] After deleting: the Cloud screen is signed out, all vaults on the phone are intact, and the Supabase table has no rows for that user.
+- [ ] Signing in again afterwards works, and Sync now uploads the phone's data to a fresh account.
+- [ ] Offline: deleting shows "You need to be online" and the phone stays signed in.
+- [ ] The Delete button is off while a sync is running.
 
 ## Look and feel
 - [ ] Largest phone font size: Home, Notes, Goals and Settings show no cut-off or overlapping text.

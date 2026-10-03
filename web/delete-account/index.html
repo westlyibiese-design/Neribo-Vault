@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delete your Neribo Vault account and data</title>
+<meta name="description" content="How to delete your Neribo Vault cloud data and account, in the app or by email.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #faf8f4;
+    --card: #ffffff;
+    --text: #1a1917;
+    --muted: #5f5b54;
+    --accent: #ad5206;
+    --line: #e1ddd3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111112;
+      --card: #1b1b1c;
+      --text: #e9e7e2;
+      --muted: #a8a49c;
+      --accent: #e08a1e;
+      --line: #343436;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 40rem; margin: 0 auto; padding: 1.5rem 1.25rem 3rem; }
+  h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 .5rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 .5rem; }
+  p, li { margin: .5rem 0; }
+  .lead { color: var(--muted); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 1rem 1.1rem;
+    margin: 1rem 0;
+  }
+  ol, ul { padding-left: 1.4rem; margin: .5rem 0; }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  strong { font-weight: 650; }
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: .95rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Delete your Neribo Vault account and data</h1>
+  <p class="lead">Neribo Vault is a private vault app for Android by Westly Ibiese. This page explains how to delete the cloud copy of your data and your account.</p>
+
+  <h2>Option 1: delete it in the app (fastest)</h2>
+  <div class="card">
+    <ol>
+      <li>Open <strong>Neribo Vault</strong> and go to <strong>Settings</strong>.</li>
+      <li>Open <strong>Cloud sync</strong>.</li>
+      <li>Scroll to <strong>Delete my cloud data</strong> and tap <strong>Delete my cloud data and account</strong>.</li>
+      <li>Type <strong>DELETE</strong> and confirm.</li>
+    </ol>
+    <p>Deletion from the app happens straight away.</p>
+  </div>
+
+  <h2>Option 2: ask by email</h2>
+  <div class="card">
+    <p>If you can no longer open the app, email <a href="mailto:CONTACT-EMAIL-HERE">[CONTACT EMAIL]</a> from the Google account you used to sign in, with the subject <strong>Delete my Neribo Vault account</strong>. I will delete your cloud data and account and reply to confirm.</p>
+  </div>
+
+  <h2>What is deleted</h2>
+  <ul>
+    <li>Everything your account synced to the Neribo cloud: the text of your notes, ideas, goals, diary, stories, posts, church records, memories, documents and developer items.</li>
+    <li>Your account record, including the email address and user ID stored for sign-in.</li>
+  </ul>
+
+  <h2>What is not deleted</h2>
+  <ul>
+    <li>Anything stored on your own phone. Your vaults, photos, files and developer secrets never leave the phone, so delete them inside the app, or uninstall it.</li>
+    <li>Your Google account. Neribo Vault only uses it to sign you in.</li>
+    <li>Backup files (.nvbackup) you saved yourself, wherever you keep them.</li>
+  </ul>
+
+  <!-- OWNER TO CONFIRM BEFORE PUBLISHING: how long Supabase keeps database backups on your plan,
+       and add one sentence here if deleted data can remain in backups for a limited time. -->
+
+  <footer>
+    <p>Neribo Vault by Westly Ibiese, Benin City, Nigeria.</p>
+  </footer>
+</main>
+</body>
+</html>

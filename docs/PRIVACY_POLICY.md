@@ -70,7 +70,7 @@ Neribo Vault is a general-purpose app and is not directed at children under 13. 
 ## 8. Keeping and deleting your data
 
 - **On your phone:** delete items in the app, or clear the app's storage or uninstall it to remove everything.
-- **In the Neribo cloud:** signing out does not delete your cloud copy. To have your cloud data and account record deleted, email me at the address above from the Google account you used. I will delete it within a reasonable time. A way to delete your cloud copy from inside the app is not available yet.
+- **In the Neribo cloud:** signing out does not delete your cloud copy. To delete it, open Settings, then Cloud sync, then tap "Delete my cloud data and account" and confirm. This removes everything your account synced and the account record itself straight away, and does not touch the data on your phone. If you can no longer open the app, you can ask for deletion on [DELETION PAGE URL: add the public link to the deletion page here] or by email at the address above, from the Google account you used.
 
 ## 9. Security
 

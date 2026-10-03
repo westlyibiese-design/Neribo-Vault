@@ -75,8 +75,8 @@ Also needed: app icon (512 x 512 PNG) and a feature graphic (1024 x 500 PNG).
 
 ## Before you publish
 
-1. **Target API level (blocker).** Google Play now requires new apps and updates to target Android 16 (API level 36). Neribo Vault currently targets API 34, so the Play Console will reject the upload. Raising it needs a newer Android Gradle Plugin and compile SDK and a check of edge-to-edge and back-gesture behaviour. That is outside this phase and needs its own phase before you can publish.
-2. **Account deletion (blocker).** Because Google sign-in creates an account, Play requires an in-app way to delete it plus a web page for requests. See the end of `docs/PLAY_DATA_SAFETY.md`.
+1. **Target API level (done in Phase 19).** Google Play requires new apps and updates to target Android 16 (API level 36). Neribo Vault now targets API 36. Check the current requirement again in the Play Console on the day you publish, because Google raises it every year.
+2. **Account deletion (built in Phase 18).** The in-app button exists. Still to do: run `supabase/neribo_vault_account_deletion.sql` in the Supabase project, publish `web/delete-account/index.html` as a public page with your email in it, and paste its link into the Play Console. See the end of `docs/PLAY_DATA_SAFETY.md`.
 3. Pay the one-time Google Play developer account fee (US$25) and complete identity verification.
 4. If you use a personal developer account, Google requires a closed test with a minimum number of testers for a minimum number of days before you can apply for production. Check the current numbers in the Play Console.
 5. Enrol in Play App Signing and upload the **AAB** (`app-release.aab`), not the APK.

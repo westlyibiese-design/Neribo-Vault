@@ -8,6 +8,8 @@ import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.data.cloud.AuthOutcome
 import com.westly.neribovault.data.cloud.CloudAuth
 import com.westly.neribovault.data.cloud.CloudConfigState
+import com.westly.neribovault.data.cloud.DeleteOutcome
+import com.westly.neribovault.data.cloud.SupabaseApi
 import com.westly.neribovault.data.cloud.SyncEngine
 import com.westly.neribovault.data.cloud.SyncResult
 import com.westly.neribovault.data.cloud.SyncState
@@ -40,7 +42,18 @@ data class CloudUiState(
     val error: String? = null,
     val info: String? = null,
     val showSignOutConfirm: Boolean = false,
+    val showDeleteConfirm: Boolean = false,
+    val deleteConfirmText: String = "",
+    val deleting: Boolean = false,
+    /** A one-time message for a snackbar. The screen calls [CloudViewModel.consumeNotice] after showing it. */
+    val notice: String? = null,
 )
+
+/** The word a person must type before account deletion is enabled. */
+private const val DELETE_CONFIRM_WORD = "DELETE"
+
+/** True once [text] is the confirmation word, ignoring case and surrounding spaces. */
+internal fun isDeleteConfirmed(text: String): Boolean = text.trim().equals(DELETE_CONFIRM_WORD, ignoreCase = true)
 
 /** Typed-in values and transient messages, kept apart from the stored configuration. */
 internal data class CloudForm(
@@ -52,6 +65,10 @@ internal data class CloudForm(
     val error: String? = null,
     val info: String? = null,
     val showSignOutConfirm: Boolean = false,
+    val showDeleteConfirm: Boolean = false,
+    val deleteText: String = "",
+    val deleting: Boolean = false,
+    val notice: String? = null,
 )
 
 /** Drives the Cloud sync screen: project setup, account, per-vault switches and Sync now. */
@@ -92,6 +109,10 @@ class CloudViewModel(
             error = f.error,
             info = f.info,
             showSignOutConfirm = f.showSignOutConfirm,
+            showDeleteConfirm = f.showDeleteConfirm,
+            deleteConfirmText = f.deleteText,
+            deleting = f.deleting,
+            notice = f.notice,
         )
     }
 
@@ -225,7 +246,59 @@ class CloudViewModel(
         }
     }
 
+    // ---- Delete cloud data and account ---------------------------------------------------
+
+    fun askDeleteAccount() {
+        if (engine.isBusy) {
+            form.update { it.copy(info = "A sync is running. Try again when it has finished.") }
+            return
+        }
+        form.update { it.copy(showDeleteConfirm = true, deleteText = "", error = null, info = null) }
+    }
+
+    fun onDeleteTextChange(value: String) = form.update { it.copy(deleteText = value) }
+
+    fun dismissDeleteAccount() {
+        if (form.value.deleting) return
+        form.update { it.copy(showDeleteConfirm = false, deleteText = "") }
+    }
+
+    /** Deletes the cloud data and account. Waits for a running sync first, and never touches vault data on the phone. */
+    fun confirmDeleteAccount() {
+        val current = form.value
+        if (current.deleting || !isDeleteConfirmed(current.deleteText)) return
+        form.update { it.copy(deleting = true, error = null, info = null) }
+        viewModelScope.launch {
+            val outcome = engine.withSyncPaused { auth.deleteAccount() }
+            when (outcome) {
+                DeleteOutcome.Deleted -> {
+                    engine.clearStatus()
+                    form.update { CloudForm(notice = DELETED_NOTICE) }
+                }
+                DeleteOutcome.SessionEnded -> {
+                    engine.clearStatus()
+                    form.update { CloudForm(notice = SESSION_ENDED_NOTICE) }
+                }
+                DeleteOutcome.Offline -> form.update {
+                    it.copy(deleting = false, showDeleteConfirm = false, deleteText = "", error = OFFLINE_DELETE)
+                }
+                DeleteOutcome.NeedsScript -> form.update {
+                    it.copy(deleting = false, showDeleteConfirm = false, deleteText = "", error = SupabaseApi.DELETE_SCRIPT_MISSING)
+                }
+                is DeleteOutcome.Failed -> form.update {
+                    it.copy(deleting = false, showDeleteConfirm = false, deleteText = "", error = outcome.message)
+                }
+            }
+        }
+    }
+
+    /** Called by the screen once the notice has been shown. */
+    fun consumeNotice() = form.update { it.copy(notice = null) }
+
     private companion object {
+        const val DELETED_NOTICE = "Cloud data and account deleted. Everything on this phone is untouched."
+        const val SESSION_ENDED_NOTICE = "Your sign-in had expired, so nothing was deleted. Sign in again, then try again."
+        const val OFFLINE_DELETE = "You need to be online to delete your cloud data."
         const val STOP_TIMEOUT_MILLIS = 5_000L
     }
 }

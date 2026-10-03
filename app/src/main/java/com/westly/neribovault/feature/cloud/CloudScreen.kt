@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +30,9 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -71,6 +75,14 @@ fun CloudScreen(onBack: () -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val spacing = NeriboTheme.spacing
+
+    val notice = state.notice
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            snackbar.showSnackbar(notice)
+            vm.consumeNotice()
+        }
+    }
 
     NeriboScaffold(
         topBar = { NeriboTopBar(title = "Cloud sync", onBack = onBack) },
@@ -118,6 +130,11 @@ fun CloudScreen(onBack: () -> Unit) {
                         onSyncNow = vm::syncNow,
                         onVaultToggle = vm::setVaultEnabled,
                         onSignOut = vm::askSignOut,
+                        onDeleteAccount = vm::askDeleteAccount,
+                        onCopyDeleteScript = {
+                            context.copyToClipboard("Neribo Vault deletion script", SQL_DELETE_SCRIPT)
+                            scope.launch { snackbar.showSnackbar("Script copied") }
+                        },
                     )
                 }
                 Spacer(modifier = Modifier.height(spacing.xxl))
@@ -134,6 +151,91 @@ fun CloudScreen(onBack: () -> Unit) {
             onDismiss = vm::dismissSignOut,
         )
     }
+
+    if (state.showDeleteConfirm) {
+        DeleteAccountDialog(
+            usingOwnProject = state.usingOwnProject,
+            typed = state.deleteConfirmText,
+            deleting = state.deleting,
+            onTypedChange = vm::onDeleteTextChange,
+            onConfirm = vm::confirmDeleteAccount,
+            onDismiss = vm::dismissDeleteAccount,
+        )
+    }
+}
+
+/** Asks for a typed confirmation before the cloud copy and the account are deleted for good. */
+@Composable
+private fun DeleteAccountDialog(
+    usingOwnProject: Boolean,
+    typed: String,
+    deleting: Boolean,
+    onTypedChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    val spacing = NeriboTheme.spacing
+    val confirmed = isDeleteConfirmed(typed)
+    val place = if (usingOwnProject) "your Supabase project" else "the Neribo cloud"
+    AlertDialog(
+        onDismissRequest = { if (!deleting) onDismiss() },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = confirmed && !deleting,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Text(
+                    text = if (deleting) "Deleting\u2026" else "Delete my cloud data",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (confirmed && !deleting) colors.error else colors.onSurfaceVariant,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !deleting,
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) {
+                Text(
+                    text = "Cancel",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        },
+        title = { Text(text = "Delete cloud data and account?", style = MaterialTheme.typography.titleLarge) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    text = "This permanently deletes everything this account has synced to $place, " +
+                        "and the account itself. It cannot be undone.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(modifier = Modifier.height(spacing.md))
+                Text(
+                    text = "Your vaults, photos, files and secrets on this phone are not touched, " +
+                        "and your Google account is not affected.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(modifier = Modifier.height(spacing.lg))
+                NeriboTextField(
+                    value = typed,
+                    onValueChange = onTypedChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = "Type DELETE to confirm",
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                )
+            }
+        },
+        shape = MaterialTheme.shapes.large,
+        containerColor = colors.surface,
+        titleContentColor = colors.onSurface,
+        textContentColor = colors.onSurfaceVariant,
+        tonalElevation = 0.dp,
+    )
 }
 
 @Composable
@@ -363,6 +465,8 @@ private fun SignedInSection(
     onSyncNow: () -> Unit,
     onVaultToggle: (String, Boolean) -> Unit,
     onSignOut: () -> Unit,
+    onDeleteAccount: () -> Unit,
+    onCopyDeleteScript: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
@@ -435,11 +539,12 @@ private fun SignedInSection(
             BulletLine("Signing out keeps all your data on this phone.")
             if (state.usingOwnProject) {
                 BulletLine(
-                    "To remove your cloud copy, open your Supabase dashboard, then Table editor, then " +
-                        "vault_items, and delete the rows. You can also delete the whole project there.",
+                    "You can delete your cloud copy and account below once the deletion script has been run in " +
+                        "your Supabase project. You can also delete the rows or the whole project in your " +
+                        "Supabase dashboard.",
                 )
             } else {
-                BulletLine("Deleting your cloud copy from inside the app is not available yet.")
+                BulletLine("You can delete your cloud copy and account below. Your data on this phone stays.")
             }
         }
     }
@@ -450,6 +555,52 @@ private fun SignedInSection(
         style = ButtonStyle.Secondary,
         modifier = Modifier.fillMaxWidth(),
     )
+    Spacer(modifier = Modifier.height(spacing.xl))
+    SectionHeader(text = "Delete my cloud data")
+    Spacer(modifier = Modifier.height(spacing.sm))
+    NeriboCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(spacing.lg)) {
+            Text(
+                text = if (state.usingOwnProject) {
+                    "Removes everything this account has synced to your Supabase project, and the account " +
+                        "itself. Your vaults, photos, files and secrets on this phone are not touched."
+                } else {
+                    "Removes everything this account has synced to the Neribo cloud, and the account " +
+                        "itself. Your vaults, photos, files and secrets on this phone are not touched."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onSurfaceVariant,
+            )
+            if (state.usingOwnProject) {
+                Spacer(modifier = Modifier.height(spacing.md))
+                SmallNote(
+                    "Your own project needs the deletion script once. Copy it, paste it in the Supabase " +
+                        "SQL editor and run it.",
+                )
+                Spacer(modifier = Modifier.height(spacing.sm))
+                NeriboButton(
+                    text = "Copy deletion script",
+                    onClick = onCopyDeleteScript,
+                    style = ButtonStyle.Secondary,
+                    leadingIcon = Icons.Outlined.ContentCopy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(modifier = Modifier.height(spacing.lg))
+            NeriboButton(
+                text = "Delete my cloud data and account",
+                onClick = onDeleteAccount,
+                enabled = !state.syncing && !state.deleting,
+                style = ButtonStyle.Destructive,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (state.syncing) {
+                Spacer(modifier = Modifier.height(spacing.sm))
+                SmallNote("Wait for the sync to finish first.")
+            }
+            MessageLines(error = state.error, info = null)
+        }
+    }
 }
 
 /** The note shown under a vault switch, if it has one. */
@@ -562,6 +713,43 @@ private fun MessageLines(error: String?, info: String?) {
         Text(text = info, style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
     }
 }
+
+/** The same script as supabase/neribo_vault_account_deletion.sql, so it can be copied from the screen. */
+private val SQL_DELETE_SCRIPT = """-- =====================================================================
+-- Neribo Vault: account deletion function
+-- Paste this whole script into the Supabase SQL editor and press Run.
+-- It is safe to run more than once.
+--
+-- It adds one function, delete_my_account(). When a signed-in person
+-- taps "Delete my cloud data and account" in the app, the function:
+--   1. removes every one of their rows in vault_items, and
+--   2. removes their account.
+-- It only ever acts on the person who calls it, and nobody who is not
+-- signed in can call it.
+-- =====================================================================
+
+create or replace function public.delete_my_account()
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as ${'$'}${'$'}
+declare
+    caller uuid := auth.uid();
+begin
+    if caller is null then
+        raise exception 'Not signed in' using errcode = '28000';
+    end if;
+    delete from public.vault_items where user_id = caller;
+    delete from auth.users where id = caller;
+end;
+${'$'}${'$'};
+
+revoke all on function public.delete_my_account() from public;
+revoke all on function public.delete_my_account() from anon;
+revoke all on function public.delete_my_account() from authenticated;
+grant execute on function public.delete_my_account() to authenticated;
+"""
 
 /** The same script as supabase/neribo_vault_schema.sql, so it can be copied from the screen. */
 private const val SQL_SCRIPT = """-- =====================================================================
