@@ -30,6 +30,10 @@ private const val PAGE_ROWS = 66f
 /** Text rows of the 54-row grid sit this many page rows from the top (1 inch). */
 private const val TOP_OFFSET_ROWS = 6
 
+/** US Letter, in inches. The card keeps this shape (not columns over rows). */
+private const val PAGE_WIDTH_INCH = 8.5f
+private const val PAGE_HEIGHT_INCH = 11f
+
 private const val LEFT_COL = 15
 private const val CENTER_COL = 45
 private const val TITLE_START_ROW = 16
@@ -135,7 +139,7 @@ private fun PageCard(rows: List<GridText>) {
     Canvas(
         modifier = Modifier
             .fillMaxWidth()
-            .aspectRatio(PAGE_COLS / PAGE_ROWS)
+            .aspectRatio(PAGE_WIDTH_INCH / PAGE_HEIGHT_INCH)
             .background(Color.White)
             .border(1.dp, hairline),
     ) {
