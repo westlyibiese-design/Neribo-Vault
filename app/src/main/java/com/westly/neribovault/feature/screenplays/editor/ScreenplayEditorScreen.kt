@@ -1,61 +1,73 @@
 package com.westly.neribovault.feature.screenplays.editor
 
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Redo
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Undo
+import androidx.compose.material.icons.outlined.ViewList
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.navigation.NavBackStackEntry
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.LoadingState
 import com.westly.neribovault.core.ui.components.MenuAction
-import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.core.util.LifecycleSaveEffect
 import com.westly.neribovault.core.util.copyToClipboard
+import com.westly.neribovault.feature.screenplays.ScreenplaysRoutes
 import com.westly.neribovault.feature.screenplays.UNTITLED_SCREENPLAY
-import com.westly.neribovault.feature.screenplays.components.ScreenplayDetailsDialog
-import com.westly.neribovault.feature.screenplays.countLabel
-import com.westly.neribovault.feature.screenplays.engine.BlockType
-import com.westly.neribovault.feature.screenplays.engine.ScriptBlock
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 /**
- * A read-only viewer that part S2 replaces with the real editor. It draws a screenplay in
- * screenplay format. The four tool callbacks are accepted for the final signature but unused here.
- * Deleting hands the id back through [onBack]'s caller, which shows the Undo snackbar on the list.
+ * The screenplay writing screen: one block per paragraph, an element bar and suggestions above the
+ * keyboard, smart Enter and Backspace, undo and redo, and automatic saving.
  */
 @Composable
 fun ScreenplayEditorScreen(
@@ -66,76 +78,127 @@ fun ScreenplayEditorScreen(
     onOpenStats: () -> Unit,
     onOpenPreview: () -> Unit,
 ) {
-    val vm = neriboViewModel(key = "screenplay-viewer-$screenplayId") { c ->
-        ScreenplayViewerViewModel(c.screenplaysRepository, screenplayId)
+    val vm = neriboViewModel(key = "screenplay-editor-$screenplayId") { c ->
+        ScreenplayEditorViewModel(c.screenplaysRepository, screenplayId)
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    var showDetails by rememberSaveable { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val listState = rememberLazyListState()
     var leaving by remember { mutableStateOf(false) }
-    val screenplay = state.screenplay
 
-    val menuActions = if (screenplay == null) {
-        emptyList()
-    } else {
-        listOf(
-            MenuAction(
-                label = "Copy as Fountain text",
-                onClick = {
-                    scope.launch {
-                        snackbarHostState.currentSnackbarData?.dismiss()
-                        if (screenplay.content.isBlank()) {
-                            snackbarHostState.showSnackbar("Nothing to copy yet")
-                        } else {
-                            context.copyToClipboard("Screenplay", screenplay.content)
-                            snackbarHostState.showSnackbar("Copied")
-                        }
-                    }
-                },
-                icon = Icons.Outlined.ContentCopy,
-            ),
-            MenuAction(
-                label = "Details",
-                onClick = { showDetails = true },
-                icon = Icons.Outlined.Info,
-            ),
-            MenuAction(
-                label = "Delete",
-                onClick = {
-                    scope.launch {
-                        leaving = true
-                        vm.softDelete()
-                        onBack()
-                    }
-                },
-                icon = Icons.Outlined.Delete,
-                destructive = true,
-            ),
-        )
+    LifecycleSaveEffect(onSave = { vm.flush() })
+
+    // The Scenes screen asks the editor to jump to a block through the back stack entry.
+    val savedStateHandle = (LocalViewModelStoreOwner.current as? NavBackStackEntry)?.savedStateHandle
+    val jumpFlow: StateFlow<Int?> = remember(savedStateHandle) {
+        savedStateHandle?.getStateFlow<Int?>(ScreenplaysRoutes.KEY_JUMP_TO_BLOCK, null) ?: MutableStateFlow<Int?>(null)
+    }
+    val jumpIndex by jumpFlow.collectAsStateWithLifecycle()
+    LaunchedEffect(jumpIndex) {
+        val index = jumpIndex
+        if (index != null) {
+            vm.jumpToBlock(index)
+            savedStateHandle?.remove<Int>(ScreenplaysRoutes.KEY_JUMP_TO_BLOCK)
+        }
     }
 
-    val subtitle = if (screenplay == null) {
-        null
-    } else if (state.counts.isEmpty) {
-        "Empty"
-    } else {
-        countLabel(state.counts.pages, "page") + " \u00B7 " +
-            countLabel(state.counts.scenes, "scene") + " \u00B7 " +
-            countLabel(state.counts.characters, "character")
+    // Keep the focused block on screen when focus moves; drop the text focus for page breaks.
+    LaunchedEffect(state.focusTarget?.token) {
+        val target = state.focusTarget ?: return@LaunchedEffect
+        if (!target.textFocus) focusManager.clearFocus()
+        val index = state.blocks.indexOfFirst { it.id == target.blockId }
+        if (index >= 0) ensureVisible(listState, index)
+    }
+    val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    LaunchedEffect(imeVisible) {
+        if (imeVisible) {
+            delay(300)
+            val index = state.blocks.indexOfFirst { it.id == state.focusedId }
+            if (index >= 0) ensureVisible(listState, index)
+        }
+    }
+
+    fun navigateAfterSave(open: () -> Unit) {
+        scope.launch {
+            vm.flushNow()
+            open()
+        }
+    }
+
+    val menuActions = listOf(
+        MenuAction("Title page", { navigateAfterSave(onOpenTitlePage) }, Icons.Outlined.Description),
+        MenuAction("Scenes and characters", { navigateAfterSave(onOpenScenes) }, Icons.Outlined.ViewList),
+        MenuAction("Script stats", { navigateAfterSave(onOpenStats) }, Icons.Outlined.Info),
+        MenuAction("Preview and export", { navigateAfterSave(onOpenPreview) }, Icons.Outlined.Share),
+        MenuAction("Insert page break", { vm.insertPageBreak() }, Icons.Outlined.Add),
+        MenuAction(
+            label = "Copy as Fountain text",
+            onClick = {
+                scope.launch {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    val text = vm.currentFountain()
+                    if (text.isBlank()) {
+                        snackbarHostState.showSnackbar("Nothing to copy yet")
+                    } else {
+                        context.copyToClipboard("Screenplay", text)
+                        snackbarHostState.showSnackbar("Copied")
+                    }
+                }
+            },
+            icon = Icons.Outlined.ContentCopy,
+        ),
+        MenuAction(
+            label = "Delete screenplay",
+            onClick = {
+                scope.launch {
+                    leaving = true
+                    vm.deleteScreenplay()
+                    onBack()
+                }
+            },
+            icon = Icons.Outlined.Delete,
+            destructive = true,
+        ),
+    )
+
+    val focusedIndex = state.blocks.indexOfFirst { it.id == state.focusedId }
+    val focusedBlock = if (focusedIndex >= 0) state.blocks[focusedIndex] else null
+    val suggestions = remember(state.blocks, state.focusedId) {
+        if (focusedBlock == null) emptyList() else EditorRules.suggestions(state.blocks, state.focusedId)
     }
 
     NeriboScaffold(
         topBar = {
             NeriboTopBar(
-                title = screenplay?.title?.ifBlank { UNTITLED_SCREENPLAY } ?: "Screenplay",
-                onBack = onBack,
-                subtitle = subtitle,
+                title = state.title.ifBlank { UNTITLED_SCREENPLAY },
+                onBack = {
+                    vm.flush()
+                    onBack()
+                },
+                subtitle = if (state.isLoading || state.notFound) null else if (state.isSaving) "Saving\u2026" else "Saved",
                 actions = {
-                    if (menuActions.isNotEmpty()) OverflowMenu(actions = menuActions)
+                    if (!state.isLoading && !state.notFound) {
+                        HistoryButton(Icons.Outlined.Undo, "Undo", state.canUndo) { vm.undo() }
+                        HistoryButton(Icons.Outlined.Redo, "Redo", state.canRedo) { vm.redo() }
+                        OverflowMenu(actions = menuActions)
+                    }
                 },
             )
+        },
+        bottomBar = {
+            if (!leaving && focusedBlock != null) {
+                BottomPanel(
+                    focused = focusedBlock,
+                    previousType = state.blocks.getOrNull(focusedIndex - 1)?.type,
+                    suggestions = suggestions,
+                    onSuggestion = { vm.applySuggestion(it.newText) },
+                    onChangeType = { vm.changeType(it) },
+                    onDeletePageBreak = { vm.deletePageBreak() },
+                )
+            }
         },
         snackbarHostState = snackbarHostState,
     ) { padding ->
@@ -143,7 +206,7 @@ fun ScreenplayEditorScreen(
             when {
                 leaving -> Unit
                 state.isLoading -> LoadingState()
-                screenplay == null -> EmptyState(
+                state.notFound -> EmptyState(
                     icon = Icons.Outlined.Movie,
                     title = "Screenplay not found",
                     message = "It may have been deleted or moved.",
@@ -151,127 +214,99 @@ fun ScreenplayEditorScreen(
                     actionLabel = "Back",
                     onAction = onBack,
                 )
-                state.blocks.isEmpty() -> EmptyState(
-                    icon = Icons.Outlined.Movie,
-                    title = "This screenplay is empty",
-                    message = "The writing screen arrives in the next update.",
-                    modifier = Modifier.fillMaxSize(),
+                else -> BlockList(
+                    state = state,
+                    listState = listState,
+                    vm = vm,
                 )
-                else -> ScriptViewer(blocks = state.blocks)
             }
         }
     }
+}
 
-    if (showDetails && screenplay != null) {
-        ScreenplayDetailsDialog(
-            isNew = false,
-            initialTitle = screenplay.title,
-            initialAuthor = screenplay.author,
-            onDismiss = { showDetails = false },
-            onConfirm = { title, author ->
-                vm.updateDetails(title, author)
-                showDetails = false
-            },
-        )
+/** Scrolls so the item at [index] is on screen, doing nothing when it already is. */
+private suspend fun ensureVisible(listState: LazyListState, index: Int) {
+    val info = listState.layoutInfo
+    val item = info.visibleItemsInfo.firstOrNull { it.index == index }
+    if (item == null) {
+        listState.scrollToItem(index)
+        return
+    }
+    val overflowBottom = item.offset + item.size - info.viewportEndOffset
+    val overflowTop = info.viewportStartOffset - item.offset
+    if (overflowBottom > 0) {
+        listState.animateScrollBy(overflowBottom.toFloat())
+    } else if (overflowTop > 0) {
+        listState.animateScrollBy(-overflowTop.toFloat())
     }
 }
 
-/** The parsed blocks, drawn the way the editor will draw them, without any editing. */
 @Composable
-private fun ScriptViewer(blocks: List<ScriptBlock>) {
+private fun BlockList(
+    state: EditorUiState,
+    listState: LazyListState,
+    vm: ScreenplayEditorViewModel,
+) {
     val spacing = NeriboTheme.spacing
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val contentWidth = maxWidth - spacing.screen * 2
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = spacing.screen,
                 end = spacing.screen,
                 top = spacing.md,
-                bottom = 48.dp,
+                bottom = 120.dp,
             ),
         ) {
-            itemsIndexed(blocks) { index, block ->
-                val previous: ScriptBlock? = if (index > 0) blocks[index - 1] else null
-                ScriptBlockView(block = block, previous = previous, contentWidth = contentWidth)
+            itemsIndexed(state.blocks, key = { _, block -> block.id }) { index, block ->
+                val target = state.focusTarget
+                val flash = state.flash
+                BlockRow(
+                    block = block,
+                    previousType = if (index > 0) state.blocks[index - 1].type else null,
+                    contentWidth = contentWidth,
+                    isFocused = state.focusedId == block.id,
+                    focusTarget = if (target != null && target.blockId == block.id) target else null,
+                    flashToken = if (flash != null && flash.blockId == block.id) flash.token else 0L,
+                    syncRevision = state.syncRevision,
+                    onEdit = { edit -> vm.onFieldEdit(block.id, edit) },
+                    onFocused = { vm.onFocused(block.id) },
+                    onPageBreakTap = { vm.focusPageBreak(block.id) },
+                    onCursor = { offset -> vm.reportCursor(offset) },
+                    consumeCursor = { request -> vm.consumeCursor(request) },
+                )
+            }
+            item(key = "tail") {
+                Spacer(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(320.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { vm.onTapBelow() },
+                        ),
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ScriptBlockView(block: ScriptBlock, previous: ScriptBlock?, contentWidth: Dp) {
-    if (block.type == BlockType.PAGE_BREAK) {
-        PageBreakDivider()
-        return
-    }
-    val previousType = previous?.type
-    val followsCue = (block.type == BlockType.PARENTHETICAL || block.type == BlockType.DIALOGUE) &&
-        (
-            previousType == BlockType.CHARACTER ||
-                previousType == BlockType.PARENTHETICAL ||
-                previousType == BlockType.DIALOGUE
-            )
-    val top = when {
-        block.type == BlockType.SCENE_HEADING -> 24.dp
-        followsCue -> 0.dp
-        else -> 12.dp
-    }
-    val startFraction = when (block.type) {
-        BlockType.CHARACTER -> 0.367f
-        BlockType.PARENTHETICAL -> 0.267f
-        BlockType.DIALOGUE -> 0.167f
-        else -> 0f
-    }
-    val endFraction = when (block.type) {
-        BlockType.PARENTHETICAL -> 0.333f
-        BlockType.DIALOGUE -> 0.25f
-        else -> 0f
-    }
-    val shown = when (block.type) {
-        BlockType.SCENE_HEADING, BlockType.CHARACTER, BlockType.TRANSITION -> block.text.uppercase()
-        BlockType.PARENTHETICAL -> "(" + block.text + ")"
-        else -> block.text
-    }
-    val rightAligned = block.type == BlockType.TRANSITION &&
-        !block.text.trim().equals("FADE IN:", ignoreCase = true)
-
-    Text(
-        text = shown,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                start = contentWidth * startFraction,
-                end = contentWidth * endFraction,
-                top = top,
-            ),
-        style = TextStyle(
-            fontFamily = FontFamily.Monospace,
-            fontSize = 15.sp,
-            lineHeight = 22.sp,
-            fontWeight = if (block.type == BlockType.SCENE_HEADING) FontWeight.Medium else FontWeight.Normal,
-            color = MaterialTheme.colorScheme.onBackground,
-            textAlign = if (rightAligned) TextAlign.End else TextAlign.Start,
-        ),
-    )
-}
-
-@Composable
-private fun PageBreakDivider() {
-    val spacing = NeriboTheme.spacing
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = spacing.lg),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        NeriboDivider(modifier = Modifier.weight(1f))
-        Text(
-            text = "PAGE BREAK",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = spacing.sm),
+private fun HistoryButton(
+    icon: ImageVector,
+    description: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val tint = MaterialTheme.colorScheme.onSurfaceVariant
+    IconButton(onClick = onClick, enabled = enabled) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (enabled) tint else tint.copy(alpha = 0.38f),
         )
-        NeriboDivider(modifier = Modifier.weight(1f))
     }
 }
