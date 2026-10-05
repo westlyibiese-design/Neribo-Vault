@@ -249,7 +249,7 @@ private fun BlockTextField(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                inner()
+                Box(modifier = Modifier.fillMaxWidth()) { inner() }
             }
         },
     )
