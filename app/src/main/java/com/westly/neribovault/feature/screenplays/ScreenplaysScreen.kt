@@ -1,6 +1,8 @@
 package com.westly.neribovault.feature.screenplays
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.BuildConfig
@@ -64,6 +67,8 @@ import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.feature.screenplays.components.ScreenplayCard
 import com.westly.neribovault.feature.screenplays.components.ScreenplayDetailsDialog
 import com.westly.neribovault.feature.screenplays.engine.CheckResult
+import com.westly.neribovault.feature.screenplays.fountain.FountainImportEvent
+import com.westly.neribovault.feature.screenplays.fountain.FountainImportViewModel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
@@ -85,6 +90,11 @@ fun ScreenplaysScreen(
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val searchFocus = remember { FocusRequester() }
+    val context = LocalContext.current
+    val importVm = neriboViewModel(key = "screenplays-import") { c -> FountainImportViewModel(c.screenplaysRepository) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importVm.importFrom(context.contentResolver, uri)
+    }
     val lockEnabled by rememberVaultLockEnabled(VAULT_ID)
     var focusSearchOnOpen by rememberSaveable { mutableStateOf(false) }
     var localQuery by rememberSaveable { mutableStateOf(state.query) }
@@ -108,6 +118,20 @@ fun ScreenplaysScreen(
                 onDeletedIdConsumed()
                 showUndo("Moved to Recently deleted") { vm.restore(id) }
             }
+        }
+    }
+
+    LaunchedEffect(importVm) {
+        importVm.events.collect { event ->
+            val message = when (event) {
+                is FountainImportEvent.Imported -> "Imported ${event.title}"
+                FountainImportEvent.Failed -> "That file could not be imported."
+            }
+            scope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                snackbarHostState.showSnackbar(message)
+            }
+            if (event is FountainImportEvent.Imported) onOpenScreenplay(event.id)
         }
     }
 
@@ -136,6 +160,13 @@ fun ScreenplaysScreen(
                 label = "Recently deleted",
                 onClick = onOpenTrash,
                 icon = Icons.Outlined.History,
+            ),
+        )
+        add(
+            MenuAction(
+                label = "Import .fountain file",
+                onClick = { importLauncher.launch(arrayOf("*/*")) },
+                icon = Icons.Outlined.FolderOpen,
             ),
         )
         if (BuildConfig.DEBUG) {

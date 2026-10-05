@@ -13,6 +13,8 @@ import com.westly.neribovault.feature.ideas.IdeasRoutes
 import com.westly.neribovault.feature.memories.MemoriesRoutes
 import com.westly.neribovault.feature.notes.NotesRoutes
 import com.westly.neribovault.feature.posts.PostsRoutes
+import com.westly.neribovault.feature.screenplays.ScreenplaysRoutes
+import com.westly.neribovault.feature.screenplays.engine.Fountain
 import com.westly.neribovault.feature.writers.WritersRoutes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -50,6 +52,7 @@ class GlobalIndex(private val container: AppContainer) {
         if (VAULT_GOALS !in hiddenVaults) loadGoals(items)
         if (VAULT_DIARY !in hiddenVaults) loadDiary(items)
         if (VAULT_WRITERS !in hiddenVaults) loadWriters(items)
+        if (VAULT_SCREENPLAYS !in hiddenVaults) loadScreenplays(items)
         if (VAULT_POSTS !in hiddenVaults) loadPosts(items)
         if (VAULT_CHURCH !in hiddenVaults) loadChurch(items)
         if (VAULT_MEMORIES !in hiddenVaults) loadMemories(items)
@@ -211,6 +214,29 @@ class GlobalIndex(private val container: AppContainer) {
                         body = joinText(idea.body, idea.genre.orEmpty()),
                         updatedAt = idea.updatedAt,
                         route = WritersRoutes.IDEAS,
+                    ),
+                )
+            }
+    }
+
+    /** Title, author and the text of every block of the script. Contact details are never indexed. */
+    private suspend fun loadScreenplays(out: MutableList<IndexedItem>) {
+        container.screenplaysRepository.observeAll().first()
+            .filter { !it.isDeleted }
+            .forEach { screenplay ->
+                val script = Fountain.parse(screenplay.content)
+                    .map { it.text }
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ")
+                out.add(
+                    item(
+                        vaultId = VAULT_SCREENPLAYS,
+                        kind = "Screenplay",
+                        id = screenplay.id,
+                        title = screenplay.title.trim().ifEmpty { "Untitled screenplay" },
+                        body = screenplay.author + " " + script,
+                        updatedAt = screenplay.updatedAt,
+                        route = ScreenplaysRoutes.editor(screenplay.id),
                     ),
                 )
             }
@@ -436,6 +462,7 @@ class GlobalIndex(private val container: AppContainer) {
         const val VAULT_GOALS = "goals"
         const val VAULT_DIARY = "diary"
         const val VAULT_WRITERS = "writers"
+        const val VAULT_SCREENPLAYS = "screenplays"
         const val VAULT_POSTS = "posts"
         const val VAULT_CHURCH = "church"
         const val VAULT_MEMORIES = "memories"

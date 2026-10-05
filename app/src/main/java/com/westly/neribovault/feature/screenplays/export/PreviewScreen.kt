@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -31,9 +32,12 @@ import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.ButtonStyle
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.LoadingState
+import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
+import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.feature.screenplays.share.ScriptShareViewModel
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -46,6 +50,9 @@ fun PreviewScreen(screenplayId: String, onBack: () -> Unit) {
     val previewDir = File(context.applicationContext.cacheDir, "preview")
     val vm = neriboViewModel(key = "preview-$screenplayId") { c ->
         PreviewViewModel(c.screenplaysRepository, screenplayId, previewDir)
+    }
+    val shareVm = neriboViewModel(key = "share-$screenplayId") { c ->
+        ScriptShareViewModel(c.screenplaysRepository, screenplayId)
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val spacing = NeriboTheme.spacing
@@ -63,8 +70,21 @@ fun PreviewScreen(screenplayId: String, onBack: () -> Unit) {
         if (uri != null) vm.savePdf(context.contentResolver, uri)
     }
 
+    val fountainLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) shareVm.exportFountain(context.contentResolver, uri)
+    }
+
     LaunchedEffect(vm) {
         vm.messages.collect { message ->
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    LaunchedEffect(shareVm) {
+        shareVm.messages.collect { message ->
             snackbarHostState.currentSnackbarData?.dismiss()
             snackbarHostState.showSnackbar(message)
         }
@@ -93,6 +113,22 @@ fun PreviewScreen(screenplayId: String, onBack: () -> Unit) {
                         enabled = ready && !state.isSaving,
                         style = ButtonStyle.Text,
                         leadingIcon = Icons.Outlined.Save,
+                    )
+                    OverflowMenu(
+                        actions = listOf(
+                            MenuAction(
+                                label = "Share PDF",
+                                onClick = { shareVm.startShare(context) },
+                                icon = Icons.Outlined.Share,
+                            ),
+                            MenuAction(
+                                label = "Export .fountain file",
+                                onClick = {
+                                    fountainLauncher.launch(pdfFileName(state.title).removeSuffix(".pdf") + ".fountain")
+                                },
+                                icon = Icons.Outlined.Description,
+                            ),
+                        ),
                     )
                 },
             )

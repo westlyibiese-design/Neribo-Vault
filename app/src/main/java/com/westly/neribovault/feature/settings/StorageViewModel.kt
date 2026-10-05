@@ -157,6 +157,8 @@ class StorageViewModel(
             .forEach { container.writingIdeasRepository.deletePermanently(it.id) }
         container.postsRepository.observeTrashed().first().forEach { container.postsRepository.deletePermanently(it.id) }
         container.churchRepository.observeTrashed().first().forEach { container.churchRepository.deletePermanently(it.id) }
+        container.screenplaysRepository.observeTrashed().first()
+            .forEach { container.screenplaysRepository.deletePermanently(it.id) }
         memories.forEach { container.memoriesRepository.deletePermanently(it.id) }
         documents.forEach { container.personalDocumentsRepository.deletePermanently(it.id) }
         container.projectsRepository.observeTrashed().first().forEach { container.projectsRepository.deletePermanently(it.id) }
