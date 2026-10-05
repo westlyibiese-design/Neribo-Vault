@@ -22,11 +22,13 @@ interface NoteDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: NoteEntity)
 
-    @Query("UPDATE notes SET isDeleted = 1, deletedAt = :now WHERE id = :id")
+    /** Also stamps `updatedAt`, because sync only sends rows whose `updatedAt` moved forward. */
+    @Query("UPDATE notes SET isDeleted = 1, deletedAt = :now, updatedAt = :now WHERE id = :id")
     suspend fun softDelete(id: String, now: Long)
 
-    @Query("UPDATE notes SET isDeleted = 0, deletedAt = NULL WHERE id = :id")
-    suspend fun restore(id: String)
+    /** Also stamps `updatedAt`, for the same reason as [softDelete]. */
+    @Query("UPDATE notes SET isDeleted = 0, deletedAt = NULL, updatedAt = :now WHERE id = :id")
+    suspend fun restore(id: String, now: Long)
 
     @Query("SELECT * FROM notes WHERE isDeleted = 1 ORDER BY deletedAt DESC")
     fun observeTrashed(): Flow<List<NoteEntity>>

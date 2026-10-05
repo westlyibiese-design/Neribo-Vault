@@ -156,7 +156,7 @@ class NoteEditorViewModel(
                 saveMutex.withLock {
                     persistLocked()
                     val target = currentId
-                    if (target != null) repository.softDelete(target)
+                    if (target != null) repository.softDelete(target, "Editor: Delete button")
                     deleted = true
                     target
                 }
@@ -191,7 +191,7 @@ class NoteEditorViewModel(
         val isEmpty = text.title.isBlank() && text.body.isBlank() && meta.tags.isEmpty()
         if (isEmpty && isNew) {
             if (existingId != null) {
-                repository.deletePermanently(existingId)
+                repository.deletePermanently(existingId, "Editor: new note was emptied, so it was discarded automatically")
                 currentId = null
             }
             _state.update { it.copy(saveStatus = SaveStatus.Idle, updatedAt = null) }

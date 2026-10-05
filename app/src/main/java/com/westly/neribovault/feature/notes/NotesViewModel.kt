@@ -153,7 +153,7 @@ class NotesViewModel(private val repository: NotesRepository) : ViewModel() {
     }
 
     fun delete(id: String) {
-        viewModelScope.launch { repository.softDelete(id) }
+        viewModelScope.launch { repository.softDelete(id, "Notes list: Delete") }
     }
 
     fun restore(id: String) {

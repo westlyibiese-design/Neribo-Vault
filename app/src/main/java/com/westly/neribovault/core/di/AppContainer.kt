@@ -4,6 +4,7 @@ import android.content.Context
 import com.westly.neribovault.data.cloud.CloudAuth
 import com.westly.neribovault.data.cloud.SyncEngine
 import com.westly.neribovault.data.local.NeriboDatabase
+import com.westly.neribovault.data.local.NoteDeleteTrace
 import com.westly.neribovault.data.repository.AuditRepository
 import com.westly.neribovault.data.repository.BugsRepository
 import com.westly.neribovault.data.repository.ChurchRepository
@@ -34,7 +35,8 @@ class AppContainer(context: Context) {
     private val db: NeriboDatabase = database
 
     val settingsStore: SettingsStore = SettingsStore(context.applicationContext)
-    val notesRepository: NotesRepository = NotesRepository(db.noteDao())
+    val noteDeleteTrace: NoteDeleteTrace = NoteDeleteTrace(db)
+    val notesRepository: NotesRepository = NotesRepository(db.noteDao(), noteDeleteTrace)
     val ideasRepository: IdeasRepository = IdeasRepository(db.ideaDao())
     val goalsRepository: GoalsRepository = GoalsRepository(db, db.goalDao(), db.goalMilestoneDao())
     val diaryRepository: DiaryRepository = DiaryRepository(db.diaryEntryDao())
@@ -62,7 +64,7 @@ class AppContainer(context: Context) {
 
     /** Permanently removes everything that has been in the trash since before [cutoffMillis]. */
     suspend fun purgeExpiredTrash(cutoffMillis: Long) {
-        notesRepository.purgeTrashedBefore(cutoffMillis)
+        notesRepository.purgeTrashedBefore(cutoffMillis, "Clean-up: note had been in Recently deleted for over 30 days")
         ideasRepository.purgeTrashedBefore(cutoffMillis)
         goalsRepository.purgeTrashedBefore(cutoffMillis)
         diaryRepository.purgeTrashedBefore(cutoffMillis)

@@ -8,6 +8,7 @@ import androidx.sqlite.db.SupportSQLiteStatement
 import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.data.local.NeriboDatabase
+import com.westly.neribovault.data.local.NoteDeleteTraceSql
 import com.westly.neribovault.feature.developer.secrets.SecretsBackup
 import java.io.File
 import java.io.IOException
@@ -279,6 +280,7 @@ class BackupReader(
                 val db = database.openHelper.writableDatabase
                 val tables = BackupFormat.backedUpTables(db)
                 val columnsByTable = HashMap<String, Set<String>>()
+                runCatching { NoteDeleteTraceSql.setReason(db, "Backup restore: cleared the tables before importing") }
                 for (table in tables) {
                     columnsByTable[table] = BackupFormat.columnsOf(db, table).toSet()
                     db.execSQL("DELETE FROM \"$table\"")
@@ -293,6 +295,7 @@ class BackupReader(
                 }
                 // A restored database has no pending deletes to tell the cloud about.
                 db.execSQL("DELETE FROM ${BackupFormat.TABLE_TOMBSTONES}")
+                runCatching { NoteDeleteTraceSql.clearReason(db) }
                 true
             },
         )

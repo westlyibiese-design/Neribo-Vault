@@ -155,6 +155,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         private val SYNC_TRIGGER_CALLBACK: RoomDatabase.Callback = object : RoomDatabase.Callback() {
             override fun onOpen(db: SupportSQLiteDatabase) {
                 SyncTables.ALL.forEach { table -> db.execSQL(SyncTables.tombstoneTriggerSql(table.name)) }
+                NoteDeleteTraceSql.install(db)
             }
         }
     }

@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.util.Log
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.westly.neribovault.data.local.NeriboDatabase
+import com.westly.neribovault.data.local.NoteDeleteTraceSql
 import java.util.concurrent.Callable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -116,6 +117,7 @@ class SyncEngine(
             }
             val now = System.currentTimeMillis()
             config.setLastSyncAt(now)
+            runCatching { NoteDeleteTraceSql.recordSync(database.openHelper.writableDatabase, now) }
             _state.value = SyncState.Success(now)
             SyncResult.Success(pulled, pushed, now)
         } catch (e: CancellationException) {
@@ -215,7 +217,30 @@ class SyncEngine(
 
         if (row.isTombstone) {
             if (localUpdatedAt == null) return 0
+            // A delete marker only wins over a row that has not been changed since the marker was
+            // made. Marker times are cut down to whole seconds, so allow for the rest of that second.
+            if (localUpdatedAt > row.updatedAt + MARKER_TIME_PRECISION_MS) {
+                if (table == NOTES_TABLE) {
+                    runCatching {
+                        NoteDeleteTraceSql.logProtected(
+                            db,
+                            row.id,
+                            "Cloud sync: ignored a delete marker because the note on this phone is newer",
+                        )
+                    }
+                }
+                // The cloud now holds only the marker, so send this newer row up to replace it.
+                db.execSQL(
+                    "UPDATE \"$table\" SET updatedAt = ? WHERE id = ?",
+                    arrayOf<Any?>(System.currentTimeMillis(), row.id),
+                )
+                return 0
+            }
+            if (table == NOTES_TABLE) {
+                runCatching { NoteDeleteTraceSql.setReason(db, "Cloud sync: applied a delete marker from the cloud") }
+            }
             db.execSQL("DELETE FROM \"$table\" WHERE id = ?", arrayOf<Any?>(row.id))
+            if (table == NOTES_TABLE) runCatching { NoteDeleteTraceSql.clearReason(db) }
             // The delete above just made a tombstone of its own; it must not be sent back.
             db.execSQL("DELETE FROM sync_tombstones WHERE kind = ? AND rowId = ?", arrayOf<Any?>(table, row.id))
             return 1
@@ -471,6 +496,8 @@ class SyncEngine(
         const val PUSH_BATCH_SIZE = 100
         const val GUARD_MIN_ROWS = 10
         const val GUARD_PERCENT = 30
+        const val NOTES_TABLE = "notes"
+        const val MARKER_TIME_PRECISION_MS = 999L
         const val PERSONAL_DOCUMENTS_TABLE = "personal_documents"
         const val PRIVATE_FILE_SUFFIX = ".nvenc"
         const val PRIVATE_FILE_FILTER = " AND (fileUri IS NULL OR fileUri NOT LIKE '%.nvenc')"

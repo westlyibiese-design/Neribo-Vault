@@ -144,7 +144,7 @@ class StorageViewModel(
             val path = document.fileUri
             if (!path.isNullOrEmpty()) documentStore.deleteFiles(listOf(path))
         }
-        container.notesRepository.observeTrashed().first().forEach { container.notesRepository.deletePermanently(it.id) }
+        container.notesRepository.observeTrashed().first().forEach { container.notesRepository.deletePermanently(it.id, "Settings > Storage: empty the trash") }
         container.ideasRepository.observeTrashed().first().forEach { container.ideasRepository.deletePermanently(it.id) }
         container.goalsRepository.observeTrashed().first().forEach { container.goalsRepository.deletePermanently(it.id) }
         container.diaryRepository.observeTrashed().first().forEach { container.diaryRepository.deletePermanently(it.id) }

@@ -1,6 +1,7 @@
 package com.westly.neribovault.feature.backup
 
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.westly.neribovault.data.local.NoteDeleteTraceSql
 import java.io.FilterOutputStream
 import java.io.OutputStream
 
@@ -60,6 +61,8 @@ internal object BackupFormat {
 
     private fun isUserTable(name: String): Boolean =
         name != TABLE_TOMBSTONES &&
+            name != NoteDeleteTraceSql.TABLE &&
+            name != NoteDeleteTraceSql.CONTEXT_TABLE &&
             name != "room_master_table" &&
             name != "android_metadata" &&
             name != "room_table_modification_log" &&

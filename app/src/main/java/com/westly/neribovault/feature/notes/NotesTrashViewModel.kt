@@ -29,14 +29,14 @@ class NotesTrashViewModel(private val repository: NotesRepository) : ViewModel()
     }
 
     fun deleteForever(id: String) {
-        viewModelScope.launch { repository.deletePermanently(id) }
+        viewModelScope.launch { repository.deletePermanently(id, "Recently deleted: Delete forever") }
     }
 
     /** Permanently deletes every note that is in the trash right now. */
     fun emptyTrash() {
         viewModelScope.launch {
             repository.observeTrashed().first().forEach { note ->
-                repository.deletePermanently(note.id)
+                repository.deletePermanently(note.id, "Recently deleted: Empty all")
             }
         }
     }

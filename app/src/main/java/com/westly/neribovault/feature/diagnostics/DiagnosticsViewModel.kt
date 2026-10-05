@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.westly.neribovault.core.di.AppContainer
 import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.core.util.startOfDayMillis
+import com.westly.neribovault.data.local.NoteTraceEntry
 import com.westly.neribovault.data.local.entity.BugEntity
 import com.westly.neribovault.data.local.entity.ChurchRecordEntity
 import com.westly.neribovault.data.local.entity.DiaryEntryEntity
@@ -49,6 +50,7 @@ data class DiagnosticsUiState(
     val isRunning: Boolean = false,
     val results: List<SelfTestResult> = emptyList(),
     val counts: List<RowCount> = emptyList(),
+    val noteTrace: List<NoteTraceEntry> = emptyList(),
 )
 
 /** Runs a full insert, read, trash, restore and delete cycle on every repository. */
@@ -58,6 +60,22 @@ class DiagnosticsViewModel(private val container: AppContainer) : ViewModel() {
 
     init {
         refreshCounts()
+        refreshNoteTrace()
+    }
+
+    /** Reloads the note delete trace. */
+    fun refreshNoteTrace() {
+        viewModelScope.launch {
+            val entries = container.noteDeleteTrace.recent()
+            _state.update { it.copy(noteTrace = entries) }
+        }
+    }
+
+    fun clearNoteTrace() {
+        viewModelScope.launch {
+            container.noteDeleteTrace.clear()
+            _state.update { it.copy(noteTrace = emptyList()) }
+        }
     }
 
     fun runSelfTest() {
@@ -70,6 +88,7 @@ class DiagnosticsViewModel(private val container: AppContainer) : ViewModel() {
             }
             _state.update { it.copy(isRunning = false) }
             loadCounts()
+            refreshNoteTrace()
         }
     }
 
@@ -186,7 +205,7 @@ class DiagnosticsViewModel(private val container: AppContainer) : ViewModel() {
         val id = newId()
         val now = System.currentTimeMillis()
         val item = NoteEntity(id = id, createdAt = now, updatedAt = now, title = "Sunday service reminder", body = "Bring the offering envelope.")
-        return cycle<NoteEntity>("Notes", id, { it.id }, { r.upsert(item) }, { r.getById(id) }, r.observeAll(), r.observeTrashed(), { r.softDelete(id) }, { r.restore(id) }, { r.deletePermanently(id) })
+        return cycle<NoteEntity>("Notes", id, { it.id }, { r.upsert(item) }, { r.getById(id) }, r.observeAll(), r.observeTrashed(), { r.softDelete(id, "Diagnostics self-test") }, { r.restore(id) }, { r.deletePermanently(id, "Diagnostics self-test") })
     }
 
     private suspend fun ideasTest(c: AppContainer): SelfTestResult {
