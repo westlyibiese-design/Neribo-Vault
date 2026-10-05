@@ -25,6 +25,7 @@ import com.westly.neribovault.feature.memories.memoriesGraph
 import com.westly.neribovault.feature.notes.notesGraph
 import com.westly.neribovault.feature.posts.postsGraph
 import com.westly.neribovault.feature.recent.recentGraph
+import com.westly.neribovault.feature.screenplays.screenplaysGraph
 import com.westly.neribovault.feature.search.searchGraph
 import com.westly.neribovault.feature.security.securityGraph
 import com.westly.neribovault.feature.settings.settingsGraph
@@ -76,6 +77,7 @@ fun NeriboNavHost() {
         goalsGraph(navController)
         diaryGraph(navController)
         writersGraph(navController)
+        screenplaysGraph(navController)
         postsGraph(navController)
         churchGraph(navController)
         memoriesGraph(navController)

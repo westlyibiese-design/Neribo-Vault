@@ -10,6 +10,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Lightbulb
+import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.TrackChanges
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.westly.neribovault.core.navigation.Routes
@@ -66,6 +67,14 @@ object VaultCatalog {
             route = Routes.WRITERS,
             icon = Icons.Outlined.Edit,
             tagline = "Stories and more",
+        ),
+        VaultDefinition(
+            id = "screenplays",
+            name = "Screenplays",
+            description = "Write scenes and scripts in proper screenplay format",
+            route = Routes.SCREENPLAYS,
+            icon = Icons.Outlined.Movie,
+            tagline = "Scenes and scripts",
         ),
         VaultDefinition(
             id = "posts",
