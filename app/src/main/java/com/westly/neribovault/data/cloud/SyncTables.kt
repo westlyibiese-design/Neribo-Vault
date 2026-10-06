@@ -73,4 +73,18 @@ object SyncTables {
         "CREATE TRIGGER IF NOT EXISTS sync_tomb_$table AFTER DELETE ON $table BEGIN " +
             "INSERT OR REPLACE INTO sync_tombstones(kind, rowId, deletedAt) " +
             "VALUES('$table', OLD.id, CAST(strftime('%s','now') AS INTEGER) * 1000); END;"
+
+    /**
+     * Saving a row with INSERT OR REPLACE deletes the old row and inserts the new one, which fires
+     * [tombstoneTriggerSql] even though nothing was deleted. This trigger removes that false marker
+     * the moment the new row goes in. A real delete is not followed by an insert, so its marker stays.
+     */
+    fun tombstoneClearTriggerSql(table: String): String =
+        "CREATE TRIGGER IF NOT EXISTS sync_tomb_clear_$table AFTER INSERT ON $table BEGIN " +
+            "DELETE FROM sync_tombstones WHERE kind = '$table' AND rowId = NEW.id; END;"
+
+    /** Drops any pending marker for a row that still exists (left behind by the old behaviour). */
+    fun staleTombstoneCleanupSql(table: String): String =
+        "DELETE FROM sync_tombstones WHERE kind = '$table' " +
+            "AND EXISTS (SELECT 1 FROM \"$table\" WHERE id = sync_tombstones.rowId)"
 }

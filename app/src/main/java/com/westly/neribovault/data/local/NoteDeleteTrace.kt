@@ -63,6 +63,10 @@ object NoteDeleteTraceSql {
         "CREATE TABLE IF NOT EXISTS note_trace_context (id INTEGER PRIMARY KEY, reason TEXT, lastSyncAt INTEGER)",
         "INSERT OR IGNORE INTO note_trace_context(id, reason, lastSyncAt) VALUES (1, NULL, NULL)",
         "CREATE TRIGGER IF NOT EXISTS trace_note_deleted AFTER DELETE ON notes BEGIN ${logRow("DELETED", "OLD")} $PRUNE END;",
+        // A save (INSERT OR REPLACE) deletes and re-inserts the row; drop the false "DELETED" it just logged.
+        "CREATE TRIGGER IF NOT EXISTS trace_note_replaced AFTER INSERT ON notes BEGIN " +
+            "DELETE FROM note_delete_trace WHERE seq = (SELECT MAX(seq) FROM note_delete_trace " +
+            "WHERE noteId = NEW.id AND event = 'DELETED' AND at >= $NOW_MS - 1000); END;",
         "CREATE TRIGGER IF NOT EXISTS trace_note_trashed AFTER UPDATE OF isDeleted ON notes " +
             "WHEN OLD.isDeleted = 0 AND NEW.isDeleted = 1 BEGIN ${logRow("TRASHED", "NEW")} $PRUNE END;",
     )

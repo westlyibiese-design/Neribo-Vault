@@ -218,8 +218,9 @@ class SyncEngine(
         if (row.isTombstone) {
             if (localUpdatedAt == null) return 0
             // A delete marker only wins over a row that has not been changed since the marker was
-            // made. Marker times are cut down to whole seconds, so allow for the rest of that second.
-            if (localUpdatedAt > row.updatedAt + MARKER_TIME_PRECISION_MS) {
+            // made. Marker times are cut down to whole seconds, so a row saved in the same second as
+            // its marker counts as newer: a marker for a row that still exists is never a real delete.
+            if (localUpdatedAt >= row.updatedAt) {
                 if (table == NOTES_TABLE) {
                     runCatching {
                         NoteDeleteTraceSql.logProtected(
@@ -424,7 +425,9 @@ class SyncEngine(
 
     private fun readTombstones(db: SupportSQLiteDatabase, table: String): List<Pair<String, Long>> =
         db.query(
-            "SELECT rowId, deletedAt FROM sync_tombstones WHERE kind = ? ORDER BY deletedAt, rowId",
+            "SELECT rowId, deletedAt FROM sync_tombstones WHERE kind = ? " +
+                "AND NOT EXISTS (SELECT 1 FROM \"$table\" WHERE id = sync_tombstones.rowId) " +
+                "ORDER BY deletedAt, rowId",
             arrayOf<Any?>(table),
         ).use { cursor ->
             val rows = ArrayList<Pair<String, Long>>()
@@ -497,7 +500,6 @@ class SyncEngine(
         const val GUARD_MIN_ROWS = 10
         const val GUARD_PERCENT = 30
         const val NOTES_TABLE = "notes"
-        const val MARKER_TIME_PRECISION_MS = 999L
         const val PERSONAL_DOCUMENTS_TABLE = "personal_documents"
         const val PRIVATE_FILE_SUFFIX = ".nvenc"
         const val PRIVATE_FILE_FILTER = " AND (fileUri IS NULL OR fileUri NOT LIKE '%.nvenc')"

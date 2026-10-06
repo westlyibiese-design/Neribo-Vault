@@ -154,7 +154,11 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Records every permanent delete of a synced table, so the cloud can be told about it. */
         private val SYNC_TRIGGER_CALLBACK: RoomDatabase.Callback = object : RoomDatabase.Callback() {
             override fun onOpen(db: SupportSQLiteDatabase) {
-                SyncTables.ALL.forEach { table -> db.execSQL(SyncTables.tombstoneTriggerSql(table.name)) }
+                SyncTables.ALL.forEach { table ->
+                    db.execSQL(SyncTables.tombstoneTriggerSql(table.name))
+                    db.execSQL(SyncTables.tombstoneClearTriggerSql(table.name))
+                    db.execSQL(SyncTables.staleTombstoneCleanupSql(table.name))
+                }
                 NoteDeleteTraceSql.install(db)
             }
         }
