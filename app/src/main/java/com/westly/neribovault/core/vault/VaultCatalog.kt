@@ -11,6 +11,7 @@ import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.TrackChanges
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.westly.neribovault.core.navigation.Routes
@@ -75,6 +76,14 @@ object VaultCatalog {
             route = Routes.SCREENPLAYS,
             icon = Icons.Outlined.Movie,
             tagline = "Scenes and scripts",
+        ),
+        VaultDefinition(
+            id = "lyrics",
+            name = "Lyrics",
+            description = "Write and polish your songs, section by section",
+            route = Routes.LYRICS,
+            icon = Icons.Outlined.MusicNote,
+            tagline = "Songs and lyric sheets",
         ),
         VaultDefinition(
             id = "posts",

@@ -26,6 +26,7 @@ import com.westly.neribovault.data.local.dao.PromptDao
 import com.westly.neribovault.data.local.dao.ScreenplayDao
 import com.westly.neribovault.data.local.dao.SecretDao
 import com.westly.neribovault.data.local.dao.SocialPostDao
+import com.westly.neribovault.data.local.dao.SongDao
 import com.westly.neribovault.data.local.dao.StoryChapterDao
 import com.westly.neribovault.data.local.dao.StoryCharacterDao
 import com.westly.neribovault.data.local.dao.StoryDao
@@ -50,6 +51,7 @@ import com.westly.neribovault.data.local.entity.PromptEntity
 import com.westly.neribovault.data.local.entity.ScreenplayEntity
 import com.westly.neribovault.data.local.entity.SecretEntity
 import com.westly.neribovault.data.local.entity.SocialPostEntity
+import com.westly.neribovault.data.local.entity.SongEntity
 import com.westly.neribovault.data.local.entity.StoryChapterEntity
 import com.westly.neribovault.data.local.entity.StoryCharacterEntity
 import com.westly.neribovault.data.local.entity.StoryEntity
@@ -58,7 +60,7 @@ import com.westly.neribovault.data.local.entity.SyncTombstoneEntity
 import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -86,8 +88,9 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         AuditLogEntity::class,
         SyncTombstoneEntity::class,
         ScreenplayEntity::class,
+        SongEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -116,6 +119,7 @@ abstract class NeriboDatabase : RoomDatabase() {
     abstract fun projectDocumentDao(): ProjectDocumentDao
     abstract fun auditLogDao(): AuditLogDao
     abstract fun screenplayDao(): ScreenplayDao
+    abstract fun songDao(): SongDao
 
     companion object {
         const val FILE_NAME = "neribo_vault.db"
@@ -123,7 +127,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -147,6 +151,19 @@ abstract class NeriboDatabase : RoomDatabase() {
                         "`title` TEXT NOT NULL, `author` TEXT NOT NULL, `contact` TEXT NOT NULL, " +
                         "`noticeEnabled` INTEGER NOT NULL, `noticeText` TEXT NOT NULL, `content` TEXT NOT NULL, " +
                         "PRIMARY KEY(`id`))",
+                )
+            }
+        }
+
+        /** Adds the songs table. Every existing row of every other table is left untouched. */
+        val MIGRATION_3_4: Migration = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `songs` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`title` TEXT NOT NULL, `writer` TEXT NOT NULL, `songKey` TEXT NOT NULL, " +
+                        "`tempoBpm` INTEGER, `mood` TEXT NOT NULL, `status` TEXT NOT NULL, " +
+                        "`notes` TEXT NOT NULL, `content` TEXT NOT NULL, PRIMARY KEY(`id`))",
                 )
             }
         }

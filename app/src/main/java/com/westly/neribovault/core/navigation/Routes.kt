@@ -16,6 +16,7 @@ object Routes {
     const val DIARY = "diary"
     const val WRITERS = "writers"
     const val SCREENPLAYS = "screenplays"
+    const val LYRICS = "lyrics"
     const val POSTS = "posts"
     const val CHURCH = "church"
     const val MEMORIES = "memories"
