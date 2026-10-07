@@ -10,6 +10,8 @@ import com.westly.neribovault.feature.diary.DiaryRoutes
 import com.westly.neribovault.feature.documents.DocumentsRoutes
 import com.westly.neribovault.feature.goals.GoalsRoutes
 import com.westly.neribovault.feature.ideas.IdeasRoutes
+import com.westly.neribovault.feature.lyrics.LyricsRoutes
+import com.westly.neribovault.feature.lyrics.engine.LyricsFormat
 import com.westly.neribovault.feature.memories.MemoriesRoutes
 import com.westly.neribovault.feature.notes.NotesRoutes
 import com.westly.neribovault.feature.posts.PostsRoutes
@@ -53,6 +55,7 @@ class GlobalIndex(private val container: AppContainer) {
         if (VAULT_DIARY !in hiddenVaults) loadDiary(items)
         if (VAULT_WRITERS !in hiddenVaults) loadWriters(items)
         if (VAULT_SCREENPLAYS !in hiddenVaults) loadScreenplays(items)
+        if (VAULT_LYRICS !in hiddenVaults) loadSongs(items)
         if (VAULT_POSTS !in hiddenVaults) loadPosts(items)
         if (VAULT_CHURCH !in hiddenVaults) loadChurch(items)
         if (VAULT_MEMORIES !in hiddenVaults) loadMemories(items)
@@ -237,6 +240,29 @@ class GlobalIndex(private val container: AppContainer) {
                         body = screenplay.author + " " + script,
                         updatedAt = screenplay.updatedAt,
                         route = ScreenplaysRoutes.editor(screenplay.id),
+                    ),
+                )
+            }
+    }
+
+    /** Title, writer and every lyric line. The private notes are never indexed. */
+    private suspend fun loadSongs(out: MutableList<IndexedItem>) {
+        container.songsRepository.observeAll().first()
+            .filter { !it.isDeleted }
+            .forEach { song ->
+                val lyrics = LyricsFormat.parse(song.content)
+                    .flatMap { section -> section.text.split('\n') }
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ")
+                out.add(
+                    item(
+                        vaultId = VAULT_LYRICS,
+                        kind = "Song",
+                        id = song.id,
+                        title = song.title.trim().ifEmpty { "Untitled song" },
+                        body = song.writer + " " + lyrics,
+                        updatedAt = song.updatedAt,
+                        route = LyricsRoutes.editor(song.id),
                     ),
                 )
             }
@@ -463,6 +489,7 @@ class GlobalIndex(private val container: AppContainer) {
         const val VAULT_DIARY = "diary"
         const val VAULT_WRITERS = "writers"
         const val VAULT_SCREENPLAYS = "screenplays"
+        const val VAULT_LYRICS = "lyrics"
         const val VAULT_POSTS = "posts"
         const val VAULT_CHURCH = "church"
         const val VAULT_MEMORIES = "memories"
