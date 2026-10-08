@@ -8,6 +8,9 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.westly.neribovault.data.cloud.SyncTables
+import com.westly.neribovault.data.local.dao.AccountDao
+import com.westly.neribovault.data.local.dao.AccountFieldDao
+import com.westly.neribovault.data.local.dao.AccountItemDao
 import com.westly.neribovault.data.local.dao.AuditLogDao
 import com.westly.neribovault.data.local.dao.BugDao
 import com.westly.neribovault.data.local.dao.ChurchRecordDao
@@ -33,6 +36,9 @@ import com.westly.neribovault.data.local.dao.StoryDao
 import com.westly.neribovault.data.local.dao.StoryNoteDao
 import com.westly.neribovault.data.local.dao.TaskDao
 import com.westly.neribovault.data.local.dao.WritingIdeaDao
+import com.westly.neribovault.data.local.entity.AccountEntity
+import com.westly.neribovault.data.local.entity.AccountFieldEntity
+import com.westly.neribovault.data.local.entity.AccountItemEntity
 import com.westly.neribovault.data.local.entity.AuditLogEntity
 import com.westly.neribovault.data.local.entity.BugEntity
 import com.westly.neribovault.data.local.entity.ChurchRecordEntity
@@ -60,7 +66,7 @@ import com.westly.neribovault.data.local.entity.SyncTombstoneEntity
 import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -89,8 +95,11 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         SyncTombstoneEntity::class,
         ScreenplayEntity::class,
         SongEntity::class,
+        AccountEntity::class,
+        AccountItemEntity::class,
+        AccountFieldEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -120,6 +129,9 @@ abstract class NeriboDatabase : RoomDatabase() {
     abstract fun auditLogDao(): AuditLogDao
     abstract fun screenplayDao(): ScreenplayDao
     abstract fun songDao(): SongDao
+    abstract fun accountDao(): AccountDao
+    abstract fun accountItemDao(): AccountItemDao
+    abstract fun accountFieldDao(): AccountFieldDao
 
     companion object {
         const val FILE_NAME = "neribo_vault.db"
@@ -127,7 +139,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -164,6 +176,41 @@ abstract class NeriboDatabase : RoomDatabase() {
                         "`title` TEXT NOT NULL, `writer` TEXT NOT NULL, `songKey` TEXT NOT NULL, " +
                         "`tempoBpm` INTEGER, `mood` TEXT NOT NULL, `status` TEXT NOT NULL, " +
                         "`notes` TEXT NOT NULL, `content` TEXT NOT NULL, PRIMARY KEY(`id`))",
+                )
+            }
+        }
+
+        /** Adds the three Accounts tables. Every existing row of every other table is left untouched. */
+        val MIGRATION_4_5: Migration = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `platform_accounts` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`platform` TEXT NOT NULL, `name` TEXT NOT NULL, `signInMethod` TEXT NOT NULL, " +
+                        "`loginId` TEXT NOT NULL, `url` TEXT NOT NULL, `twoFactor` TEXT NOT NULL, " +
+                        "`recovery` TEXT NOT NULL, `notes` TEXT NOT NULL, `status` TEXT NOT NULL, " +
+                        "`tags` TEXT NOT NULL, `isPinned` INTEGER NOT NULL, `passwordCipher` TEXT, " +
+                        "`passwordIv` TEXT, `passwordDecoy` TEXT, PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `account_items` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`accountId` TEXT NOT NULL, `name` TEXT NOT NULL, `itemType` TEXT NOT NULL, " +
+                        "`url` TEXT NOT NULL, `identifier` TEXT NOT NULL, `status` TEXT NOT NULL, " +
+                        "`notes` TEXT NOT NULL, PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_account_items_accountId` ON `account_items` (`accountId`)",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `account_fields` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`ownerType` TEXT NOT NULL, `ownerId` TEXT NOT NULL, `label` TEXT NOT NULL, " +
+                        "`isSecret` INTEGER NOT NULL, `valuePlain` TEXT, `valueCipher` TEXT, `valueIv` TEXT, " +
+                        "`valueDecoy` TEXT, `sortOrder` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_account_fields_ownerId` ON `account_fields` (`ownerId`)",
                 )
             }
         }

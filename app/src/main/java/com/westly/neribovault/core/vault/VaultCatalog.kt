@@ -1,6 +1,7 @@
 package com.westly.neribovault.core.vault
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Campaign
@@ -124,6 +125,14 @@ object VaultCatalog {
             route = Routes.DEVELOPER,
             icon = Icons.Outlined.Code,
             tagline = "Projects and tasks",
+        ),
+        VaultDefinition(
+            id = "accounts",
+            name = "Accounts",
+            description = "Track your logins, platforms and the projects under each",
+            route = Routes.ACCOUNTS,
+            icon = Icons.Outlined.AccountCircle,
+            tagline = "Logins and platforms",
         ),
     )
 

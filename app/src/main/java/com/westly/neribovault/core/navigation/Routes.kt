@@ -22,4 +22,5 @@ object Routes {
     const val MEMORIES = "memories"
     const val DOCUMENTS = "documents"
     const val DEVELOPER = "developer"
+    const val ACCOUNTS = "accounts"
 }
