@@ -7,6 +7,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.westly.neribovault.BuildConfig
 import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.data.local.NeriboDatabase
+import com.westly.neribovault.feature.accounts.security.AccountsBackup
 import com.westly.neribovault.feature.developer.secrets.SecretsBackup
 import java.io.BufferedOutputStream
 import java.io.BufferedWriter
@@ -81,6 +82,13 @@ class BackupWriter(
                 if (secrets != null) {
                     zip.putNextEntry(ZipEntry(BackupFormat.ENTRY_SECRETS))
                     zip.write(secrets.toByteArray(Charsets.UTF_8))
+                    zip.closeEntry()
+                }
+
+                val accounts = AccountsBackup.exportState(context)
+                if (accounts != null) {
+                    zip.putNextEntry(ZipEntry(BackupFormat.ENTRY_ACCOUNTS))
+                    zip.write(accounts.toByteArray(Charsets.UTF_8))
                     zip.closeEntry()
                 }
 

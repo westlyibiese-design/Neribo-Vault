@@ -526,6 +526,7 @@ private fun SignedInSection(
             BulletLine("Photos and attached files stay on the phone where you added them. Only the text syncs.")
             BulletLine("Screenplays stay on this phone and are not synced. Backups do include them.")
             BulletLine("Songs stay on this phone and are not synced. Backups do include them.")
+            BulletLine("Accounts (logins, passwords and their items) stay on this phone and are not synced. Backups do include them, with the passwords still encrypted.")
             BulletLine("The activity log stays on this phone.")
         }
     }

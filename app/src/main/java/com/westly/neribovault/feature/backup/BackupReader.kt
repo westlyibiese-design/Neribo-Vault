@@ -9,6 +9,7 @@ import com.westly.neribovault.core.files.SecureFileStore
 import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.data.local.NeriboDatabase
 import com.westly.neribovault.data.local.NoteDeleteTraceSql
+import com.westly.neribovault.feature.accounts.security.AccountsBackup
 import com.westly.neribovault.feature.developer.secrets.SecretsBackup
 import java.io.File
 import java.io.IOException
@@ -120,6 +121,17 @@ class BackupReader(
                 warnings.add(
                     "Your Developer secrets were restored, but their PIN setup could not be. " +
                         "You may need to set up the secrets vault again.",
+                )
+            }
+        }
+        val accountsJson = readAccountsEntry(prepared.zipFile)
+        if (accountsJson != null) {
+            try {
+                AccountsBackup.importState(context, accountsJson)
+            } catch (e: Exception) {
+                warnings.add(
+                    "Your Accounts were restored, but their PIN setup could not be. " +
+                        "You may need to set up the Accounts PIN again.",
                 )
             }
         }
@@ -411,6 +423,19 @@ class BackupReader(
     private fun readSecretsEntry(zipFile: File): String? = try {
         ZipFile(zipFile).use { zip ->
             val entry = zip.getEntry(BackupFormat.ENTRY_SECRETS)
+            if (entry == null) {
+                null
+            } else {
+                zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
+            }
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun readAccountsEntry(zipFile: File): String? = try {
+        ZipFile(zipFile).use { zip ->
+            val entry = zip.getEntry(BackupFormat.ENTRY_ACCOUNTS)
             if (entry == null) {
                 null
             } else {

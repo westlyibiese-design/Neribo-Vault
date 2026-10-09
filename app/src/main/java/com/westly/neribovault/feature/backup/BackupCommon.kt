@@ -11,6 +11,7 @@ internal object BackupFormat {
     const val ENTRY_MANIFEST = "manifest.json"
     const val ENTRY_DATA = "data.json"
     const val ENTRY_SECRETS = "secrets_state.json"
+    const val ENTRY_ACCOUNTS = "accounts_state.json"
     const val DIR_MEMORIES = "memories"
     const val DIR_DOCUMENTS = "documents"
     const val FILES_PREFIX = "files/"
