@@ -64,7 +64,7 @@ class FieldRowState(val id: String, val existing: AccountFieldEntity?) {
     var editingValue by mutableStateOf(existing == null || !existing.isSecret)
 
     /** Switches between secret and plain, keeping the stored value untouched where possible. */
-    fun setSecret(on: Boolean) {
+    fun switchSecret(on: Boolean) {
         if (on == isSecret) return
         isSecret = on
         val old = existing ?: return
@@ -342,7 +342,7 @@ private fun FieldRowEditor(
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
-                Switch(checked = row.isSecret, onCheckedChange = { row.setSecret(it) })
+                Switch(checked = row.isSecret, onCheckedChange = { row.switchSecret(it) })
             }
             if (storedSecretClosed) {
                 Row(
