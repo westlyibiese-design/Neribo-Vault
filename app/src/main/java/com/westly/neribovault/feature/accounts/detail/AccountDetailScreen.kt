@@ -1,29 +1,40 @@
 package com.westly.neribovault.feature.accounts.detail
 
-import androidx.compose.foundation.clickable
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AccountCircle
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Link
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -32,17 +43,18 @@ import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.BadgeTone
 import com.westly.neribovault.core.ui.components.ButtonStyle
-import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.LoadingState
 import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.NeriboButton
+import com.westly.neribovault.core.ui.components.NeriboCard
 import com.westly.neribovault.core.ui.components.NeriboDivider
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.core.ui.components.StatusBadge
+import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.data.local.entity.AccountEntity
 import com.westly.neribovault.data.local.entity.AccountFieldEntity
 import com.westly.neribovault.data.local.entity.AccountItemEntity
@@ -52,16 +64,21 @@ import com.westly.neribovault.feature.accounts.PlatformPresets
 import com.westly.neribovault.feature.accounts.UNTITLED_ACCOUNT
 import com.westly.neribovault.feature.accounts.accountStatusLabel
 import com.westly.neribovault.feature.accounts.components.PlatformAvatar
-import com.westly.neribovault.feature.accounts.itemStatusLabel
-import com.westly.neribovault.feature.accounts.itemTypeLabel
+import com.westly.neribovault.feature.accounts.editor.PLAIN_TEXT_REMINDER
+import com.westly.neribovault.feature.accounts.editor.loginLabel
+import com.westly.neribovault.feature.accounts.security.AccountsClipboard
+import com.westly.neribovault.feature.accounts.security.AccountsSessionMode
+import com.westly.neribovault.feature.accounts.security.AccountsVault
 import com.westly.neribovault.feature.accounts.signInMethodLabel
+import com.westly.neribovault.feature.accounts.signInMethodUsesPassword
 import com.westly.neribovault.feature.accounts.twoFactorLabel
+import kotlinx.coroutines.launch
 
-private const val MASK = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+private const val PASSWORD_KEY = "password"
 
 /**
- * The read-only account viewer: header, login details, custom fields, items and notes. Passwords
- * and secret fields are never decrypted here; they show as a mask. Empty values are hidden.
+ * The account viewer: header, login details, custom fields, items and notes. A password or
+ * secret field is masked until the owner reveals or copies it, which needs the Accounts PIN.
  * [onEdit] opens the editor, [onOpenItem] an item, [onAddItem] a new item. Deleting moves the
  * account to the trash and goes back through [onBack].
  */
@@ -70,16 +87,116 @@ fun AccountDetailScreen(
     accountId: String,
     onBack: () -> Unit,
     onEdit: () -> Unit,
-    onOpenItem: (String) -> Unit,
+    onOpenItem: (itemId: String) -> Unit,
     onAddItem: () -> Unit,
 ) {
     val vm = neriboViewModel(key = "accounts-detail-$accountId") { c ->
         AccountDetailViewModel(accountId, c.accountsRepository, c.accountItemsRepository, c.accountFieldsRepository)
     }
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val spacing = NeriboTheme.spacing
-    var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     val account = state.account
+
+    val showMessage: (String) -> Unit = { text ->
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(text)
+        }
+    }
+    val access = rememberSecretAccess(onMessage = showMessage)
+    val reveal = rememberRevealState()
+
+    // The second-PIN session can't change anything, so writes are refused with a neutral message.
+    val guardWrite: (() -> Unit) -> Unit = { action ->
+        if (AccountsVault.mode.value == AccountsSessionMode.Decoy) {
+            showMessage(AccountsVault.BLOCKED_MESSAGE)
+        } else {
+            action()
+        }
+    }
+    val openLink: (String) -> Unit = { url ->
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url.trim())))
+        } catch (e: ActivityNotFoundException) {
+            showMessage("No app can open this link")
+        }
+    }
+    val copyPlain: (String, String) -> Unit = { label, value ->
+        context.copyToClipboard(label, value)
+        showMessage("Copied")
+    }
+
+    val revealPassword: (AccountEntity) -> Unit = { acc ->
+        access.run(false) {
+            val value = AccountsVault.displayValue(
+                acc.passwordCipher, acc.passwordIv, acc.passwordDecoy, "password", acc.id,
+            )
+            if (value == null) {
+                showMessage("Couldn't read that password")
+            } else {
+                reveal.show(PASSWORD_KEY, value)
+                vm.log("password_revealed", acc.id)
+            }
+        }
+    }
+    val copyPassword: (AccountEntity) -> Unit = { acc ->
+        access.run(false) {
+            val value = AccountsVault.displayValue(
+                acc.passwordCipher, acc.passwordIv, acc.passwordDecoy, "password", acc.id,
+            )
+            if (value == null) {
+                showMessage("Couldn't read that password")
+            } else {
+                AccountsClipboard.copy(context, value)
+                showMessage(COPIED_SECRET_MESSAGE)
+                vm.log("password_copied", acc.id)
+            }
+        }
+    }
+    val revealField: (AccountFieldEntity) -> Unit = { field ->
+        access.run(false) {
+            val value = AccountsVault.displayValue(
+                field.valueCipher, field.valueIv, field.valueDecoy, fieldDisplayCategory(field.label), field.id,
+            )
+            if (value == null) {
+                showMessage("Couldn't read that value")
+            } else {
+                reveal.show(field.id, value)
+                vm.log("field_revealed", field.id)
+            }
+        }
+    }
+    val copyField: (AccountFieldEntity) -> Unit = { field ->
+        access.run(false) {
+            val value = AccountsVault.displayValue(
+                field.valueCipher, field.valueIv, field.valueDecoy, fieldDisplayCategory(field.label), field.id,
+            )
+            if (value == null) {
+                showMessage("Couldn't read that value")
+            } else {
+                AccountsClipboard.copy(context, value)
+                showMessage(COPIED_SECRET_MESSAGE)
+                vm.log("field_copied", field.id)
+            }
+        }
+    }
+    val deleteItem: (AccountItemEntity) -> Unit = { item ->
+        guardWrite {
+            vm.deleteItem(item.id)
+            scope.launch {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                val result = snackbarHostState.showSnackbar(
+                    message = "Moved to Recently deleted",
+                    actionLabel = "Undo",
+                    duration = SnackbarDuration.Short,
+                )
+                if (result == SnackbarResult.ActionPerformed) vm.restoreItem(item.id)
+            }
+        }
+    }
 
     NeriboScaffold(
         topBar = {
@@ -88,21 +205,48 @@ fun AccountDetailScreen(
                 onBack = onBack,
                 actions = {
                     if (account != null) {
-                        OverflowMenu(
-                            actions = listOf(
-                                MenuAction(label = "Edit", onClick = onEdit, icon = Icons.Outlined.Edit),
+                        val actions = buildList<MenuAction> {
+                            add(MenuAction(label = "Edit", onClick = onEdit, icon = Icons.Outlined.Edit))
+                            if (account.url.isNotBlank()) {
+                                add(
+                                    MenuAction(
+                                        label = "Open link",
+                                        onClick = { openLink(account.url) },
+                                        icon = Icons.Outlined.Link,
+                                    ),
+                                )
+                            }
+                            if (account.loginId.isNotBlank()) {
+                                add(
+                                    MenuAction(
+                                        label = "Copy login",
+                                        onClick = { copyPlain(loginLabel(account.signInMethod), account.loginId) },
+                                        icon = Icons.Outlined.ContentCopy,
+                                    ),
+                                )
+                            }
+                            add(
+                                MenuAction(
+                                    label = if (account.isPinned) "Unpin" else "Pin",
+                                    onClick = { guardWrite { vm.setPinned(!account.isPinned) } },
+                                    icon = Icons.Outlined.PushPin,
+                                ),
+                            )
+                            add(
                                 MenuAction(
                                     label = "Delete",
-                                    onClick = { confirmDelete = true },
+                                    onClick = { guardWrite { vm.delete(onDone = onBack) } },
                                     icon = Icons.Outlined.Delete,
                                     destructive = true,
                                 ),
-                            ),
-                        )
+                            )
+                        }
+                        OverflowMenu(actions = actions)
                     }
                 },
             )
         },
+        snackbarHostState = snackbarHostState,
     ) { padding ->
         when {
             state.isLoading -> LoadingState(modifier = Modifier.fillMaxSize().padding(padding))
@@ -114,53 +258,148 @@ fun AccountDetailScreen(
                 actionLabel = "Back",
                 onAction = onBack,
             )
-            else -> Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = spacing.screen, vertical = spacing.sm),
-            ) {
-                Header(account)
-                Spacer(modifier = Modifier.height(spacing.lg))
-                NeriboDivider()
-                LoginSection(account)
-                if (state.fields.isNotEmpty()) {
+            else -> {
+                val usesPassword = signInMethodUsesPassword(account.signInMethod)
+                val hasPassword = account.passwordCipher != null && account.passwordIv != null
+                val isEmptyDetails = account.loginId.isBlank() && !hasPassword &&
+                    state.fields.isEmpty() && state.items.isEmpty()
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = spacing.screen, vertical = spacing.sm),
+                ) {
+                    Header(account)
+                    if (isEmptyDetails) {
+                        Spacer(modifier = Modifier.height(spacing.lg))
+                        NeriboCard {
+                            Column(modifier = Modifier.fillMaxWidth().padding(spacing.lg)) {
+                                Text(
+                                    text = "Add the login details",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = "Keep the login, password, link and recovery notes for this account together.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = spacing.xs, bottom = spacing.md),
+                                )
+                                NeriboButton(text = "Add details", onClick = onEdit)
+                            }
+                        }
+                    }
                     Spacer(modifier = Modifier.height(spacing.lg))
                     NeriboDivider()
-                    FieldsSection(state.fields)
-                }
-                Spacer(modifier = Modifier.height(spacing.lg))
-                NeriboDivider()
-                ItemsSection(state.items, onOpenItem = onOpenItem, onAddItem = onAddItem)
-                if (account.notes.isNotBlank()) {
+                    SectionHeader(text = "Login", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs))
+                    if (account.loginId.isNotBlank()) {
+                        val label = loginLabel(account.signInMethod)
+                        ValueRow(
+                            label = label,
+                            value = account.loginId,
+                            onCopy = { copyPlain(label, account.loginId) },
+                        )
+                    }
+                    if (usesPassword) {
+                        SecretRow(
+                            label = "Password",
+                            isStored = hasPassword,
+                            revealedValue = reveal.value(PASSWORD_KEY),
+                            onReveal = { revealPassword(account) },
+                            onHide = { reveal.hide(PASSWORD_KEY) },
+                            onCopy = { copyPassword(account) },
+                            onAdd = onEdit,
+                        )
+                    }
+                    if (account.url.isNotBlank()) {
+                        ValueRow(
+                            label = "Link",
+                            value = account.url,
+                            onCopy = { copyPlain("Link", account.url) },
+                            actionLabel = "Open",
+                            onAction = { openLink(account.url) },
+                        )
+                    }
+                    ValueRow(label = "Two-factor", value = twoFactorLabel(account.twoFactor))
+                    if (account.recovery.isNotBlank()) {
+                        ValueRow(label = "Recovery", value = account.recovery)
+                    }
+                    if (account.tags.isNotEmpty()) {
+                        TagsRow(account.tags)
+                    }
+
+                    if (state.fields.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(spacing.lg))
+                        NeriboDivider()
+                        SectionHeader(
+                            text = "Custom fields",
+                            modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs),
+                        )
+                        FieldRows(
+                            fields = state.fields,
+                            reveal = reveal,
+                            onRevealField = revealField,
+                            onCopyField = copyField,
+                            onCopyPlain = copyPlain,
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(spacing.lg))
                     NeriboDivider()
-                    SectionHeader(text = "Notes", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.sm))
-                    Text(
-                        text = account.notes,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
+                    val itemWord = PlatformPresets.find(account.platform)?.itemWord ?: "Items"
+                    SectionHeader(
+                        text = "$itemWord · ${state.items.size}",
+                        modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs),
                     )
+                    if (state.items.isEmpty()) {
+                        Text(
+                            text = "Nothing added yet. Add the projects, pages or domains that live in this account.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = spacing.sm),
+                        )
+                    }
+                    for (item in state.items) {
+                        ItemRow(
+                            item = item,
+                            onOpen = { onOpenItem(item.id) },
+                            onOpenLink = { openLink(item.url) },
+                            onCopyLink = { copyPlain("Link", item.url) },
+                            onDelete = { deleteItem(item) },
+                        )
+                    }
+                    NeriboButton(
+                        text = "Add item",
+                        onClick = onAddItem,
+                        modifier = Modifier.padding(top = spacing.sm),
+                        style = ButtonStyle.Secondary,
+                        leadingIcon = Icons.Outlined.Add,
+                    )
+
+                    if (account.notes.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(spacing.lg))
+                        NeriboDivider()
+                        SectionHeader(text = "Notes", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.sm))
+                        Text(
+                            text = account.notes,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                    Text(
+                        text = PLAIN_TEXT_REMINDER,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = spacing.lg),
+                    )
+                    Spacer(modifier = Modifier.height(spacing.xl))
                 }
-                Spacer(modifier = Modifier.height(spacing.xl))
             }
         }
     }
 
-    if (confirmDelete) {
-        ConfirmDialog(
-            title = "Delete this account?",
-            message = "It moves to Recently deleted and is removed for good after 30 days.",
-            confirmLabel = "Delete",
-            onConfirm = {
-                confirmDelete = false
-                vm.delete(onDone = onBack)
-            },
-            onDismiss = { confirmDelete = false },
-            destructive = true,
-        )
-    }
+    SecretAccessSheets(access = access)
 }
 
 @Composable
@@ -175,13 +414,14 @@ private fun Header(account: AccountEntity) {
         Column(modifier = Modifier.weight(1f).padding(start = spacing.lg)) {
             Text(
                 text = account.name.trim().ifEmpty { UNTITLED_ACCOUNT },
-                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Serif),
+                style = MaterialTheme.typography.titleLarge.copy(fontFamily = FontFamily.Serif),
                 color = colors.onSurface,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = PlatformPresets.displayName(account.platform),
+                text = PlatformPresets.displayName(account.platform) + " · " +
+                    signInMethodLabel(account.signInMethod),
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurfaceVariant,
             )
@@ -198,102 +438,22 @@ private fun Header(account: AccountEntity) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun LoginSection(account: AccountEntity) {
-    val spacing = NeriboTheme.spacing
-    SectionHeader(text = "Login", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs))
-    LabeledValue("Sign-in method", signInMethodLabel(account.signInMethod))
-    if (account.loginId.isNotBlank()) LabeledValue("Login", account.loginId)
-    if (account.url.isNotBlank()) LabeledValue("Link", account.url)
-    LabeledValue("Two-factor", twoFactorLabel(account.twoFactor))
-    if (account.recovery.isNotBlank()) LabeledValue("Recovery", account.recovery)
-    if (account.tags.isNotEmpty()) LabeledValue("Tags", account.tags.joinToString(", "))
-    LabeledValue(
-        "Password",
-        if (account.passwordCipher != null && account.passwordIv != null) {
-            "$MASK  Stored, encrypted"
-        } else {
-            "No password stored"
-        },
-    )
-    Text(
-        text = "Names, logins, links and notes are stored as plain text on this phone. " +
-            "Passwords and secret fields are encrypted.",
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = spacing.sm),
-    )
-}
-
-@Composable
-private fun FieldsSection(fields: List<AccountFieldEntity>) {
-    val spacing = NeriboTheme.spacing
-    SectionHeader(text = "Custom fields", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs))
-    for (field in fields) {
-        val shown = if (field.isSecret) MASK else field.valuePlain.orEmpty()
-        LabeledValue(field.label.ifBlank { "Field" }, shown.ifEmpty { "\u2014" })
-    }
-}
-
-@Composable
-private fun ItemsSection(
-    items: List<AccountItemEntity>,
-    onOpenItem: (String) -> Unit,
-    onAddItem: () -> Unit,
-) {
-    val spacing = NeriboTheme.spacing
-    val colors = MaterialTheme.colorScheme
-    SectionHeader(text = "Items", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs))
-    if (items.isEmpty()) {
-        Text(
-            text = "Nothing under this account yet.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = spacing.sm),
-        )
-    }
-    for (item in items) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 56.dp)
-                .clickable { onOpenItem(item.id) }
-                .padding(vertical = spacing.sm),
-        ) {
-            Text(
-                text = item.name.ifBlank { "Untitled item" },
-                style = MaterialTheme.typography.titleMedium,
-                color = colors.onSurface,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = itemTypeLabel(item.itemType) + " \u00B7 " + itemStatusLabel(item.status),
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.onSurfaceVariant,
-            )
-        }
-    }
-    NeriboButton(
-        text = "Add item",
-        onClick = onAddItem,
-        style = ButtonStyle.Text,
-    )
-}
-
-@Composable
-private fun LabeledValue(label: String, value: String) {
+private fun TagsRow(tags: List<String>) {
     val spacing = NeriboTheme.spacing
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = spacing.sm)) {
         Text(
-            text = label,
+            text = "Tags",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+        FlowRow(
+            modifier = Modifier.fillMaxWidth().padding(top = spacing.xs),
+            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+            verticalArrangement = Arrangement.spacedBy(spacing.sm),
+        ) {
+            for (tag in tags) StatusBadge(text = tag)
+        }
     }
 }
