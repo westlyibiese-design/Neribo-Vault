@@ -68,7 +68,7 @@ import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.data.local.entity.TotpAccountEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column on platform_accounts. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column and version 8 the custom logo column on platform_accounts. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -102,7 +102,7 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         AccountFieldEntity::class,
         TotpAccountEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -143,7 +143,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -237,6 +237,13 @@ abstract class NeriboDatabase : RoomDatabase() {
         val MIGRATION_6_7: Migration = object : Migration(6, 7) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `platform_accounts` ADD COLUMN `signInOtherName` TEXT")
+            }
+        }
+
+        /** Adds the optional custom logo path to platform_accounts. Every existing row keeps all its data. */
+        val MIGRATION_7_8: Migration = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `platform_accounts` ADD COLUMN `customLogoPath` TEXT")
             }
         }
 

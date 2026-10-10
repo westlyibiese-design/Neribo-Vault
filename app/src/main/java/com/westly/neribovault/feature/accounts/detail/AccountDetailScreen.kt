@@ -427,7 +427,7 @@ private fun Header(account: AccountEntity) {
         modifier = Modifier.fillMaxWidth().padding(top = spacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PlatformAvatar(platform = account.platform, size = 56.dp)
+        PlatformAvatar(platform = account.platform, size = 56.dp, customLogoPath = account.customLogoPath)
         Column(modifier = Modifier.weight(1f).padding(start = spacing.lg)) {
             Text(
                 text = account.name.trim().ifEmpty { UNTITLED_ACCOUNT },

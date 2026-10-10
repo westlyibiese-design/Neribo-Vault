@@ -8,17 +8,23 @@ import com.westly.neribovault.data.local.dao.AccountFieldDao
 import com.westly.neribovault.data.local.dao.AccountItemDao
 import com.westly.neribovault.data.local.entity.AccountEntity
 import com.westly.neribovault.data.local.entity.AccountFieldEntity
+import com.westly.neribovault.feature.accounts.AccountLogos
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Accounts: pinned first, then name A to Z. Removing an account for good also removes its items
- * and the custom fields owned by the account and by those items, all in one transaction.
+ * and the custom fields owned by the account and by those items, all in one transaction, and
+ * deletes its custom logo file (when [filesDir] is given).
  */
 class AccountsRepository(
     private val database: NeriboDatabase,
     private val dao: AccountDao,
     private val itemDao: AccountItemDao,
     private val fieldDao: AccountFieldDao,
+    private val filesDir: File? = null,
 ) {
     fun observeAll(): Flow<List<AccountEntity>> = dao.observeAll()
 
@@ -58,15 +64,24 @@ class AccountsRepository(
 
     /** Hard-deletes the account, its items and every field owned by the account or its items. */
     suspend fun deletePermanently(id: String) {
+        val logo = dao.getById(id)?.customLogoPath
         database.withTransaction { removeEverythingOf(id) }
+        deleteLogoFiles(listOf(logo))
     }
 
     /** Hard-deletes every account trashed before [cutoffMillis], with its items and fields. */
     suspend fun purgeTrashedBefore(cutoffMillis: Long) {
+        val logos = dao.trashedIdsBefore(cutoffMillis).map { dao.getById(it)?.customLogoPath }
         database.withTransaction {
             dao.trashedIdsBefore(cutoffMillis).forEach { removeEverythingOf(it) }
             dao.deleteTrashedBefore(cutoffMillis)
         }
+        deleteLogoFiles(logos)
+    }
+
+    private suspend fun deleteLogoFiles(paths: List<String?>) {
+        val dir = filesDir ?: return
+        withContext(Dispatchers.IO) { paths.forEach { AccountLogos.delete(dir, it) } }
     }
 
     private suspend fun removeEverythingOf(accountId: String) {
@@ -88,6 +103,8 @@ class AccountsRepository(
         val source = dao.getById(accountId) ?: return@withTransaction null
         val now = System.currentTimeMillis()
         val newAccountId = newId()
+        val dir = filesDir
+        val newLogo = if (dir != null) source.customLogoPath?.let { AccountLogos.copy(dir, it, newAccountId) } else null
         dao.upsert(
             source.copy(
                 id = newAccountId,
@@ -96,6 +113,7 @@ class AccountsRepository(
                 isDeleted = false,
                 deletedAt = null,
                 name = "Copy of " + source.name,
+                customLogoPath = newLogo,
             ),
         )
         val copiedFields = ArrayList<AccountFieldEntity>()

@@ -64,7 +64,7 @@ class AppContainer(context: Context) {
     val auditRepository: AuditRepository = AuditRepository(db.auditLogDao())
     val screenplaysRepository: ScreenplaysRepository = ScreenplaysRepository(db.screenplayDao())
     val songsRepository: SongsRepository = SongsRepository(db.songDao())
-    val accountsRepository: AccountsRepository = AccountsRepository(db, db.accountDao(), db.accountItemDao(), db.accountFieldDao())
+    val accountsRepository: AccountsRepository = AccountsRepository(db, db.accountDao(), db.accountItemDao(), db.accountFieldDao(), context.applicationContext.filesDir)
     val accountItemsRepository: AccountItemsRepository = AccountItemsRepository(db, db.accountItemDao(), db.accountFieldDao())
     val accountFieldsRepository: AccountFieldsRepository = AccountFieldsRepository(db.accountFieldDao())
     val totpAccountsRepository: TotpAccountsRepository = TotpAccountsRepository(db.totpAccountDao())

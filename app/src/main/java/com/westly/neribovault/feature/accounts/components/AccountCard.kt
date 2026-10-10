@@ -76,7 +76,12 @@ fun AccountCard(
                 .padding(start = spacing.lg, top = spacing.md, end = spacing.xs, bottom = spacing.md),
             verticalAlignment = Alignment.Top,
         ) {
-            PlatformAvatar(platform = account.platform, size = 40.dp, modifier = Modifier.padding(top = spacing.xs))
+            PlatformAvatar(
+                platform = account.platform,
+                size = 40.dp,
+                modifier = Modifier.padding(top = spacing.xs),
+                customLogoPath = account.customLogoPath,
+            )
             Column(
                 modifier = Modifier
                     .weight(1f)

@@ -1,5 +1,7 @@
 package com.westly.neribovault.feature.accounts.editor
 
+import android.content.ContentResolver
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
@@ -10,15 +12,19 @@ import com.westly.neribovault.feature.accounts.ACCOUNT_STATUS_ACTIVE
 import com.westly.neribovault.feature.accounts.PlatformPreset
 import com.westly.neribovault.feature.accounts.PlatformPresets
 import com.westly.neribovault.feature.accounts.SIGN_IN_EMAIL_PASSWORD
+import com.westly.neribovault.feature.accounts.AccountLogos
 import com.westly.neribovault.feature.accounts.SIGN_IN_OTHER
 import com.westly.neribovault.feature.accounts.security.AccountsVault
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 private const val OWNER_ACCOUNT = "account"
 
@@ -33,6 +39,7 @@ data class AccountForm(
     val name: String = "",
     val signInMethod: String = SIGN_IN_EMAIL_PASSWORD,
     val signInOtherName: String = "",
+    val customLogoPath: String = "",
     val loginId: String = "",
     val url: String = "",
     val twoFactor: String = "none",
@@ -71,6 +78,7 @@ class AccountEditorViewModel(
     private val database: NeriboDatabase,
     private val accounts: AccountsRepository,
     private val fields: AccountFieldsRepository,
+    private val filesDir: File,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(AccountEditorUiState())
@@ -79,7 +87,12 @@ class AccountEditorViewModel(
     /** The custom fields of this account, edited in memory until Save. */
     val fieldsState = FieldsEditorState()
 
+    /** The relative path of a logo that was picked but not saved yet, if any. */
+    private var pendingLogoPath: String? = null
+
     init {
+        // Leftovers from an editor that was closed by the system are removed.
+        viewModelScope.launch(Dispatchers.IO) { AccountLogos.clearPending(filesDir, accountId) }
         viewModelScope.launch {
             val account = accounts.getById(accountId)
             if (account == null || account.isDeleted) {
@@ -94,6 +107,7 @@ class AccountEditorViewModel(
                 name = account.name,
                 signInMethod = account.signInMethod,
                 signInOtherName = account.signInOtherName.orEmpty(),
+                customLogoPath = account.customLogoPath.orEmpty(),
                 loginId = account.loginId,
                 url = account.url,
                 twoFactor = account.twoFactor,
@@ -145,6 +159,34 @@ class AccountEditorViewModel(
     }
 
     fun setLogin(value: String) = edit { it.copy(loginId = value) }
+
+    /**
+     * Reads the picked image into a pending logo file (shrunk to 256 px, off the main thread).
+     * Nothing is saved until Save. [onResult] gets false when the image can't be read.
+     */
+    fun importLogo(resolver: ContentResolver, uri: Uri, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val path = AccountLogos.newPendingPath(accountId)
+            val ok = withContext(Dispatchers.IO) {
+                AccountLogos.importImage(resolver, uri, AccountLogos.fileFor(filesDir, path))
+            }
+            if (ok) {
+                val old = pendingLogoPath
+                pendingLogoPath = path
+                edit { it.copy(customLogoPath = path) }
+                if (old != null) withContext(Dispatchers.IO) { AccountLogos.delete(filesDir, old) }
+            }
+            onResult(ok)
+        }
+    }
+
+    /** Drops the logo from the form. The saved file is deleted when the form is saved. */
+    fun removeLogo() {
+        val old = pendingLogoPath
+        pendingLogoPath = null
+        edit { it.copy(customLogoPath = "") }
+        if (old != null) viewModelScope.launch(Dispatchers.IO) { AccountLogos.delete(filesDir, old) }
+    }
 
     fun setUrl(value: String) = edit { it.copy(url = value) }
 
@@ -245,6 +287,15 @@ class AccountEditorViewModel(
         val built = fieldsState.build(OWNER_ACCOUNT, accountId, hasDecoy) { AccountsVault.encrypt(it) }
             ?: return EditorSaveResult.Failed(ENCRYPT_FAILED_MESSAGE)
 
+        // A custom logo belongs to "Other platform" only; a preset platform has none.
+        val pending = pendingLogoPath
+        val keepsLogo = form.platformId == PlatformPresets.CUSTOM_ID && form.customLogoPath.isNotEmpty()
+        val newLogo: String? = when {
+            !keepsLogo -> null
+            pending != null && form.customLogoPath == pending -> AccountLogos.finalPath(accountId)
+            else -> latest.customLogoPath
+        }
+
         val updated = latest.copy(
             platform = form.storedPlatform,
             name = form.name.trim(),
@@ -254,6 +305,7 @@ class AccountEditorViewModel(
             } else {
                 null
             },
+            customLogoPath = newLogo,
             loginId = form.loginId.trim(),
             url = form.url.trim(),
             twoFactor = form.twoFactor,
@@ -276,12 +328,23 @@ class AccountEditorViewModel(
         } catch (e: Exception) {
             return EditorSaveResult.Failed("Couldn't save. Nothing was changed.")
         }
+        // The database is saved, so the logo file can follow it.
+        withContext(Dispatchers.IO) {
+            if (pending != null && keepsLogo && form.customLogoPath == pending) {
+                AccountLogos.commit(filesDir, pending, accountId)
+                pendingLogoPath = null
+            } else if (newLogo == null) {
+                AccountLogos.delete(filesDir, latest.customLogoPath)
+            }
+        }
         if (secretChanged || built.secretsChanged) AccountsVault.logEvent("secret_saved", accountId)
         AccountsVault.touch()
         return EditorSaveResult.Saved
     }
 
     override fun onCleared() {
+        // A logo that was picked but never saved must not stay on the phone.
+        pendingLogoPath?.let { AccountLogos.delete(filesDir, it) }
         // The typed password must not outlive the screen.
         _state.update { it.copy(form = it.form.copy(newPassword = "")) }
         fieldsState.rows.forEach {

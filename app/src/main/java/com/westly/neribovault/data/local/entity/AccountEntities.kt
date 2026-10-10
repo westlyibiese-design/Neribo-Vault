@@ -13,7 +13,9 @@ import androidx.room.PrimaryKey
  * [platform] is a preset id (see `PlatformPresets`) or the custom name the owner typed.
  * [signInMethod] is "google", "email_password", "phone", "github", "apple" or "other".
  * [signInOtherName] is the app or service typed when [signInMethod] is "other" (for example
- * "Telegram"); it is null for every other method.
+ * "Telegram"); it is null for every other method. [customLogoPath] is the relative path (under
+ * the app's files folder) of a custom logo, only for an "Other platform" account; it stays on
+ * the device.
  * [twoFactor] is "none", "authenticator", "sms", "email", "hardware" or "other".
  * [status] is "active", "inactive" or "closed".
  */
@@ -39,6 +41,7 @@ data class AccountEntity(
     val passwordIv: String? = null,
     val passwordDecoy: String? = null,
     val signInOtherName: String? = null,
+    val customLogoPath: String? = null,
 )
 
 /**

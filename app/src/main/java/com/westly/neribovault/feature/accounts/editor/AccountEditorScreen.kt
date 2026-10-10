@@ -1,6 +1,9 @@
 package com.westly.neribovault.feature.accounts.editor
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -34,6 +37,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -76,8 +80,10 @@ private const val OWNER_ACCOUNT = "account"
  */
 @Composable
 fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val appFilesDir = context.applicationContext.filesDir
     val vm = neriboViewModel(key = "accounts-edit-$accountId") { c ->
-        AccountEditorViewModel(accountId, c.database, c.accountsRepository, c.accountFieldsRepository)
+        AccountEditorViewModel(accountId, c.database, c.accountsRepository, c.accountFieldsRepository, appFilesDir)
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val hasDecoyPin by AccountsVault.hasDecoyPin.collectAsStateWithLifecycle()
@@ -91,6 +97,15 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
         }
     }
     val access = rememberSecretAccess(onMessage = showMessage)
+
+    // The Android photo picker: images only, and no storage permission is needed.
+    val logoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            vm.importLogo(context.contentResolver, uri) { ok ->
+                if (!ok) showMessage("Couldn't use that image")
+            }
+        }
+    }
 
     var showErrors by rememberSaveable { mutableStateOf(false) }
     var showDiscard by rememberSaveable { mutableStateOf(false) }
@@ -174,6 +189,7 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
                     PlatformAvatar(
                         platform = if (isCustomPlatform) form.customName else form.platformId,
                         size = 40.dp,
+                        customLogoPath = if (isCustomPlatform) form.customLogoPath.ifEmpty { null } else null,
                     )
                     Text(
                         text = if (isCustomPlatform) {
@@ -202,6 +218,37 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
                         supportingText = if (showErrors && form.customName.isBlank()) "Required" else null,
                         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
                     )
+                    // Custom logo: only for "Other platform".
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = spacing.sm),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+                    ) {
+                        if (form.customLogoPath.isNotEmpty()) {
+                            PlatformAvatar(
+                                platform = form.customName,
+                                size = 40.dp,
+                                customLogoPath = form.customLogoPath,
+                            )
+                        }
+                        NeriboButton(
+                            text = if (form.customLogoPath.isEmpty()) "Choose logo" else "Change logo",
+                            onClick = {
+                                logoPicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            style = ButtonStyle.Secondary,
+                        )
+                        if (form.customLogoPath.isNotEmpty()) {
+                            NeriboButton(
+                                text = "Remove logo",
+                                onClick = { vm.removeLogo() },
+                                style = ButtonStyle.Text,
+                            )
+                        }
+                    }
+                    QuietNote(text = "The logo is stored only on this phone.")
                 }
 
                 // 2. Name

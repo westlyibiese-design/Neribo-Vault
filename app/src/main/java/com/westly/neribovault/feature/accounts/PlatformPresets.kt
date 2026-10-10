@@ -4,6 +4,8 @@ package com.westly.neribovault.feature.accounts
  * One platform the owner can pick when creating an account. [id] is what is stored in
  * `AccountEntity.platform`; [url] is the login or dashboard link; [defaultItemType] and
  * [itemWord] describe what usually lives under that account ("Projects", "Pages and handles").
+ * [logoName] is the name of the bundled logo in res/drawable-nodpi ("logo_<id>"), or null when
+ * the preset has none; a name whose file is missing falls back to the letter avatar.
  */
 data class PlatformPreset(
     val id: String,
@@ -12,6 +14,7 @@ data class PlatformPreset(
     val url: String,
     val defaultItemType: String,
     val itemWord: String,
+    val logoName: String? = "logo_$id",
 )
 
 /** The platforms offered when creating an account, plus helpers for showing a stored platform. */
@@ -43,7 +46,7 @@ object PlatformPresets {
         PlatformPreset("godaddy", "GoDaddy", "Domains and hosting", "https://sso.godaddy.com", "domain", "Domains"),
         PlatformPreset("paystack", "Paystack", "Payments", "https://dashboard.paystack.com", "api", "Integrations"),
         PlatformPreset("flutterwave", "Flutterwave", "Payments", "https://app.flutterwave.com", "api", "Integrations"),
-        PlatformPreset(CUSTOM_ID, "Other platform", "Other", "", "other", "Items"),
+        PlatformPreset(CUSTOM_ID, "Other platform", "Other", "", "other", "Items", logoName = null),
     )
 
     /** The categories in the order they first appear in [all]. */
