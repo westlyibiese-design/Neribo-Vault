@@ -19,6 +19,12 @@ internal object BackupFormat {
     /** The only table that is never backed up or restored: pending sync deletes. */
     const val TABLE_TOMBSTONES = "sync_tombstones"
 
+    /**
+     * The Authenticator's table is never backed up or restored here: its secrets are tied to this
+     * phone's Keystore key. The Authenticator has its own backup file.
+     */
+    const val TABLE_TOTP = "totp_accounts"
+
     /** The two folders of user files that travel with a backup. */
     val FILE_DIRS: List<String> = listOf(DIR_MEMORIES, DIR_DOCUMENTS)
 
@@ -62,6 +68,7 @@ internal object BackupFormat {
 
     private fun isUserTable(name: String): Boolean =
         name != TABLE_TOMBSTONES &&
+            name != TABLE_TOTP &&
             name != NoteDeleteTraceSql.TABLE &&
             name != NoteDeleteTraceSql.CONTEXT_TABLE &&
             name != "room_master_table" &&
