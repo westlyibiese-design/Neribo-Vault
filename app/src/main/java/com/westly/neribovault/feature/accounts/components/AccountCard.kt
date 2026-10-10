@@ -58,7 +58,7 @@ fun AccountCard(
     val spacing = NeriboTheme.spacing
     val account = item.account
     var menuOpen by remember { mutableStateOf(false) }
-    val line = PlatformPresets.displayName(account.platform) + " \u00B7 " + signInMethodLabel(account.signInMethod)
+    val line = PlatformPresets.displayName(account.platform) + " \u00B7 " + signInMethodLabel(account.signInMethod, account.signInOtherName)
 
     NeriboCard(
         modifier = modifier

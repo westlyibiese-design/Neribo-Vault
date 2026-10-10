@@ -21,6 +21,10 @@ class AccountFieldsRepository(private val dao: AccountFieldDao) {
     fun observeForOwner(ownerType: String, ownerId: String): Flow<List<AccountFieldEntity>> =
         dao.observeForOwner(ownerType, ownerId)
 
+    /** Non-deleted fields of every non-deleted item of one account, in one query. */
+    fun observeForItemsOfAccount(accountId: String): Flow<List<AccountFieldEntity>> =
+        dao.observeForItemsOfAccount(accountId)
+
     /** Every field row, trashed ones included. Used for re-encryption and backup checks. */
     suspend fun getAllIncludingTrashed(): List<AccountFieldEntity> = dao.getAllIncludingTrashed()
 

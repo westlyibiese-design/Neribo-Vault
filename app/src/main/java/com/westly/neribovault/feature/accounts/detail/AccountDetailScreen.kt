@@ -61,6 +61,7 @@ import com.westly.neribovault.data.local.entity.AccountItemEntity
 import com.westly.neribovault.feature.accounts.ACCOUNT_STATUS_CLOSED
 import com.westly.neribovault.feature.accounts.ACCOUNT_STATUS_INACTIVE
 import com.westly.neribovault.feature.accounts.PlatformPresets
+import com.westly.neribovault.feature.accounts.SIGN_IN_OTHER
 import com.westly.neribovault.feature.accounts.UNTITLED_ACCOUNT
 import com.westly.neribovault.feature.accounts.accountStatusLabel
 import com.westly.neribovault.feature.accounts.components.PlatformAvatar
@@ -185,6 +186,7 @@ fun AccountDetailScreen(
     }
     val deleteItem: (AccountItemEntity) -> Unit = { item ->
         guardWrite {
+            state.itemFields[item.id]?.forEach { reveal.hide(it.id) }
             vm.deleteItem(item.id)
             scope.launch {
                 snackbarHostState.currentSnackbarData?.dismiss()
@@ -220,7 +222,7 @@ fun AccountDetailScreen(
                                 add(
                                     MenuAction(
                                         label = "Copy login",
-                                        onClick = { copyPlain(loginLabel(account.signInMethod), account.loginId) },
+                                        onClick = { copyPlain(loginLabel(account.signInMethod, account.signInOtherName), account.loginId) },
                                         icon = Icons.Outlined.ContentCopy,
                                     ),
                                 )
@@ -259,8 +261,11 @@ fun AccountDetailScreen(
                 onAction = onBack,
             )
             else -> {
-                val usesPassword = signInMethodUsesPassword(account.signInMethod)
                 val hasPassword = account.passwordCipher != null && account.passwordIv != null
+                // An older "Other" account that already has a stored password keeps its password row,
+                // so the password stays reachable.
+                val usesPassword = signInMethodUsesPassword(account.signInMethod) ||
+                    (account.signInMethod == SIGN_IN_OTHER && hasPassword)
                 val isEmptyDetails = account.loginId.isBlank() && !hasPassword &&
                     state.fields.isEmpty() && state.items.isEmpty()
                 Column(
@@ -294,7 +299,7 @@ fun AccountDetailScreen(
                     NeriboDivider()
                     SectionHeader(text = "Login", modifier = Modifier.padding(top = spacing.lg, bottom = spacing.xs))
                     if (account.loginId.isNotBlank()) {
-                        val label = loginLabel(account.signInMethod)
+                        val label = loginLabel(account.signInMethod, account.signInOtherName)
                         ValueRow(
                             label = label,
                             value = account.loginId,
@@ -368,6 +373,18 @@ fun AccountDetailScreen(
                             onCopyLink = { copyPlain("Link", item.url) },
                             onDelete = { deleteItem(item) },
                         )
+                        val itemFieldList = state.itemFields[item.id].orEmpty()
+                        if (itemFieldList.isNotEmpty()) {
+                            Column(modifier = Modifier.fillMaxWidth().padding(start = spacing.md, bottom = spacing.sm)) {
+                                FieldRows(
+                                    fields = itemFieldList,
+                                    reveal = reveal,
+                                    onRevealField = revealField,
+                                    onCopyField = copyField,
+                                    onCopyPlain = copyPlain,
+                                )
+                            }
+                        }
                     }
                     NeriboButton(
                         text = "Add item",
@@ -421,7 +438,7 @@ private fun Header(account: AccountEntity) {
             )
             Text(
                 text = PlatformPresets.displayName(account.platform) + " · " +
-                    signInMethodLabel(account.signInMethod),
+                    signInMethodLabel(account.signInMethod, account.signInOtherName),
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.onSurfaceVariant,
             )

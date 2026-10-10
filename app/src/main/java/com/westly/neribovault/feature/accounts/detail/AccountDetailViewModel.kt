@@ -20,6 +20,8 @@ data class AccountDetailUiState(
     val account: AccountEntity? = null,
     val items: List<AccountItemEntity> = emptyList(),
     val fields: List<AccountFieldEntity> = emptyList(),
+    /** Custom fields of each item, by item id. Items without fields are absent. */
+    val itemFields: Map<String, List<AccountFieldEntity>> = emptyMap(),
     val isLoading: Boolean = true,
 )
 
@@ -38,11 +40,13 @@ class AccountDetailViewModel(
         accounts.observeById(accountId),
         items.observeForAccount(accountId),
         fields.observeForOwner("account", accountId),
-    ) { account, accountItems, accountFields ->
+        fields.observeForItemsOfAccount(accountId),
+    ) { account, accountItems, accountFields, itemFieldRows ->
         AccountDetailUiState(
             account = account,
             items = accountItems,
             fields = accountFields,
+            itemFields = itemFieldRows.groupBy { it.ownerId },
             isLoading = false,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AccountDetailUiState())

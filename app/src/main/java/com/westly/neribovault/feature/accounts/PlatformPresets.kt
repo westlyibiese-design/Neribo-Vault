@@ -80,19 +80,21 @@ const val ACCOUNT_STATUS_ACTIVE = "active"
 const val ACCOUNT_STATUS_INACTIVE = "inactive"
 const val ACCOUNT_STATUS_CLOSED = "closed"
 
-/** The sign-in method as shown to the owner. */
-fun signInMethodLabel(code: String): String = when (code) {
+/**
+ * The sign-in method as shown to the owner. For "other", [otherName] (the app or service the
+ * owner typed) is shown instead of the word "Other" when it is not blank.
+ */
+fun signInMethodLabel(code: String, otherName: String? = null): String = when (code) {
     SIGN_IN_GOOGLE -> "Google"
     SIGN_IN_EMAIL_PASSWORD -> "Email and password"
     SIGN_IN_PHONE -> "Phone number"
     SIGN_IN_GITHUB -> "GitHub"
     SIGN_IN_APPLE -> "Apple"
-    else -> "Other"
+    else -> otherName?.trim()?.takeIf { it.isNotEmpty() } ?: "Other"
 }
 
-/** Whether this sign-in method has a stored password (email and password, and other). */
-fun signInMethodUsesPassword(code: String): Boolean =
-    code == SIGN_IN_EMAIL_PASSWORD || code == SIGN_IN_OTHER
+/** Whether this sign-in method has a password field (only email and password). */
+fun signInMethodUsesPassword(code: String): Boolean = code == SIGN_IN_EMAIL_PASSWORD
 
 /** The item type as shown to the owner. */
 fun itemTypeLabel(code: String): String = when (code) {

@@ -143,6 +143,13 @@ interface AccountFieldDao {
     @Query("SELECT * FROM account_fields WHERE ownerType = :ownerType AND ownerId = :ownerId AND isDeleted = 0 ORDER BY sortOrder ASC, createdAt ASC")
     suspend fun getForOwner(ownerType: String, ownerId: String): List<AccountFieldEntity>
 
+    @Query(
+        "SELECT * FROM account_fields WHERE ownerType = 'item' AND isDeleted = 0 AND ownerId IN " +
+            "(SELECT id FROM account_items WHERE accountId = :accountId AND isDeleted = 0) " +
+            "ORDER BY sortOrder ASC, createdAt ASC",
+    )
+    fun observeForItemsOfAccount(accountId: String): Flow<List<AccountFieldEntity>>
+
     @Query("DELETE FROM account_fields WHERE ownerType = :ownerType AND ownerId = :ownerId")
     suspend fun deleteForOwner(ownerType: String, ownerId: String)
 

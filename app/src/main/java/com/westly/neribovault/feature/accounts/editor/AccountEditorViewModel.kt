@@ -10,6 +10,7 @@ import com.westly.neribovault.feature.accounts.ACCOUNT_STATUS_ACTIVE
 import com.westly.neribovault.feature.accounts.PlatformPreset
 import com.westly.neribovault.feature.accounts.PlatformPresets
 import com.westly.neribovault.feature.accounts.SIGN_IN_EMAIL_PASSWORD
+import com.westly.neribovault.feature.accounts.SIGN_IN_OTHER
 import com.westly.neribovault.feature.accounts.security.AccountsVault
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ data class AccountForm(
     val customName: String = "",
     val name: String = "",
     val signInMethod: String = SIGN_IN_EMAIL_PASSWORD,
+    val signInOtherName: String = "",
     val loginId: String = "",
     val url: String = "",
     val twoFactor: String = "none",
@@ -91,6 +93,7 @@ class AccountEditorViewModel(
                 customName = if (isPreset) "" else account.platform,
                 name = account.name,
                 signInMethod = account.signInMethod,
+                signInOtherName = account.signInOtherName.orEmpty(),
                 loginId = account.loginId,
                 url = account.url,
                 twoFactor = account.twoFactor,
@@ -133,7 +136,13 @@ class AccountEditorViewModel(
 
     fun setName(value: String) = edit { it.copy(name = value.take(MAX_NAME_LENGTH)) }
 
-    fun setSignInMethod(value: String) = edit { it.copy(signInMethod = value) }
+    /** Picks a method other than "other". The typed name only belongs to "other", so it is cleared. */
+    fun setSignInMethod(value: String) = edit { it.copy(signInMethod = value, signInOtherName = "") }
+
+    /** Picks "other" with the app or service name the owner typed (trimmed, at most 40 characters). */
+    fun setSignInOther(name: String) = edit {
+        it.copy(signInMethod = SIGN_IN_OTHER, signInOtherName = name.trim().take(MAX_SIGN_IN_OTHER_LENGTH))
+    }
 
     fun setLogin(value: String) = edit { it.copy(loginId = value) }
 
@@ -240,6 +249,11 @@ class AccountEditorViewModel(
             platform = form.storedPlatform,
             name = form.name.trim(),
             signInMethod = form.signInMethod,
+            signInOtherName = if (form.signInMethod == SIGN_IN_OTHER) {
+                form.signInOtherName.trim().ifEmpty { null }
+            } else {
+                null
+            },
             loginId = form.loginId.trim(),
             url = form.url.trim(),
             twoFactor = form.twoFactor,

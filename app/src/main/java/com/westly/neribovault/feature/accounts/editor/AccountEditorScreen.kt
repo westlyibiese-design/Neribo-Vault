@@ -54,6 +54,7 @@ import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.feature.accounts.PlatformPresets
+import com.westly.neribovault.feature.accounts.SIGN_IN_OTHER
 import com.westly.neribovault.feature.accounts.SIGN_IN_PHONE
 import com.westly.neribovault.feature.accounts.components.NewAccountSheet
 import com.westly.neribovault.feature.accounts.components.PlatformAvatar
@@ -96,6 +97,7 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
     var showPlatformSheet by rememberSaveable { mutableStateOf(false) }
     var showGenerator by rememberSaveable { mutableStateOf(false) }
     var showAddTag by rememberSaveable { mutableStateOf(false) }
+    var showOtherDialog by rememberSaveable { mutableStateOf(false) }
     var confirmRemovePassword by rememberSaveable { mutableStateOf(false) }
     var showNewPassword by rememberSaveable { mutableStateOf(false) }
 
@@ -218,9 +220,12 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
                 Spacer(modifier = Modifier.height(spacing.lg))
                 SectionHeader(text = "Sign-in method", modifier = Modifier.padding(bottom = spacing.xs))
                 ChoiceChips(
-                    options = SIGN_IN_OPTIONS,
+                    options = signInOptions(form.signInOtherName),
                     selected = form.signInMethod,
-                    onSelect = { vm.setSignInMethod(it) },
+                    onSelect = { code ->
+                        // "Other" asks for the app name first; nothing changes until it is confirmed.
+                        if (code == SIGN_IN_OTHER) showOtherDialog = true else vm.setSignInMethod(code)
+                    },
                 )
 
                 // 4. Login
@@ -228,7 +233,7 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
                 NeriboTextField(
                     value = form.loginId,
                     onValueChange = { vm.setLogin(it) },
-                    label = loginLabel(form.signInMethod),
+                    label = loginLabel(form.signInMethod, form.signInOtherName),
                     placeholder = loginPlaceholder(form.signInMethod),
                     keyboardOptions = KeyboardOptions(
                         keyboardType = if (form.signInMethod == SIGN_IN_PHONE) {
@@ -315,7 +320,9 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
                 }
 
                 // 6. Second-PIN text
-                if (hasDecoyPin && (state.passwordKept || form.changingPassword)) {
+                if (signInMethodUsesPassword(form.signInMethod) && hasDecoyPin &&
+                    (state.passwordKept || form.changingPassword)
+                ) {
                     Spacer(modifier = Modifier.height(spacing.md))
                     NeriboTextField(
                         value = form.decoyText,
@@ -430,6 +437,16 @@ fun AccountEditorScreen(accountId: String, onBack: () -> Unit) {
             onAdd = { vm.addTag(it) },
         )
     }
+    if (showOtherDialog) {
+        SignInOtherDialog(
+            initialName = form.signInOtherName.ifEmpty { state.initial.signInOtherName },
+            onDismiss = { showOtherDialog = false },
+            onConfirm = { name ->
+                vm.setSignInOther(name)
+                showOtherDialog = false
+            },
+        )
+    }
     if (confirmRemovePassword) {
         ConfirmDialog(
             title = "Remove the password?",
@@ -528,6 +545,56 @@ private fun AddTagDialog(
                     text = "Add",
                     style = MaterialTheme.typography.labelLarge,
                     color = colors.primary,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    text = "Cancel",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.onSurfaceVariant,
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun SignInOtherDialog(
+    initialName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    val colors = MaterialTheme.colorScheme
+    var text by rememberSaveable { mutableStateOf(initialName) }
+    val canSave = text.trim().isNotEmpty()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = MaterialTheme.shapes.large,
+        containerColor = colors.surface,
+        title = {
+            Text(
+                text = "Which app or service do you sign in with?",
+                style = MaterialTheme.typography.titleLarge,
+                color = colors.onSurface,
+            )
+        },
+        text = {
+            NeriboTextField(
+                value = text,
+                onValueChange = { text = it.take(MAX_SIGN_IN_OTHER_LENGTH) },
+                label = "App or service",
+                placeholder = "Telegram, Discord, Facebook",
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(text) }, enabled = canSave) {
+                Text(
+                    text = "Save",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (canSave) colors.primary else colors.onSurfaceVariant,
                 )
             }
         },

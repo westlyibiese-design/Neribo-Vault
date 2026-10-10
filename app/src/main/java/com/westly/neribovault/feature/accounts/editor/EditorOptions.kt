@@ -33,6 +33,7 @@ const val MAX_PLATFORM_LENGTH = 40
 const val MAX_FIELD_LABEL_LENGTH = 40
 const val MAX_TAG_LENGTH = 24
 const val MAX_TAGS = 10
+const val MAX_SIGN_IN_OTHER_LENGTH = 40
 
 /** The quiet line that says which fields are plain text. */
 const val PLAIN_TEXT_REMINDER =
@@ -90,10 +91,19 @@ val FIELD_LABEL_SUGGESTIONS: List<String> = listOf(
     "Region",
 )
 
-/** What the login is called for a sign-in method. */
-fun loginLabel(signInMethod: String): String = when (signInMethod) {
+/** The sign-in chips, with the typed name on the "Other" chip when there is one. */
+fun signInOptions(otherName: String?): List<Pair<String, String>> =
+    SIGN_IN_OPTIONS.map { (code, label) ->
+        if (code == SIGN_IN_OTHER) code to signInMethodLabel(code, otherName) else code to label
+    }
+
+/** What the login is called for a sign-in method ("Telegram username" for a named "other"). */
+fun loginLabel(signInMethod: String, otherName: String? = null): String = when (signInMethod) {
     SIGN_IN_PHONE -> "Phone number"
-    SIGN_IN_OTHER -> "Username"
+    SIGN_IN_OTHER -> {
+        val name = otherName?.trim().orEmpty()
+        if (name.isEmpty()) "Username" else "$name username"
+    }
     else -> "Email"
 }
 
