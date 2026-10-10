@@ -9,7 +9,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -51,16 +50,23 @@ import com.westly.neribovault.feature.authenticator.engine.CodeFormat
 import com.westly.neribovault.feature.authenticator.engine.OtpAlgorithm
 import com.westly.neribovault.feature.authenticator.engine.Totp
 
-/** In the last seconds of a code the ring and the code turn amber and the next code is shown. */
+/** In the last seconds of a code the ring and the code turn amber. */
 private const val WARNING_SECONDS = 5
 
 /** The text shown instead of a code when the secret cannot be decrypted. */
 const val UNREADABLE_TEXT = "Can't be read on this phone"
 
+/** What the code area of a card shows. Holds only display text, never the secret. */
+private sealed interface CodeUi {
+    object Unreadable : CodeUi
+    object Pending : CodeUi
+    class Live(val shown: String, val remaining: Int, val period: Int, val warning: Boolean) : CodeUi
+}
+
 /**
- * One account: letter avatar, serif service name, account name, and on the right the live code with
- * its countdown ring. [hidden] shows dots instead of the code. Tap calls [onClick]; long-press or
- * the three dots open [actions].
+ * One account: letter avatar, serif service name and account name at full width, the live code on
+ * its own row below them, and on the right the countdown ring and the three dots. [hidden] shows
+ * dots instead of the code. Tap calls [onClick]; long-press or the three dots open [actions].
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -76,6 +82,7 @@ fun CodeCard(
     val colors = MaterialTheme.colorScheme
     val spacing = NeriboTheme.spacing
     var menuOpen by remember { mutableStateOf(false) }
+    val codeUi = buildCodeUi(account, secretState, nowMillis, hidden)
 
     NeriboCard(
         modifier = modifier
@@ -104,7 +111,7 @@ fun CodeCard(
                         text = account.issuer.ifBlank { account.accountName },
                         style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Serif),
                         color = colors.onSurface,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
@@ -124,12 +131,19 @@ fun CodeCard(
                         text = account.accountName,
                         style = MaterialTheme.typography.bodyMedium,
                         color = colors.onSurfaceVariant,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                CodeText(codeUi = codeUi, modifier = Modifier.padding(top = spacing.xs))
             }
-            CodeBlock(account = account, secretState = secretState, nowMillis = nowMillis, hidden = hidden)
+            if (codeUi is CodeUi.Live) {
+                CountdownRing(
+                    remaining = codeUi.remaining,
+                    period = codeUi.period,
+                    color = if (codeUi.warning) NeriboTheme.extraColors.warning else colors.primary,
+                )
+            }
             Box {
                 NeriboIconButton(
                     icon = Icons.Outlined.MoreVert,
@@ -142,94 +156,63 @@ fun CodeCard(
     }
 }
 
-@Composable
-private fun CodeBlock(
+/** Works out what to show for the code. Never logs the secret or the code. */
+private fun buildCodeUi(
     account: TotpAccountEntity,
     secretState: SecretState,
     nowMillis: Long,
     hidden: Boolean,
-) {
-    val colors = MaterialTheme.colorScheme
-    val spacing = NeriboTheme.spacing
-    when (secretState) {
-        SecretState.Unreadable -> {
-            Text(
-                text = UNREADABLE_TEXT,
-                style = MaterialTheme.typography.bodySmall,
-                color = colors.error,
-                modifier = Modifier.padding(end = spacing.xs),
-            )
+): CodeUi = when (secretState) {
+    SecretState.Unreadable -> CodeUi.Unreadable
+    SecretState.Pending -> CodeUi.Pending
+    is SecretState.Ready -> {
+        val algorithm = OtpAlgorithm.values().firstOrNull { it.name == account.algorithm } ?: OtpAlgorithm.SHA1
+        val period = account.periodSeconds
+        val remaining = Totp.secondsRemaining(nowMillis, period)
+        val code = try {
+            Totp.code(secretState.secret, nowMillis, account.digits, period, algorithm)
+        } catch (e: Exception) {
+            null
         }
-        SecretState.Pending -> {
-            Text(
-                text = "\u2022\u2022\u2022 \u2022\u2022\u2022",
-                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace),
-                color = colors.onSurfaceVariant,
-            )
+        if (code == null) {
+            CodeUi.Unreadable
+        } else {
+            val shown = if (hidden) CodeFormat.group("\u2022".repeat(account.digits)) else CodeFormat.group(code)
+            CodeUi.Live(shown, remaining, period, remaining <= WARNING_SECONDS)
         }
-        is SecretState.Ready -> ReadyCode(account, secretState.secret, nowMillis, hidden)
     }
 }
 
 @Composable
-private fun ReadyCode(
-    account: TotpAccountEntity,
-    secret: ByteArray,
-    nowMillis: Long,
-    hidden: Boolean,
-) {
+private fun CodeText(codeUi: CodeUi, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
-    val spacing = NeriboTheme.spacing
-    val algorithm = OtpAlgorithm.values().firstOrNull { it.name == account.algorithm } ?: OtpAlgorithm.SHA1
-    val period = account.periodSeconds
-    val remaining = Totp.secondsRemaining(nowMillis, period)
-    val warning = remaining <= WARNING_SECONDS
-    val accent = if (warning) NeriboTheme.extraColors.warning else colors.primary
-    val codeColor = if (warning) NeriboTheme.extraColors.warning else colors.onSurface
-
-    val code = try {
-        Totp.code(secret, nowMillis, account.digits, period, algorithm)
-    } catch (e: Exception) {
-        null
-    }
-    if (code == null) {
-        Text(
-            text = UNREADABLE_TEXT,
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.error,
-            modifier = Modifier.padding(end = spacing.xs),
-        )
-        return
-    }
-    val shown = if (hidden) CodeFormat.group("\u2022".repeat(account.digits)) else CodeFormat.group(code)
-
-    Column(horizontalAlignment = Alignment.End) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
-        ) {
+    when (codeUi) {
+        CodeUi.Unreadable -> {
             Text(
-                text = shown,
-                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace),
-                color = codeColor,
-                maxLines = 1,
+                text = UNREADABLE_TEXT,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.error,
+                modifier = modifier,
             )
-            CountdownRing(remaining = remaining, period = period, color = accent)
         }
-        if (warning && !hidden) {
-            val next = try {
-                Totp.code(secret, nowMillis + remaining * 1000L, account.digits, period, algorithm)
-            } catch (e: Exception) {
-                null
-            }
-            if (next != null) {
-                Text(
-                    text = "Next " + CodeFormat.group(next),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.onSurfaceVariant,
-                    maxLines = 1,
-                )
-            }
+        CodeUi.Pending -> {
+            Text(
+                text = "\u2022\u2022\u2022 \u2022\u2022\u2022",
+                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace),
+                color = colors.onSurfaceVariant,
+                maxLines = 1,
+                modifier = modifier,
+            )
+        }
+        is CodeUi.Live -> {
+            Text(
+                text = codeUi.shown,
+                style = MaterialTheme.typography.headlineSmall.copy(fontFamily = FontFamily.Monospace),
+                color = if (codeUi.warning) NeriboTheme.extraColors.warning else colors.onSurface,
+                maxLines = 1,
+                softWrap = false,
+                modifier = modifier,
+            )
         }
     }
 }
