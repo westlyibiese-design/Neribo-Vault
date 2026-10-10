@@ -134,6 +134,7 @@ dependencies {
     // Other
     implementation("androidx.work:work-runtime-ktx:2.9.0")
     implementation("io.coil-kt:coil-compose:2.6.0")
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
