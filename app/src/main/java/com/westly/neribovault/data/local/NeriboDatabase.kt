@@ -35,6 +35,7 @@ import com.westly.neribovault.data.local.dao.StoryCharacterDao
 import com.westly.neribovault.data.local.dao.StoryDao
 import com.westly.neribovault.data.local.dao.StoryNoteDao
 import com.westly.neribovault.data.local.dao.TaskDao
+import com.westly.neribovault.data.local.dao.TotpAccountDao
 import com.westly.neribovault.data.local.dao.WritingIdeaDao
 import com.westly.neribovault.data.local.entity.AccountEntity
 import com.westly.neribovault.data.local.entity.AccountFieldEntity
@@ -64,9 +65,10 @@ import com.westly.neribovault.data.local.entity.StoryEntity
 import com.westly.neribovault.data.local.entity.StoryNoteEntity
 import com.westly.neribovault.data.local.entity.SyncTombstoneEntity
 import com.westly.neribovault.data.local.entity.TaskEntity
+import com.westly.neribovault.data.local.entity.TotpAccountEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -98,8 +100,9 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         AccountEntity::class,
         AccountItemEntity::class,
         AccountFieldEntity::class,
+        TotpAccountEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -132,6 +135,7 @@ abstract class NeriboDatabase : RoomDatabase() {
     abstract fun accountDao(): AccountDao
     abstract fun accountItemDao(): AccountItemDao
     abstract fun accountFieldDao(): AccountFieldDao
+    abstract fun totpAccountDao(): TotpAccountDao
 
     companion object {
         const val FILE_NAME = "neribo_vault.db"
@@ -139,7 +143,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -211,6 +215,20 @@ abstract class NeriboDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_account_fields_ownerId` ON `account_fields` (`ownerId`)",
+                )
+            }
+        }
+
+        /** Adds the Authenticator table. Every existing row of every other table is left untouched. */
+        val MIGRATION_5_6: Migration = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `totp_accounts` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`issuer` TEXT NOT NULL, `accountName` TEXT NOT NULL, `secretCipher` TEXT NOT NULL, " +
+                        "`secretIv` TEXT NOT NULL, `algorithm` TEXT NOT NULL, `digits` INTEGER NOT NULL, " +
+                        "`periodSeconds` INTEGER NOT NULL, `isPinned` INTEGER NOT NULL, `sortOrder` INTEGER NOT NULL, " +
+                        "`notes` TEXT NOT NULL, PRIMARY KEY(`id`))",
                 )
             }
         }

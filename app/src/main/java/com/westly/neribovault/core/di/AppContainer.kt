@@ -30,6 +30,7 @@ import com.westly.neribovault.data.repository.StoriesRepository
 import com.westly.neribovault.data.repository.StoryCharactersRepository
 import com.westly.neribovault.data.repository.StoryNotesRepository
 import com.westly.neribovault.data.repository.TasksRepository
+import com.westly.neribovault.data.repository.TotpAccountsRepository
 import com.westly.neribovault.data.repository.WritingIdeasRepository
 import com.westly.neribovault.data.settings.SettingsStore
 
@@ -66,6 +67,7 @@ class AppContainer(context: Context) {
     val accountsRepository: AccountsRepository = AccountsRepository(db, db.accountDao(), db.accountItemDao(), db.accountFieldDao())
     val accountItemsRepository: AccountItemsRepository = AccountItemsRepository(db, db.accountItemDao(), db.accountFieldDao())
     val accountFieldsRepository: AccountFieldsRepository = AccountFieldsRepository(db.accountFieldDao())
+    val totpAccountsRepository: TotpAccountsRepository = TotpAccountsRepository(db.totpAccountDao())
 
     val cloudAuth: CloudAuth = CloudAuth(context.applicationContext, db)
     val syncEngine: SyncEngine = SyncEngine(context.applicationContext, db, cloudAuth)
@@ -96,5 +98,6 @@ class AppContainer(context: Context) {
         songsRepository.purgeTrashedBefore(cutoffMillis)
         accountsRepository.purgeTrashedBefore(cutoffMillis)
         accountItemsRepository.purgeTrashedBefore(cutoffMillis)
+        totpAccountsRepository.purgeTrashedBefore(cutoffMillis)
     }
 }

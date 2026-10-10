@@ -14,6 +14,7 @@ import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material.icons.outlined.TrackChanges
+import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.westly.neribovault.core.navigation.Routes
 
@@ -133,6 +134,14 @@ object VaultCatalog {
             route = Routes.ACCOUNTS,
             icon = Icons.Outlined.AccountCircle,
             tagline = "Logins and platforms",
+        ),
+        VaultDefinition(
+            id = "authenticator",
+            name = "Authenticator",
+            description = "Two-step codes made on this phone, ready offline",
+            route = Routes.AUTHENTICATOR,
+            icon = Icons.Outlined.VerifiedUser,
+            tagline = "One-time codes",
         ),
     )
 
