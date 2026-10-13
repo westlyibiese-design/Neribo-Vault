@@ -28,6 +28,7 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -87,6 +88,7 @@ fun CoderHomeScreen(
     onBack: () -> Unit,
     onOpenProject: (String) -> Unit,
     onOpenTrash: () -> Unit,
+    onOpenAiSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     val vm = neriboViewModel { c -> CoderHomeViewModel(c.coderProjectsRepository) }
@@ -146,6 +148,7 @@ fun CoderHomeScreen(
 
     val menuActions = buildList<MenuAction> {
         add(MenuAction(label = "Import ZIP", onClick = { importLauncher.launch(ZIP_MIME_TYPES) }, icon = Icons.Outlined.Archive))
+        add(MenuAction(label = "AI settings", onClick = onOpenAiSettings, icon = Icons.Outlined.Settings))
         add(MenuAction(label = "Recently deleted", onClick = onOpenTrash, icon = Icons.Outlined.History))
         add(MenuAction(label = "Vault lock", onClick = { showLockSheet = true }, icon = Icons.Outlined.Lock))
         if (BuildConfig.DEBUG) {

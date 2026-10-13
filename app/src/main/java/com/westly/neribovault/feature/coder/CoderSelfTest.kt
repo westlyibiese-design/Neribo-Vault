@@ -2,10 +2,18 @@ package com.westly.neribovault.feature.coder
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import android.webkit.WebResourceResponse
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
+import com.westly.neribovault.feature.coder.ai.CoderAiConfig
+import com.westly.neribovault.feature.coder.ai.CoderAiProvider
+import com.westly.neribovault.feature.coder.ai.CoderKeyCrypto
+import com.westly.neribovault.feature.coder.ai.cleanKey
+import com.westly.neribovault.feature.coder.ai.cleanModelName
+import com.westly.neribovault.feature.coder.ai.describeFailure
+import com.westly.neribovault.feature.coder.ai.parseModels
 import com.westly.neribovault.feature.coder.editor.CoderHighlighter
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
@@ -39,9 +47,15 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import javax.net.ssl.SSLException
 
 /** The outcome of one Coder check. [detail] says what was expected when [passed] is false. */
 data class CoderCheckResult(val name: String, val passed: Boolean, val detail: String)
@@ -82,6 +96,11 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(buildDetectorChecks(store))
         results.addAll(explainerChecks())
         results.addAll(reactTemplateChecks())
+        results.addAll(aiProviderChecks())
+        results.addAll(aiKeyChecks())
+        results.addAll(aiModelParsingChecks())
+        results.addAll(aiFailureTextChecks())
+        results.addAll(aiCryptoChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -804,6 +823,118 @@ private fun reactTemplateChecks(): List<CoderCheckResult> {
         },
         check("React template addresses are served by the shim", "all three match") {
             REACT_SCRIPT_URLS.all { CoderCdnShim.match(Uri.parse(it)) != null }
+        },
+    )
+}
+
+private fun aiProviderChecks(): List<CoderCheckResult> = listOf(
+    check("AI provider ids map to the three providers", "claude, gemini, openai") {
+        CoderAiProvider.fromId("claude") == CoderAiProvider.CLAUDE &&
+            CoderAiProvider.fromId("gemini") == CoderAiProvider.GEMINI &&
+            CoderAiProvider.fromId("openai") == CoderAiProvider.OPENAI
+    },
+    check("AI provider id null or unknown gives null", "null") {
+        CoderAiProvider.fromId(null) == null && CoderAiProvider.fromId("") == null &&
+            CoderAiProvider.fromId("mistral") == null && CoderAiProvider.fromId("Claude") == null
+    },
+    check("AI key pages are fixed https addresses", "three https pages") {
+        CoderAiProvider.values().all { it.keysPageUrl.startsWith("https://") }
+    },
+    check("AI config text hides the key", "no key text, says hidden") {
+        val text = CoderAiConfig(CoderAiProvider.CLAUDE, "sk-secret-key-1234", "some-model").toString()
+        !text.contains("sk-secret-key-1234") && !text.contains("1234") && text.contains("apiKey=hidden") &&
+            text.contains("some-model")
+    },
+)
+
+private fun aiKeyChecks(): List<CoderCheckResult> = listOf(
+    check("Key with spaces around it is trimmed", "sk-abc123") { cleanKey("  sk-abc123 ") == "sk-abc123" },
+    check("Key with a newline inside loses the newline", "sk-abc123") {
+        cleanKey("sk-ab\nc123\r\n") == "sk-abc123" && cleanKey("sk-ab c1\t23") == "sk-abc123"
+    },
+    check("Empty key is refused", "null") { cleanKey("") == null && cleanKey("  \n ") == null },
+    check("Key of 512 characters is kept and 513 is refused", "512 ok, 513 null") {
+        cleanKey("a".repeat(512)) != null && cleanKey("a".repeat(513)) == null
+    },
+    check("Key with a character outside printable ASCII is refused", "null") {
+        cleanKey("sk-\u00E9123") == null && cleanKey("sk-\u4E2D123") == null
+    },
+    check("Model names with odd characters are refused", "letters, digits and . - _ : only") {
+        cleanModelName(" gpt-4o ") == "gpt-4o" && cleanModelName("ft:gpt-4o:org::abc") == "ft:gpt-4o:org::abc" &&
+            cleanModelName("") == null && cleanModelName("a/b") == null && cleanModelName("a b") == null &&
+            cleanModelName("m?x=1") == null && cleanModelName("a".repeat(121)) == null
+    },
+)
+
+private fun aiModelParsingChecks(): List<CoderCheckResult> {
+    val claude = "{\"data\":[{\"type\":\"model\",\"id\":\"claude-b\"},{\"type\":\"model\",\"id\":\"claude-a\"}]," +
+        "\"has_more\":false}"
+    val openAi = "{\"object\":\"list\",\"data\":[{\"id\":\"gpt-4o\"},{\"id\":\"text-embedding-x\"}," +
+        "{\"id\":\"whisper-1\"},{\"id\":\"gpt-4o\"},{\"id\":\"gpt-4o-mini\"},{\"id\":\"gpt-image-1\"}]}"
+    val gemini = "{\"models\":[{\"name\":\"models/gemini-pro\",\"supportedGenerationMethods\":[\"countTokens\",\"generateContent\"]}," +
+        "{\"name\":\"models/embedding-001\",\"supportedGenerationMethods\":[\"embedContent\"]}," +
+        "{\"name\":\"models/gemini-flash\",\"supportedGenerationMethods\":[\"generateContent\"]}]}"
+    return listOf(
+        check("Claude model list is read and sorted", "claude-a, claude-b") {
+            parseModels(CoderAiProvider.CLAUDE, claude) == listOf("claude-a", "claude-b")
+        },
+        check("OpenAI list drops non-chat models and duplicates", "gpt-4o, gpt-4o-mini") {
+            parseModels(CoderAiProvider.OPENAI, openAi) == listOf("gpt-4o", "gpt-4o-mini")
+        },
+        check("Gemini list keeps only generateContent and drops models/", "gemini-flash, gemini-pro") {
+            parseModels(CoderAiProvider.GEMINI, gemini) == listOf("gemini-flash", "gemini-pro")
+        },
+        check("Garbage model lists give null", "null for every provider") {
+            CoderAiProvider.values().all { provider ->
+                parseModels(provider, "not json at all") == null && parseModels(provider, "") == null &&
+                    parseModels(provider, "[1,2]") == null && parseModels(provider, "{\"other\":1}") == null
+            }
+        },
+        check("An empty list is a list, not garbage", "empty list") {
+            parseModels(CoderAiProvider.CLAUDE, "{\"data\":[]}") == emptyList<String>()
+        },
+    )
+}
+
+private fun aiFailureTextChecks(): List<CoderCheckResult> = listOf(
+    check("No internet gives the no-internet text", "No internet connection.") {
+        describeFailure(UnknownHostException("api.example.com")) == "No internet connection." &&
+            describeFailure(ConnectException("refused")) == "No internet connection."
+    },
+    check("A timeout gives the too-long text", "The request took too long. Try again.") {
+        describeFailure(SocketTimeoutException("timeout")) == "The request took too long. Try again." &&
+            describeFailure(InterruptedIOException("timeout")) == "The request took too long. Try again."
+    },
+    check("A secure-connection error gives its text", "A secure connection couldn't be made.") {
+        describeFailure(SSLException("handshake")) == "A secure connection couldn't be made."
+    },
+    check("Any other error gives the general text and no details", "general text, no message inside") {
+        val text = describeFailure(IOException("key=sk-secret-9999 https://x.example/?k=1"))
+        text == "Something went wrong with the connection." && !text.contains("secret") && !text.contains("http")
+    },
+)
+
+private fun aiCryptoChecks(): List<CoderCheckResult> {
+    if (!CoderKeyCrypto.isAvailable()) {
+        return listOf(CoderCheckResult("Key crypto: Keystore unavailable on this phone, checks skipped", true, "ok"))
+    }
+    return listOf(
+        check("Key crypto round trip", "same bytes back, ciphertext without the text") {
+            val secret = "sk-test-key-1234".toByteArray(Charsets.UTF_8)
+            val sealed = CoderKeyCrypto.encrypt(secret)
+            val back = if (sealed == null) null else CoderKeyCrypto.decrypt(sealed.ciphertext, sealed.iv)
+            sealed != null && back != null && back.contentEquals(secret) && !sealed.ciphertext.contains("sk-test")
+        },
+        check("Key crypto uses a new IV every time", "two different IVs") {
+            val secret = "sk-test-key-1234".toByteArray(Charsets.UTF_8)
+            val first = CoderKeyCrypto.encrypt(secret)
+            val second = CoderKeyCrypto.encrypt(secret)
+            first != null && second != null && first.iv != second.iv
+        },
+        check("Key crypto refuses a wrong IV", "null") {
+            val sealed = CoderKeyCrypto.encrypt("sk-test-key-1234".toByteArray(Charsets.UTF_8))
+            val wrongIv = Base64.encodeToString(ByteArray(12), Base64.NO_WRAP)
+            sealed != null && CoderKeyCrypto.decrypt(sealed.ciphertext, wrongIv) == null
         },
     )
 }

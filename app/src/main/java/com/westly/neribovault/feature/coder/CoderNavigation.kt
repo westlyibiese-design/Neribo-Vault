@@ -7,6 +7,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
+import com.westly.neribovault.feature.coder.ai.CoderAiSettingsScreen
 import com.westly.neribovault.feature.coder.home.CoderHomeScreen
 import com.westly.neribovault.feature.coder.trash.CoderTrashScreen
 import com.westly.neribovault.feature.coder.workspace.CoderWorkspaceScreen
@@ -22,6 +23,7 @@ object CoderRoutes {
     const val LIST = Routes.CODER
     const val PROJECT = "coder/project/{projectId}"
     const val TRASH = "coder/trash"
+    const val AI_SETTINGS = "coder/ai"
     const val ARG_PROJECT_ID = "projectId"
 
     fun project(id: String) = "coder/project/$id"
@@ -39,6 +41,9 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
                 onOpenTrash = {
                     navController.navigate(CoderRoutes.TRASH) { launchSingleTop = true }
                 },
+                onOpenAiSettings = {
+                    navController.navigate(CoderRoutes.AI_SETTINGS) { launchSingleTop = true }
+                },
             )
         }
     }
@@ -54,6 +59,11 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
     composable(CoderRoutes.TRASH) {
         VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
             CoderTrashScreen(onBack = { navController.popBackStack() })
+        }
+    }
+    composable(CoderRoutes.AI_SETTINGS) {
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            CoderAiSettingsScreen(onBack = { navController.popBackStack() })
         }
     }
 }

@@ -34,6 +34,7 @@ import com.westly.neribovault.data.repository.TasksRepository
 import com.westly.neribovault.data.repository.TotpAccountsRepository
 import com.westly.neribovault.data.repository.WritingIdeasRepository
 import com.westly.neribovault.data.settings.SettingsStore
+import com.westly.neribovault.feature.coder.ai.CoderAiSettings
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import java.io.File
 
@@ -73,6 +74,7 @@ class AppContainer(context: Context) {
     val totpAccountsRepository: TotpAccountsRepository = TotpAccountsRepository(db.totpAccountDao())
     val coderFileStore = CoderFileStore(File(context.applicationContext.filesDir, "coder"))
     val coderProjectsRepository = CoderProjectsRepository(db.coderProjectDao(), coderFileStore)
+    val coderAiSettings: CoderAiSettings = CoderAiSettings(context.applicationContext)
 
     val cloudAuth: CloudAuth = CloudAuth(context.applicationContext, db)
     val syncEngine: SyncEngine = SyncEngine(context.applicationContext, db, cloudAuth)
