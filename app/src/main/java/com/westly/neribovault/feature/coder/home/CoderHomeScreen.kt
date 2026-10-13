@@ -161,18 +161,13 @@ fun CoderHomeScreen(
     }
 
     if (showNewDialog) {
-        NameEntryDialog(
-            title = "New project",
-            label = "Project name",
-            initialValue = "",
-            confirmLabel = "Create",
-            onConfirm = { name ->
+        NewProjectSheet(
+            isCreating = state.isCreating,
+            onCreate = { name, template ->
                 showNewDialog = false
-                vm.createProject(name)
+                vm.createProject(name, template)
             },
             onDismiss = { showNewDialog = false },
-            maxLength = CoderLimits.MAX_PROJECT_NAME_LENGTH,
-            enabled = !state.isCreating,
         )
     }
 

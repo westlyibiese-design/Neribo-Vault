@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Undo
 import androidx.compose.material3.MaterialTheme
@@ -29,7 +30,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.ui.components.EmptyState
@@ -46,7 +50,11 @@ import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
+import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, Delete, RenameProject }
 
@@ -63,6 +71,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
 
     var savedOpenPath by rememberSaveable { mutableStateOf<String?>(null) }
     val restoredPath = remember { savedOpenPath }
@@ -92,11 +102,40 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     }
 
     val openPath = state.openPath
-    BackHandler(enabled = openPath != null) { vm.closeFile() }
+    val previewEntry = state.previewEntry
+    // While the preview is showing it handles Back itself (page history first, then closing).
+    BackHandler(enabled = openPath != null && previewEntry == null) { vm.closeFile() }
+    if (previewEntry != null) {
+        CoderPreviewPanel(
+            projectId = projectId,
+            entryPath = previewEntry,
+            onClose = { vm.stopPreview() },
+        )
+        return
+    }
 
     val existingPaths = remember(state.entries) { state.entries.map { it.path }.toSet() }
     val project = state.project
     val canBrowse = !state.isLoading && project != null
+
+    // Run shows the open file when it is a page, Markdown, SVG or JSON; otherwise the project's index.html.
+    val onRun: () -> Unit = {
+        focusManager.clearFocus()
+        scope.launch {
+            val open = vm.state.value.openPath
+            val entry = when {
+                open != null && isPreviewableFile(open) -> open
+                hasRunnableRoot(context, projectId) -> RUN_INDEX
+                else -> null
+            }
+            if (entry != null) {
+                vm.startPreview(entry)
+            } else {
+                snackbarHostState.currentSnackbarData?.dismiss()
+                snackbarHostState.showSnackbar(MSG_NOTHING_TO_RUN)
+            }
+        }
+    }
 
     NeriboScaffold(
         topBar = {
@@ -114,7 +153,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
                             onRedo = { vm.redo() },
                             onRetry = { scope.launch { vm.saveNow() } },
                         )
+                        RunAction(onClick = onRun)
                     } else if (canBrowse) {
+                        RunAction(onClick = onRun)
                         OverflowMenu(
                             actions = listOf(
                                 MenuAction("Rename project", { dialog = WorkspaceDialog.RenameProject }),
@@ -278,6 +319,31 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
             maxLength = CoderLimits.MAX_PROJECT_NAME_LENGTH,
         )
     }
+}
+
+private const val RUN_INDEX = "index.html"
+private const val MSG_NOTHING_TO_RUN = "Add an index.html file to preview this project."
+private val PREVIEWABLE_EXTENSIONS = setOf("html", "htm", "md", "markdown", "svg", "json")
+
+/** True for files the preview can show on their own. */
+private fun isPreviewableFile(path: String): Boolean =
+    CoderPaths.nameOf(path).substringAfterLast('.', "").lowercase() in PREVIEWABLE_EXTENSIONS
+
+/** True when the project has something to show as a website. Does disk work off the main thread. */
+private suspend fun hasRunnableRoot(context: android.content.Context, projectId: String): Boolean {
+    val store = (context.applicationContext as NeriboApp).container.coderFileStore
+    return withContext(Dispatchers.IO) { CoderPreviewRoot.find(store, projectId) != null }
+}
+
+/** The Run button in the top bar. */
+@Composable
+private fun RunAction(onClick: () -> Unit) {
+    NeriboIconButton(
+        icon = Icons.Outlined.PlayArrow,
+        contentDescription = "Run",
+        onClick = onClick,
+        tint = MaterialTheme.colorScheme.primary,
+    )
 }
 
 /** Undo, Redo and the save status, shown in the top bar while a file is open. */

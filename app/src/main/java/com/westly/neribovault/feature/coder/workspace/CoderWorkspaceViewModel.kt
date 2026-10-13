@@ -42,6 +42,8 @@ data class CoderWorkspaceUiState(
     val canRedo: Boolean = false,
     val isLoading: Boolean = true,
     val message: String? = null,
+    /** The file the preview is showing, or null when the preview is closed. */
+    val previewEntry: String? = null,
 )
 
 private enum class ChangeKind { None, Typing, Deleting }
@@ -63,6 +65,7 @@ private const val MSG_BAD_NAME = "That name can't be used. Avoid slashes and spe
 private const val MSG_EXISTS = "A file or folder with that name already exists."
 private const val MSG_LIMIT = "This project has reached its size or file limit."
 private const val MSG_FAILED = "Couldn't complete that. Please try again."
+private const val MSG_PREVIEW_NOT_STARTED = "Couldn't save, so the preview was not started."
 private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer than 60 characters."
 
 /**
@@ -119,6 +122,25 @@ class CoderWorkspaceViewModel(
 
     fun consumeMessage() {
         _state.update { it.copy(message = null) }
+    }
+
+    // ---- Preview ---------------------------------------------------------------------------
+
+    /** Saves the open file, then shows [entryPath] in the preview. When saving fails nothing starts, so the preview never shows old text. */
+    fun startPreview(entryPath: String) {
+        viewModelScope.launch {
+            if (_state.value.previewEntry != null) return@launch
+            if (!saveNow()) {
+                postMessage(MSG_PREVIEW_NOT_STARTED)
+                return@launch
+            }
+            _state.update { it.copy(previewEntry = entryPath) }
+        }
+    }
+
+    /** Closes the preview and returns to where the person was. */
+    fun stopPreview() {
+        _state.update { it.copy(previewEntry = null) }
     }
 
     // ---- Open and close --------------------------------------------------------------------

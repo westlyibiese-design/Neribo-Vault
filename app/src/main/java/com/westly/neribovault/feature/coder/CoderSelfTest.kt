@@ -1,6 +1,8 @@
 package com.westly.neribovault.feature.coder
 
 import android.content.Context
+import android.net.Uri
+import android.webkit.WebResourceResponse
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
@@ -11,6 +13,14 @@ import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
+import com.westly.neribovault.feature.coder.preview.CoderConsole
+import com.westly.neribovault.feature.coder.preview.CoderMarkdown
+import com.westly.neribovault.feature.coder.preview.CoderMime
+import com.westly.neribovault.feature.coder.preview.CoderPreviewHost
+import com.westly.neribovault.feature.coder.preview.CoderPreviewResponder
+import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import com.westly.neribovault.feature.coder.preview.ConsoleLevel
+import com.westly.neribovault.feature.coder.templates.CoderTemplates
 import com.westly.neribovault.feature.coder.ui.CoderSyntaxColors
 import java.io.File
 
@@ -44,6 +54,10 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(languageChecks())
         results.addAll(highlighterChecks())
         results.addAll(undoChecks())
+        results.addAll(previewChecks(context, store))
+        results.addAll(markdownChecks())
+        results.addAll(consoleChecks())
+        results.addAll(templateChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -234,3 +248,171 @@ private fun undoChecks(): List<CoderCheckResult> = listOf(
         steps == 200
     },
 )
+
+private fun previewChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    val id = newId()
+    val host = CoderPreviewHost.hostFor(id)
+    store.write(id, "index.html", "<p>home</p>")
+    store.write(id, "a/index.html", "<p>a</p>")
+    store.write(id, "a/b.css", "body{}")
+    store.write(id, "a b.js", "1")
+    store.write(id, "__coder/secret.txt", "secret")
+    store.write(id, "README.md", "# Title\n\n**bold**")
+    store.write(id, "data.json", "{\"a\":1,\"u\":\"x/y\"}")
+    store.write(id, "bad.json", "{\"a\":")
+    val responder = CoderPreviewResponder(context, store, id, "")
+    fun get(path: String, method: String = "GET"): WebResourceResponse? =
+        responder.respondTo(Uri.parse("https://$host$path"), method)
+    fun body(response: WebResourceResponse?): String =
+        response?.data?.readBytes()?.toString(Charsets.UTF_8) ?: ""
+
+    val mimes = listOf(
+        "a.html" to "text/html", "a.css" to "text/css", "a.js" to "text/javascript", "a.json" to "application/json",
+        "a.svg" to "image/svg+xml", "a.PNG" to "image/png", "a.jpg" to "image/jpeg", "a.woff2" to "font/woff2",
+        "a.mp4" to "video/mp4", "a.md" to "text/plain", "a.wasm" to "application/wasm", "a.xyz" to "application/octet-stream",
+    )
+    for ((path, mime) in mimes) {
+        out.add(check("Content type of $path", mime) { CoderMime.forPath(path) == mime })
+    }
+    out.add(check("Text types are recognised", "text and json yes, png no") {
+        CoderMime.isTextMime("text/css") && CoderMime.isTextMime("application/json") && !CoderMime.isTextMime("image/png")
+    })
+    out.add(check("Preview host is lower case, dash free and short", "valid host") {
+        val upper = CoderPreviewHost.hostFor("ABCDEF12-3456-7890-ABCD-EF1234567890")
+        upper == upper.lowercase() && !upper.contains("-") && upper.endsWith(".coder.invalid") &&
+            upper.substringBefore('.').length < 63
+    })
+    out.add(check("Preview address encodes each part", "spaces become %20, slashes stay") {
+        CoderPreviewHost.urlFor(id, "a b/c d.js") == "https://$host/a%20b/c%20d.js"
+    })
+    out.add(check("Preview root needs an index.html", "empty string, then null") {
+        CoderPreviewRoot.find(store, id) == "" && CoderPreviewRoot.find(store, newId()) == null
+    })
+    val expectedStatus = listOf(
+        "/" to 200, "/a/" to 200, "/a" to 200, "/a/b.css" to 200, "/a%20b.js" to 200,
+        "/%20x.js" to 404, "/../x" to 404, "/%2e%2e/x" to 404, "/nothing.txt" to 404,
+        "/__coder/secret.txt" to 404, "/__coder/x" to 404, "/__coder" to 404,
+        "/__coder/md/README.md" to 200, "/__coder/json/data.json" to 200, "/__coder/md/missing.md" to 404,
+    )
+    for ((path, status) in expectedStatus) {
+        out.add(check("Preview answers $path with $status", status.toString()) { get(path)?.statusCode == status })
+    }
+    out.add(check("Preview sends the right type for a stylesheet", "text/css") { get("/a/b.css")?.mimeType == "text/css" })
+    out.add(check("Preview refuses POST", "405") { get("/", "POST")?.statusCode == 405 })
+    out.add(check("Preview answers HEAD without a body", "200 and empty") {
+        val r = get("/", "HEAD")
+        r?.statusCode == 200 && body(r).isEmpty()
+    })
+    out.add(check("Preview blocks http", "403") {
+        responder.respondTo(Uri.parse("http://$host/"), "GET")?.statusCode == 403
+    })
+    out.add(check("Preview blocks other schemes", "403") {
+        responder.respondTo(Uri.parse("ftp://$host/"), "GET")?.statusCode == 403
+    })
+    out.add(check("Preview lets other https hosts through", "null") {
+        responder.respondTo(Uri.parse("https://example.com/"), "GET") == null
+    })
+    out.add(check("Markdown page is built from the file", "contains a heading and bold text") {
+        val html = body(get("/__coder/md/README.md"))
+        html.contains("<h1>Title</h1>") && html.contains("<strong>bold</strong>")
+    })
+    out.add(check("JSON page is pretty printed and escaped", "quoted keys, readable slash") {
+        val html = body(get("/__coder/json/data.json"))
+        html.contains("&quot;a&quot;: 1") && html.contains("x/y") && !html.contains("\\/")
+    })
+    out.add(check("Broken JSON shows the raw text and a message", "message plus raw text") {
+        val html = body(get("/__coder/json/bad.json"))
+        html.contains("valid JSON") && html.contains("&quot;a&quot;")
+    })
+    return out
+}
+
+private fun markdownChecks(): List<CoderCheckResult> {
+    fun html(md: String): String = CoderMarkdown.toHtml(md)
+    return listOf(
+        check("Markdown escapes raw HTML", "text, not a tag") {
+            val h = html("<script>alert(1)</script>")
+            h.contains("&lt;script&gt;") && !h.contains("<script")
+        },
+        check("Markdown refuses javascript: links", "no link") {
+            !html("[x](javascript:alert(1))").contains("href")
+        },
+        check("Markdown refuses hidden-space javascript: links", "no link") {
+            !html("[x](java\tscript:alert(1))").contains("href") && !html("[x](JaVaScRiPt:alert(1))").contains("href")
+        },
+        check("Markdown refuses data: images", "no image") { !html("![x](data:text/html,hi)").contains("<img") },
+        check("Markdown keeps web links", "a link") {
+            html("[x](https://example.com/a?b=1&c=2)").contains("<a href=\"https://example.com/a?b=1&amp;c=2\">x</a>")
+        },
+        check("Markdown bold, italic and code", "strong, em, code") {
+            val h = html("**b** *i* _j_ `c`")
+            h.contains("<strong>b</strong>") && h.contains("<em>i</em>") && h.contains("<em>j</em>") && h.contains("<code>c</code>")
+        },
+        check("Markdown lists and quotes", "ul, ol, blockquote") {
+            val h = html("- a\n- b\n\n1. c\n2. d\n\n> q")
+            h.contains("<ul>") && h.contains("<ol>") && h.contains("<blockquote>")
+        },
+        check("Markdown fenced code is escaped", "pre with escaped text") {
+            html("```\n<b>x</b>\n```").contains("<pre><code>&lt;b&gt;x&lt;/b&gt;</code></pre>")
+        },
+        check("Markdown shows unfinished markup literally", "no crash, text kept") {
+            val h = html("```\ncode\n**bold *x _y `z [a](b")
+            h.contains("code") && h.contains("**bold")
+        },
+        check("Markdown handles 200,000 characters of odd input", "finishes in time") {
+            val start = System.nanoTime()
+            val inputs = listOf(
+                "a *b* **c** _d_ `e` [f](https://x.y) ".repeat(5_500),
+                "[".repeat(200_000),
+                "* ".repeat(100_000),
+                "_ ".repeat(100_000),
+                "**a ".repeat(50_000),
+                "`".repeat(200_000),
+            )
+            for (input in inputs) html(input)
+            (System.nanoTime() - start) / 1_000_000 < 10_000
+        },
+    )
+}
+
+private fun consoleChecks(): List<CoderCheckResult> {
+    val host = CoderPreviewHost.hostFor(newId())
+    return listOf(
+        check("Console keeps the last 200 messages", "200 kept, errors counted, clear resets") {
+            val console = CoderConsole(host, "")
+            repeat(250) { console.add(ConsoleLevel.Log, "m$it", null, 0) }
+            console.add(ConsoleLevel.Error, "boom", null, 0)
+            val kept = console.messages.size == 200 && console.messages.last().text == "boom" && console.errorCount == 1
+            console.clear()
+            kept && console.messages.isEmpty() && console.errorCount == 0
+        },
+        check("Console turns page addresses into project files", "relative file or null") {
+            val console = CoderConsole(host, "dist")
+            console.relativeSource("https://$host/dist/app.js?x=1#y") == "app.js" &&
+                console.relativeSource("https://$host/") == "index.html" &&
+                console.relativeSource("https://example.com/app.js") == null &&
+                console.relativeSource(null) == null
+        },
+    )
+}
+
+private fun templateChecks(): List<CoderCheckResult> {
+    val all = CoderTemplates.all
+    return listOf(
+        check("There are five templates with the agreed ids", "blank, hello-web, counter, todo, notes-md") {
+            all.map { it.id } == listOf("blank", "hello-web", "counter", "todo", "notes-md")
+        },
+        check("Every template file has a valid path, fits the limit and works offline", "valid, under 3 KB, no remote scripts") {
+            all.all { template ->
+                template.files.isNotEmpty() && template.files.all { file ->
+                    CoderPaths.isValidPath(file.path) &&
+                        file.content.toByteArray(Charsets.UTF_8).size <= 3_072 &&
+                        !file.content.contains("src=\"http") &&
+                        !file.content.contains("stylesheet\" href=\"http")
+                }
+            }
+        },
+        check("Every template can be found by id", "found") { all.all { CoderTemplates.find(it.id) == it } },
+    )
+}

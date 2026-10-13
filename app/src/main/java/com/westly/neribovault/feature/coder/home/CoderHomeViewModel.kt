@@ -6,8 +6,8 @@ import androidx.lifecycle.viewModelScope
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.data.repository.CoderProjectsRepository
 import com.westly.neribovault.feature.coder.CoderCheckResult
-import com.westly.neribovault.feature.coder.files.CoderStarterFile
 import com.westly.neribovault.feature.coder.runCoderSelfTest
+import com.westly.neribovault.feature.coder.templates.CoderTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -27,21 +27,6 @@ data class CoderHomeUiState(
     val message: String? = null,
     val selfTest: List<CoderCheckResult>? = null,
 )
-
-private val BLANK_HTML: String = listOf(
-    "<!DOCTYPE html>",
-    "<html lang=\"en\">",
-    "<head>",
-    "  <meta charset=\"UTF-8\">",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-    "  <title>My page</title>",
-    "</head>",
-    "<body>",
-    "  <h1>Hello</h1>",
-    "</body>",
-    "</html>",
-    "",
-).joinToString("\n")
 
 /** State and actions for the list of Coder projects. */
 class CoderHomeViewModel(
@@ -68,12 +53,12 @@ class CoderHomeViewModel(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CoderHomeUiState())
 
-    /** Makes a blank HTML project. A second call while one is being made is ignored. */
-    fun createProject(name: String) {
+    /** Makes a project from [template]. A second call while one is being made is ignored. */
+    fun createProject(name: String, template: CoderTemplate) {
         if (local.value.isCreating) return
         local.update { it.copy(isCreating = true) }
         viewModelScope.launch {
-            val created = projects.createProject(name, "blank", listOf(CoderStarterFile("index.html", BLANK_HTML)))
+            val created = projects.createProject(name, template.id, template.files)
             local.update {
                 if (created != null) {
                     it.copy(isCreating = false, createdProjectId = created.id)
