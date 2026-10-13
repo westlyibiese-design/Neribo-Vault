@@ -30,7 +30,8 @@ private val CONSOLE_LINE_HEIGHT = 17.sp
 
 /**
  * The preview console as a bottom sheet. It only lists what the page wrote; nothing typed here is
- * ever run. Each line says its level in words as well as in color.
+ * ever run. Each line says its level in words as well as in color, and an error may have a plain-English
+ * explanation under it.
  */
 @Composable
 fun CoderConsolePanel(
@@ -113,5 +114,14 @@ private fun ConsoleLine(message: CoderConsoleMessage) {
             fontSize = CONSOLE_FONT_SIZE,
             lineHeight = CONSOLE_LINE_HEIGHT,
         )
+        val friendly = message.friendly
+        if (friendly != null) {
+            Text(
+                text = friendly,
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.padding(top = NeriboTheme.spacing.xs),
+            )
+        }
     }
 }

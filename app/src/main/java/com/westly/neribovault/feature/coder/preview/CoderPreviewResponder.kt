@@ -22,11 +22,11 @@ import java.io.InputStream
  * folder. Files are only ever found through [CoderFileStore.resolve], so a request can never reach
  * anything outside the project. Secure (https) requests to other hosts are left alone so the page can
  * use the internet; every other kind of address is refused. [rootPrefix] is "" or a folder name
- * (without a trailing slash) that acts as the top of the site. [context] is kept for the registry
- * contract and is not used yet.
+ * (without a trailing slash) that acts as the top of the site. [context] gives access to the app's
+ * bundled React and Babel files, which answer the well-known CDN addresses offline (see [CoderCdnShim]).
  */
 class CoderPreviewResponder(
-    @Suppress("unused") private val context: Context,
+    private val context: Context,
     private val store: CoderFileStore,
     private val projectId: String,
     private val rootPrefix: String,
@@ -45,12 +45,37 @@ class CoderPreviewResponder(
         if (url.scheme?.lowercase() != "https") {
             return response("text/plain", 403, "Forbidden", BLOCKED_TEXT.toByteArray(Charsets.UTF_8), head = false)
         }
-        if (url.host?.lowercase() != previewHost) return null
+        if (url.host?.lowercase() != previewHost) return vendorResponse(url, method.uppercase())
         return try {
             serve(url, method.uppercase())
         } catch (e: Exception) {
             messagePage(500, "Something went wrong", "This file could not be shown.", head = false)
         }
+    }
+
+    /**
+     * The bundled copy of React, ReactDOM or Babel for a well-known CDN address, or null (go to the
+     * network) when the address is not one of them or the bundled file is not in the app.
+     */
+    private fun vendorResponse(url: Uri, method: String): WebResourceResponse? {
+        if (method != "GET" && method != "HEAD") return null
+        val asset = CoderCdnShim.match(url) ?: return null
+        val stream: InputStream = try {
+            context.assets.open("coder/vendor/" + asset.assetName)
+        } catch (e: IOException) {
+            return null
+        }
+        val body: InputStream = if (method == "HEAD") {
+            try {
+                stream.close()
+            } catch (e: IOException) {
+                // Nothing to do: the stream was only opened to prove the file exists.
+            }
+            ByteArrayInputStream(ByteArray(0))
+        } else {
+            stream
+        }
+        return WebResourceResponse("text/javascript", "utf-8", 200, "OK", HEADERS + ("X-Coder-Served" to "offline"), body)
     }
 
     private fun serve(url: Uri, method: String): WebResourceResponse {

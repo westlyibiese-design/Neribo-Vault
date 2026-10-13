@@ -133,21 +133,42 @@ fun CoderPreviewPanel(projectId: String, entryPath: String, onClose: () -> Unit)
     val context = LocalContext.current
     val store = remember(context) { (context.applicationContext as NeriboApp).container.coderFileStore }
     val holder = remember { PreviewHolder() }
-    val rootPrefix by produceState<String?>(initialValue = null, projectId, store) {
-        value = withContext(Dispatchers.IO) { CoderPreviewRoot.find(store, projectId) ?: "" }
+    val plan by produceState<PreviewPlan?>(initialValue = null, projectId, store) {
+        value = withContext(Dispatchers.IO) {
+            PreviewPlan(
+                rootPrefix = CoderPreviewRoot.find(store, projectId) ?: "",
+                build = CoderBuildDetector.check(store, projectId),
+            )
+        }
     }
     BackHandler {
         val view = holder.webView
         if (view != null && view.canGoBack()) view.goBack() else onClose()
     }
-    val root = rootPrefix
-    if (root == null) {
+    val current = plan
+    if (current == null) {
         NeriboScaffold(topBar = { NeriboTopBar(title = "Preview", onBack = onClose) }) { padding ->
             Box(modifier = Modifier.fillMaxSize().padding(padding)) { LoadingState() }
         }
+    } else if (current.build is CoderBuildCheck.NeedsBuild) {
+        NeedsBuildNotice(
+            reason = current.build.reason,
+            builtFolderHint = current.build.builtFolderHint,
+            onBack = onClose,
+        )
     } else {
-        PreviewContent(projectId, entryPath, root, store, holder, onClose)
+        PreviewContent(projectId, entryPath, current.rootPrefix, store, holder, onClose)
     }
+}
+
+/** What the preview found out about the project before showing it: the site's top folder and whether it needs a build. */
+private class PreviewPlan(val rootPrefix: String, val build: CoderBuildCheck)
+
+/** Adds a plain-English line to errors and warnings that have a known explanation. */
+private fun withFriendlyText(message: CoderConsoleMessage): CoderConsoleMessage {
+    val isProblem = message.level == ConsoleLevel.Error || message.level == ConsoleLevel.Warn
+    if (!isProblem || message.friendly != null) return message
+    return message.copy(friendly = CoderErrorExplainer.explain(message.text))
 }
 
 @Composable
@@ -276,9 +297,10 @@ private fun PreviewContent(
             destructive = true,
         )
     }
+    val shownMessages = remember(console.messages) { console.messages.map { withFriendlyText(it) } }
     if (showConsole) {
         CoderConsolePanel(
-            messages = console.messages,
+            messages = shownMessages,
             onClear = { console.clear() },
             onClose = { showConsole = false },
         )

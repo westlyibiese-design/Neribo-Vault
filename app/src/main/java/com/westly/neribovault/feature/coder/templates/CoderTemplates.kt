@@ -55,6 +55,25 @@ object CoderTemplates {
             description = "A README.md that shows headings, bold text, a list, a link and code.",
             files = listOf(CoderStarterFile("README.md", NOTES_MD)),
         ),
+        CoderTemplate(
+            id = "react-hello",
+            name = "React: Hello",
+            description = "A small React page with a heading and a paragraph. Works offline.",
+            files = listOf(
+                CoderStarterFile("index.html", REACT_HELLO_HTML),
+                CoderStarterFile("app.jsx", REACT_HELLO_JSX),
+            ),
+        ),
+        CoderTemplate(
+            id = "react-counter",
+            name = "React: Counter",
+            description = "A React button that adds one each time you tap it. Works offline.",
+            files = listOf(
+                CoderStarterFile("index.html", REACT_COUNTER_HTML),
+                CoderStarterFile("app.jsx", REACT_COUNTER_JSX),
+                CoderStarterFile("style.css", REACT_COUNTER_CSS),
+            ),
+        ),
     )
 
     /** The template with this [id], or null when there is none. */
@@ -452,4 +471,129 @@ Put three backticks above and below your code:
 ```
 print("Hello")
 ```
+"""
+
+private const val REACT_HELLO_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>React: Hello</title>
+  <style>
+    /* This asks the browser to use light or dark colors to match the phone. */
+    :root { color-scheme: light dark; }
+    body { font-family: sans-serif; margin: 24px; }
+  </style>
+</head>
+<body>
+  <!-- React puts the page you write in app.jsx inside this box. -->
+  <div id="root"></div>
+
+  <!--
+    These three lines load React and Babel (Babel lets you write JSX).
+    Coder answers them from inside the app, so they work with no internet.
+    The same file also works on a normal website with internet.
+  -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- type="text/babel" tells Babel to turn app.jsx into normal JavaScript. -->
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
+"""
+
+private const val REACT_HELLO_JSX = """// A component is a function that returns what should appear on the page.
+// The part that looks like HTML is called JSX.
+function App() {
+  return (
+    <div>
+      <h1>Hello from React</h1>
+      <p>Change this text, then tap Run again to see it update.</p>
+    </div>
+  );
+}
+
+// Show the App component inside the box with the id "root".
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+"""
+
+private const val REACT_COUNTER_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>React: Counter</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="root"></div>
+
+  <!--
+    These three lines load React and Babel (Babel lets you write JSX).
+    Coder answers them from inside the app, so they work with no internet.
+    The same file also works on a normal website with internet.
+  -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
+"""
+
+private const val REACT_COUNTER_JSX = """// useState gives a component a memory.
+// React.useState(0) starts the number at 0 and returns two things:
+// the current value, and a function that changes it.
+function Counter() {
+  const [count, setCount] = React.useState(0);
+
+  return (
+    <div className="card">
+      <h1>Counter</h1>
+      <p className="number">{count}</p>
+      <button onClick={function () { setCount(count + 1); }}>Add one</button>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Counter />);
+"""
+
+private const val REACT_COUNTER_CSS = """/* Light and dark colors follow the phone's setting. */
+:root { color-scheme: light dark; }
+
+body {
+  font-family: sans-serif;
+  margin: 0;
+  padding: 24px;
+  display: flex;
+  justify-content: center;
+}
+
+.card {
+  max-width: 320px;
+  width: 100%;
+  padding: 24px;
+  border: 1px solid GrayText;
+  border-radius: 16px;
+  text-align: center;
+}
+
+.number {
+  font-size: 56px;
+  margin: 8px 0 20px;
+}
+
+button {
+  font-size: 18px;
+  padding: 12px 24px;
+  min-height: 48px;
+  border-radius: 12px;
+  border: 1px solid GrayText;
+  background: ButtonFace;
+  color: ButtonText;
+}
 """

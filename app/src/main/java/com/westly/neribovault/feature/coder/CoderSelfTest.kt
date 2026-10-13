@@ -13,12 +13,17 @@ import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
+import com.westly.neribovault.feature.coder.preview.CoderBuildCheck
+import com.westly.neribovault.feature.coder.preview.CoderBuildDetector
+import com.westly.neribovault.feature.coder.preview.CoderCdnShim
 import com.westly.neribovault.feature.coder.preview.CoderConsole
+import com.westly.neribovault.feature.coder.preview.CoderErrorExplainer
 import com.westly.neribovault.feature.coder.preview.CoderMarkdown
 import com.westly.neribovault.feature.coder.preview.CoderMime
 import com.westly.neribovault.feature.coder.preview.CoderPreviewHost
 import com.westly.neribovault.feature.coder.preview.CoderPreviewResponder
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import com.westly.neribovault.feature.coder.preview.CoderVendorAsset
 import com.westly.neribovault.feature.coder.preview.ConsoleLevel
 import com.westly.neribovault.feature.coder.templates.CoderTemplates
 import com.westly.neribovault.feature.coder.ui.CoderSyntaxColors
@@ -73,6 +78,10 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(consoleChecks())
         results.addAll(templateChecks())
         results.addAll(zipChecks(context, store, root))
+        results.addAll(shimChecks())
+        results.addAll(buildDetectorChecks(store))
+        results.addAll(explainerChecks())
+        results.addAll(reactTemplateChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -415,16 +424,18 @@ private fun consoleChecks(): List<CoderCheckResult> {
 private fun templateChecks(): List<CoderCheckResult> {
     val all = CoderTemplates.all
     return listOf(
-        check("There are five templates with the agreed ids", "blank, hello-web, counter, todo, notes-md") {
-            all.map { it.id } == listOf("blank", "hello-web", "counter", "todo", "notes-md")
+        check("There are seven templates with the agreed ids", "blank, hello-web, counter, todo, notes-md, react-hello, react-counter") {
+            all.map { it.id } == listOf("blank", "hello-web", "counter", "todo", "notes-md", "react-hello", "react-counter")
         },
-        check("Every template file has a valid path, fits the limit and works offline", "valid, under 3 KB, no remote scripts") {
+        check("Every template file has a valid path, fits the limit and works offline", "valid, under 3 KB, only the bundled React scripts are remote") {
             all.all { template ->
                 template.files.isNotEmpty() && template.files.all { file ->
+                    var rest = file.content
+                    for (url in REACT_SCRIPT_URLS) rest = rest.replace("src=\"" + url + "\"", "")
                     CoderPaths.isValidPath(file.path) &&
                         file.content.toByteArray(Charsets.UTF_8).size <= 3_072 &&
-                        !file.content.contains("src=\"http") &&
-                        !file.content.contains("stylesheet\" href=\"http")
+                        !rest.contains("src=\"http") &&
+                        !rest.contains("stylesheet\" href=\"http")
                 }
             }
         },
@@ -651,5 +662,148 @@ private fun previewRootChecks(store: CoderFileStore): List<CoderCheckResult> {
                 rootOf("docs/index.html") == "docs"
         },
         check("Preview root: no index.html is null", "null") { rootOf("src/index.html", "dist/main.js") == null },
+    )
+}
+
+/** The three addresses the React templates load; the app answers them from its own files. */
+private val REACT_SCRIPT_URLS = listOf(
+    "https://unpkg.com/react@18/umd/react.development.js",
+    "https://unpkg.com/react-dom@18/umd/react-dom.development.js",
+    "https://unpkg.com/@babel/standalone/babel.min.js",
+)
+
+private fun shimChecks(): List<CoderCheckResult> {
+    fun asset(url: String): CoderVendorAsset? = CoderCdnShim.match(Uri.parse(url))
+    val out = ArrayList<CoderCheckResult>()
+    val matches = listOf(
+        REACT_SCRIPT_URLS[0] to CoderVendorAsset.React,
+        REACT_SCRIPT_URLS[1] to CoderVendorAsset.ReactDom,
+        REACT_SCRIPT_URLS[2] to CoderVendorAsset.Babel,
+        "https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.development.js" to CoderVendorAsset.React,
+        "https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.development.js" to CoderVendorAsset.ReactDom,
+        "https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js" to CoderVendorAsset.Babel,
+        "https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.development.js" to CoderVendorAsset.React,
+        "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.development.js" to CoderVendorAsset.ReactDom,
+        "https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.0/babel.min.js" to CoderVendorAsset.Babel,
+        "https://unpkg.com/react@18.2.0/umd/react.production.min.js" to CoderVendorAsset.React,
+        "https://unpkg.com/react-dom@18.x/umd/react-dom.production.min.js" to CoderVendorAsset.ReactDom,
+        "https://unpkg.com/@babel/standalone@7.24.0/babel.js" to CoderVendorAsset.Babel,
+        "https://unpkg.com/react@18/umd/react.development.js?v=1" to CoderVendorAsset.React,
+    )
+    for ((url, expected) in matches) {
+        out.add(check("Shim serves $url", expected.name) { asset(url) == expected })
+    }
+    val refused = listOf(
+        "https://unpkg.com/react@19/umd/react.development.js" to "react 19",
+        "https://unpkg.com/react/umd/react.development.js" to "no version",
+        "http://unpkg.com/react@18/umd/react.development.js" to "http",
+        "https://evil.com/react@18/umd/react.development.js" to "another host",
+        "https://unpkg.com/react@18/umd/react.development.js/extra" to "extra segment",
+        "https://unpkg.com/react@180/umd/react.development.js" to "version 180",
+        "https://unpkg.com/@babel/standalone@8.0.0/babel.min.js" to "babel 8",
+        "https://cdn.jsdelivr.net/react@18/umd/react.development.js" to "jsdelivr without /npm",
+    )
+    for ((url, label) in refused) {
+        out.add(check("Shim refuses $label", "null") { asset(url) == null })
+    }
+    return out
+}
+
+private fun buildDetectorChecks(store: CoderFileStore): List<CoderCheckResult> {
+    fun project(vararg files: Pair<String, String>): String {
+        val id = newId()
+        for ((path, text) in files) store.write(id, path, text)
+        return id
+    }
+    val viteId = project(
+        "index.html" to "<div id=\"root\"></div><script type=\"module\" src=\"/src/main.jsx\"></script>",
+        "package.json" to "{\"devDependencies\":{\"vite\":\"^5.0.0\"},\"scripts\":{\"build\":\"vite build\"}}",
+        "src/main.jsx" to "console.log(1)",
+    )
+    val distId = project("dist/index.html" to "<p>built</p>", "dist/app.js" to "1")
+    val classicId = project(
+        "index.html" to "<script src=\"" + REACT_SCRIPT_URLS[0] + "\"></script><script type=\"text/babel\" src=\"app.jsx\"></script>",
+        "app.jsx" to "function App() { return <p>hi</p>; }",
+    )
+    val packageOnlyId = project("package.json" to "{\"dependencies\":{\"react-scripts\":\"5.0.1\"}}", "src/index.js" to "1")
+    return listOf(
+        check("Build detector: Vite source layout needs a build", "NeedsBuild that names Vite") {
+            val result = CoderBuildDetector.check(store, viteId)
+            result is CoderBuildCheck.NeedsBuild && result.reason.contains("Vite")
+        },
+        check("Build detector: a built dist folder is ready", "Ready") {
+            CoderBuildDetector.check(store, distId) == CoderBuildCheck.Ready
+        },
+        check("Build detector: script-tag React is ready", "Ready") {
+            CoderBuildDetector.check(store, classicId) == CoderBuildCheck.Ready
+        },
+        check("Build detector: an empty project is ready", "Ready") {
+            CoderBuildDetector.check(store, newId()) == CoderBuildCheck.Ready
+        },
+        check("Build detector: package.json with a build tool and no page needs a build", "NeedsBuild") {
+            CoderBuildDetector.check(store, packageOnlyId) is CoderBuildCheck.NeedsBuild
+        },
+    )
+}
+
+private fun explainerChecks(): List<CoderCheckResult> {
+    val cases = listOf(
+        "ReferenceError: foo is not defined" to "'foo'",
+        "TypeError: Cannot read properties of null (reading 'style')" to "'style'",
+        "TypeError: Cannot read properties of undefined (reading 'map')" to "'map'",
+        "TypeError: Cannot set properties of null (setting 'innerHTML')" to "set something",
+        "TypeError: foo.bar is not a function" to "'foo.bar'",
+        "SyntaxError: Unexpected token '}'" to "typo",
+        "SyntaxError: Unexpected end of input" to "typo",
+        "SyntaxError: missing ) after argument list" to "typo",
+        "SyntaxError: Invalid or unexpected token" to "typo",
+        "SyntaxError: Unexpected identifier" to "typo",
+        "TypeError: Failed to fetch" to "internet",
+        "net::ERR_INTERNET_DISCONNECTED" to "internet",
+        "Failed to load resource: the server responded with a status of 404 ()" to "wasn't found",
+        "Error: Objects are not valid as a React child (found: object with keys {a})" to "{item.name}",
+        "Error: Invalid hook call. Hooks can only be called inside of the body of a function component." to "useState",
+        "Warning: Each child in a list should have a unique \"key\" prop." to "key={...}",
+        "ReferenceError: require is not defined" to "import/export",
+        "SyntaxError: Cannot use import statement outside a module" to "import/export",
+        "ReferenceError: React is not defined" to "React isn't loaded",
+        "ReferenceError: ReactDOM is not defined" to "React isn't loaded",
+    )
+    val out = ArrayList<CoderCheckResult>()
+    for ((message, expected) in cases) {
+        out.add(check("Explainer: $message", "a sentence containing $expected") {
+            CoderErrorExplainer.explain(message)?.contains(expected) == true
+        })
+    }
+    out.add(check("Explainer: an unknown message gives null", "null") {
+        CoderErrorExplainer.explain("Something unusual happened") == null
+    })
+    out.add(check("Explainer: a 10,000 character message does not throw", "no exception") {
+        CoderErrorExplainer.explain("x".repeat(10_000))
+        CoderErrorExplainer.explain("Cannot read properties of null (reading '" + "y".repeat(10_000) + "')")
+        true
+    })
+    return out
+}
+
+private fun reactTemplateChecks(): List<CoderCheckResult> {
+    val hello = CoderTemplates.find("react-hello")
+    val counter = CoderTemplates.find("react-counter")
+    return listOf(
+        check("React templates exist", "react-hello and react-counter") { hello != null && counter != null },
+        check("React templates use classic scripts only", "no import or export text") {
+            listOfNotNull(hello, counter).flatMap { it.files }.none {
+                it.content.contains("import ") || it.content.contains("export ")
+            }
+        },
+        check("React templates load the three bundled addresses", "all three unpkg URLs in index.html") {
+            listOfNotNull(hello, counter).size == 2 && listOfNotNull(hello, counter).all { template ->
+                val index = template.files.firstOrNull { it.path == "index.html" }?.content.orEmpty()
+                REACT_SCRIPT_URLS.all { index.contains("src=\"" + it + "\"") }
+            }
+        },
+        check("React template addresses are served by the shim", "all three match") {
+            REACT_SCRIPT_URLS.all { CoderCdnShim.match(Uri.parse(it)) != null }
+        },
     )
 }
