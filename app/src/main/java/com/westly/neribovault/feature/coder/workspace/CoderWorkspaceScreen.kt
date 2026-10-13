@@ -1,6 +1,9 @@
 package com.westly.neribovault.feature.coder.workspace
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,6 +39,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
+import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.LoadingState
 import com.westly.neribovault.core.ui.components.MenuAction
@@ -52,6 +56,11 @@ import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import com.westly.neribovault.feature.coder.zip.CoderExportResult
+import com.westly.neribovault.feature.coder.zip.CoderTrust
+import com.westly.neribovault.feature.coder.zip.CoderZipExporter
+import com.westly.neribovault.feature.coder.zip.CoderZipRules
+import com.westly.neribovault.feature.coder.zip.ZipProgressDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,6 +91,31 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     ) { mutableStateOf(emptyList<String>()) }
     var dialog by rememberSaveable { mutableStateOf(WorkspaceDialog.None) }
     var dialogPath by rememberSaveable { mutableStateOf("") }
+    var showTrustDialog by rememberSaveable { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf(false) }
+    val exporter = remember(context) {
+        CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
+    }
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri: Uri? ->
+        if (uri != null && !exporting) {
+            exporting = true
+            scope.launch {
+                val result = try {
+                    exporter.export(projectId, uri)
+                } finally {
+                    exporting = false
+                }
+                snackbarHostState.currentSnackbarData?.dismiss()
+                snackbarHostState.showSnackbar(
+                    when (result) {
+                        is CoderExportResult.Success ->
+                            if (result.fileCount == 1) "Saved ZIP with 1 file" else "Saved ZIP with ${result.fileCount} files"
+                        is CoderExportResult.Failure -> result.message
+                    },
+                )
+            }
+        }
+    }
 
     LifecycleSaveEffect(onSave = { vm.flush() })
 
@@ -119,7 +153,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     val canBrowse = !state.isLoading && project != null
 
     // Run shows the open file when it is a page, Markdown, SVG or JSON; otherwise the project's index.html.
-    val onRun: () -> Unit = {
+    val runPreview: () -> Unit = {
         focusManager.clearFocus()
         scope.launch {
             val open = vm.state.value.openPath
@@ -134,6 +168,14 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
                 snackbarHostState.currentSnackbarData?.dismiss()
                 snackbarHostState.showSnackbar(MSG_NOTHING_TO_RUN)
             }
+        }
+    }
+    // A project that came from a ZIP asks once per app session before its code runs.
+    val onRun: () -> Unit = {
+        if (project?.templateId == CoderZipRules.TEMPLATE_ID && !CoderTrust.isTrusted(projectId)) {
+            showTrustDialog = true
+        } else {
+            runPreview()
         }
     }
 
@@ -166,6 +208,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
                                 MenuAction("New folder", {
                                     dialogPath = ""
                                     dialog = WorkspaceDialog.NewFolder
+                                }),
+                                MenuAction("Export as ZIP", {
+                                    exportLauncher.launch(exportFileName(project?.name.orEmpty()))
                                 }),
                             ),
                         )
@@ -319,11 +364,37 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
             maxLength = CoderLimits.MAX_PROJECT_NAME_LENGTH,
         )
     }
+
+    if (showTrustDialog) {
+        ConfirmDialog(
+            title = "Run this project?",
+            message = "This project came from a ZIP file. Running it runs its code on your phone, inside a safe preview that cannot reach your Neribo Vault data. Only run projects you trust.",
+            confirmLabel = "Run",
+            onConfirm = {
+                CoderTrust.trust(projectId)
+                showTrustDialog = false
+                runPreview()
+            },
+            onDismiss = { showTrustDialog = false },
+            dismissLabel = "Cancel",
+        )
+    }
+    if (exporting) {
+        ZipProgressDialog(title = "Saving ZIP\u2026", onCancel = null)
+    }
 }
 
 private const val RUN_INDEX = "index.html"
 private const val MSG_NOTHING_TO_RUN = "Add an index.html file to preview this project."
 private val PREVIEWABLE_EXTENSIONS = setOf("html", "htm", "md", "markdown", "svg", "json")
+
+/** The suggested file name for an export: the project name with anything but letters, digits, spaces, "-" and "_" replaced by "_". */
+private fun exportFileName(projectName: String): String {
+    val safe = projectName.map { ch -> if (ch.isLetterOrDigit() || ch == ' ' || ch == '-' || ch == '_') ch else '_' }
+        .joinToString("")
+        .trim()
+    return (if (safe.isEmpty()) "project" else safe) + ".zip"
+}
 
 /** True for files the preview can show on their own. */
 private fun isPreviewableFile(path: String): Boolean =

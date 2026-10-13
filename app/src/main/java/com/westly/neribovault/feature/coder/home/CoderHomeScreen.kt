@@ -1,5 +1,10 @@
 package com.westly.neribovault.feature.coder.home
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
@@ -45,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.BuildConfig
+import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.lock.VaultLockSettingsSheet
@@ -63,9 +70,18 @@ import com.westly.neribovault.feature.coder.VAULT_ID
 import com.westly.neribovault.feature.coder.VAULT_NAME
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.workspace.NameEntryDialog
+import com.westly.neribovault.feature.coder.zip.CoderImportReport
+import com.westly.neribovault.feature.coder.zip.CoderImportResult
+import com.westly.neribovault.feature.coder.zip.CoderZipImporter
+import com.westly.neribovault.feature.coder.zip.ImportReportDialog
+import com.westly.neribovault.feature.coder.zip.ZipMessageDialog
+import com.westly.neribovault.feature.coder.zip.ZipProgressDialog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** The list of Coder projects, with New project, rename, delete with Undo, and the Recently deleted screen. */
+/** The list of Coder projects, with New project, Import ZIP, rename, delete with Undo, and the Recently deleted screen. */
 @Composable
 fun CoderHomeScreen(
     onBack: () -> Unit,
@@ -82,6 +98,40 @@ fun CoderHomeScreen(
     var renameId by rememberSaveable { mutableStateOf<String?>(null) }
     var showLockSheet by rememberSaveable { mutableStateOf(false) }
 
+    val importer = remember(context) {
+        val container = (context.applicationContext as NeriboApp).container
+        CoderZipImporter(context.applicationContext, container.coderFileStore, container.coderProjectsRepository)
+    }
+    var importJob by remember { mutableStateOf<Job?>(null) }
+    var importing by remember { mutableStateOf(false) }
+    var importedId by rememberSaveable { mutableStateOf<String?>(null) }
+    var importedFiles by rememberSaveable { mutableStateOf(0) }
+    var importedReasons by rememberSaveable { mutableStateOf("") }
+    var importedWrapper by rememberSaveable { mutableStateOf<String?>(null) }
+    var importError by rememberSaveable { mutableStateOf<String?>(null) }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null && !importing) {
+            importing = true
+            importJob = scope.launch {
+                try {
+                    val name = withContext(Dispatchers.IO) { queryDisplayName(context, uri) }
+                    when (val result = importer.import(uri, name)) {
+                        is CoderImportResult.Success -> {
+                            importedFiles = result.report.importedFiles
+                            importedReasons = result.report.skippedReasons.joinToString("\n")
+                            importedWrapper = result.report.strippedWrapperFolder
+                            importedId = result.projectId
+                        }
+                        is CoderImportResult.Failure -> importError = result.message
+                    }
+                } finally {
+                    importing = false
+                    importJob = null
+                }
+            }
+        }
+    }
+
     LaunchedEffect(state.createdProjectId) {
         val id = state.createdProjectId ?: return@LaunchedEffect
         vm.consumeCreated()
@@ -95,6 +145,7 @@ fun CoderHomeScreen(
     }
 
     val menuActions = buildList<MenuAction> {
+        add(MenuAction(label = "Import ZIP", onClick = { importLauncher.launch(ZIP_MIME_TYPES) }, icon = Icons.Outlined.Archive))
         add(MenuAction(label = "Recently deleted", onClick = onOpenTrash, icon = Icons.Outlined.History))
         add(MenuAction(label = "Vault lock", onClick = { showLockSheet = true }, icon = Icons.Outlined.Lock))
         if (BuildConfig.DEBUG) {
@@ -195,10 +246,47 @@ fun CoderHomeScreen(
         )
     }
 
+    if (importing) {
+        ZipProgressDialog(title = "Unpacking\u2026", onCancel = { importJob?.cancel() })
+    }
+    val finishedId = importedId
+    if (finishedId != null) {
+        ImportReportDialog(
+            report = CoderImportReport(
+                importedFiles = importedFiles,
+                skippedFiles = 0,
+                skippedReasons = importedReasons.split("\n").filter { it.isNotEmpty() },
+                strippedWrapperFolder = importedWrapper,
+            ),
+            onOpen = {
+                importedId = null
+                onOpenProject(finishedId)
+            },
+            onClose = { importedId = null },
+        )
+    }
+    val failureMessage = importError
+    if (failureMessage != null) {
+        ZipMessageDialog(title = "Couldn't import", message = failureMessage, onDismiss = { importError = null })
+    }
+
     val selfTest = state.selfTest
     if (selfTest != null) {
         SelfTestDialog(results = selfTest, onDismiss = { vm.dismissSelfTest() })
     }
+}
+
+/** The file types the picker offers for Import ZIP; some phones label a ZIP with the generic type. */
+private val ZIP_MIME_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
+
+/** The picked file's name, or null when the provider does not give one. Does a quick query, so call it off the main thread. */
+private fun queryDisplayName(context: Context, uri: Uri): String? = try {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+        val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (column >= 0 && cursor.moveToFirst() && !cursor.isNull(column)) cursor.getString(column) else null
+    }
+} catch (e: Exception) {
+    null
 }
 
 @Composable
