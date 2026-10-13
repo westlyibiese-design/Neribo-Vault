@@ -16,6 +16,7 @@ import com.westly.neribovault.feature.authenticator.authenticatorGraph
 import com.westly.neribovault.feature.backup.backupGraph
 import com.westly.neribovault.feature.church.churchGraph
 import com.westly.neribovault.feature.cloud.cloudGraph
+import com.westly.neribovault.feature.coder.coderGraph
 import com.westly.neribovault.feature.developer.developerGraph
 import com.westly.neribovault.feature.diagnostics.diagnosticsGraph
 import com.westly.neribovault.feature.diary.diaryGraph
@@ -89,6 +90,7 @@ fun NeriboNavHost() {
         developerGraph(navController)
         accountsGraph(navController)
         authenticatorGraph(navController)
+        coderGraph(navController)
         settingsGraph(navController)
         securityGraph(navController)
         diagnosticsGraph(navController)

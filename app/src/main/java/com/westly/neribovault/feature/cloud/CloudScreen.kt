@@ -528,6 +528,7 @@ private fun SignedInSection(
             BulletLine("Songs stay on this phone and are not synced. Backups do include them.")
             BulletLine("Accounts (logins, passwords and their items) stay on this phone and are not synced. Backups do include them, with the passwords still encrypted.")
             BulletLine("The Authenticator (one-time codes) stays on this phone and is not synced. It is not part of the normal backup: use its own backup file.")
+            BulletLine("Coder projects stay on this phone and are not synced. They are not part of the normal backup: use a project's ZIP export instead.")
             BulletLine("The activity log stays on this phone.")
         }
     }

@@ -14,6 +14,7 @@ import com.westly.neribovault.data.local.dao.AccountItemDao
 import com.westly.neribovault.data.local.dao.AuditLogDao
 import com.westly.neribovault.data.local.dao.BugDao
 import com.westly.neribovault.data.local.dao.ChurchRecordDao
+import com.westly.neribovault.data.local.dao.CoderProjectDao
 import com.westly.neribovault.data.local.dao.DiaryEntryDao
 import com.westly.neribovault.data.local.dao.FolderPlanDao
 import com.westly.neribovault.data.local.dao.GoalDao
@@ -43,6 +44,7 @@ import com.westly.neribovault.data.local.entity.AccountItemEntity
 import com.westly.neribovault.data.local.entity.AuditLogEntity
 import com.westly.neribovault.data.local.entity.BugEntity
 import com.westly.neribovault.data.local.entity.ChurchRecordEntity
+import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.data.local.entity.DiaryEntryEntity
 import com.westly.neribovault.data.local.entity.FolderPlanEntity
 import com.westly.neribovault.data.local.entity.GoalEntity
@@ -68,7 +70,7 @@ import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.data.local.entity.TotpAccountEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column and version 8 the custom logo column on platform_accounts. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column and version 8 the custom logo column on platform_accounts and version 9 the Coder projects table. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -101,8 +103,9 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         AccountItemEntity::class,
         AccountFieldEntity::class,
         TotpAccountEntity::class,
+        CoderProjectEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -136,6 +139,7 @@ abstract class NeriboDatabase : RoomDatabase() {
     abstract fun accountItemDao(): AccountItemDao
     abstract fun accountFieldDao(): AccountFieldDao
     abstract fun totpAccountDao(): TotpAccountDao
+    abstract fun coderProjectDao(): CoderProjectDao
 
     companion object {
         const val FILE_NAME = "neribo_vault.db"
@@ -143,7 +147,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -244,6 +248,17 @@ abstract class NeriboDatabase : RoomDatabase() {
         val MIGRATION_7_8: Migration = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `platform_accounts` ADD COLUMN `customLogoPath` TEXT")
+            }
+        }
+
+        /** Adds the Coder projects table. Every existing row of every other table is left untouched. */
+        val MIGRATION_8_9: Migration = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `coder_projects` (`id` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+                        "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
+                        "`name` TEXT NOT NULL, `templateId` TEXT NOT NULL, PRIMARY KEY(`id`))",
+                )
             }
         }
 

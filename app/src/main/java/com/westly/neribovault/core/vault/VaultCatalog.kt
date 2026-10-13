@@ -13,6 +13,7 @@ import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.MusicNote
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.TrackChanges
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -126,6 +127,14 @@ object VaultCatalog {
             route = Routes.DEVELOPER,
             icon = Icons.Outlined.Code,
             tagline = "Projects and tasks",
+        ),
+        VaultDefinition(
+            id = "coder",
+            name = "Coder",
+            description = "Write code on your phone, with live preview",
+            route = Routes.CODER,
+            icon = Icons.Outlined.Terminal,
+            tagline = "Code and preview",
         ),
         VaultDefinition(
             id = "accounts",

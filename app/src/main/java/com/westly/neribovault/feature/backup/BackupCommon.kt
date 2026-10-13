@@ -25,6 +25,12 @@ internal object BackupFormat {
      */
     const val TABLE_TOTP = "totp_accounts"
 
+    /**
+     * Coder projects live in files that a backup does not carry, so their table is left out just
+     * like the Authenticator's. A Coder project's own backup is its ZIP export.
+     */
+    const val TABLE_CODER = "coder_projects"
+
     /** The two folders of user files that travel with a backup. */
     val FILE_DIRS: List<String> = listOf(DIR_MEMORIES, DIR_DOCUMENTS)
 
@@ -69,6 +75,7 @@ internal object BackupFormat {
     private fun isUserTable(name: String): Boolean =
         name != TABLE_TOMBSTONES &&
             name != TABLE_TOTP &&
+            name != TABLE_CODER &&
             name != NoteDeleteTraceSql.TABLE &&
             name != NoteDeleteTraceSql.CONTEXT_TABLE &&
             name != "room_master_table" &&
