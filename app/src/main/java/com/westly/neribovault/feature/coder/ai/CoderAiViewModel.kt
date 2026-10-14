@@ -2,6 +2,11 @@ package com.westly.neribovault.feature.coder.ai
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.westly.neribovault.data.repository.CoderProjectsRepository
+import com.westly.neribovault.data.repository.PlanningDocsRepository
+import com.westly.neribovault.data.repository.ProjectDocumentsRepository
+import com.westly.neribovault.data.repository.ProjectsRepository
+import com.westly.neribovault.feature.coder.CoderPrefs
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
@@ -17,8 +22,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -27,6 +35,7 @@ import kotlinx.coroutines.withContext
 private const val MESSAGE_KEY_UNREADABLE = "Your key couldn't be read. Open AI settings and save it again."
 private const val MESSAGE_UNEXPECTED = "Something went wrong. Try again."
 private const val MAX_NOTICE_FILES = 3
+private const val MAX_PROJECT_NOTES = 5
 
 /** Whether AI help can be used: not known yet, not set up, or ready with a provider and a model. */
 sealed interface CoderAiSetup {
@@ -56,11 +65,18 @@ private class PreparedTurn(val turn: BuiltTurn, val note: String?)
  * The chat of one project. Messages live only here: they survive a rotation and leaving the screen,
  * and are gone when the person starts a new chat or leaves the project. Only one request runs at a
  * time. Nothing the AI answers is applied here; the screen applies code only when the person taps.
+ * When the project is linked to a Developer project, the question also carries that project's name, status,
+ * description and tech stack, and, only while "Project notes" is on, its planning and project documents.
  */
 class CoderAiViewModel(
     private val projectId: String,
     private val settings: CoderAiSettings,
     private val files: CoderFileStore,
+    private val projects: CoderProjectsRepository,
+    private val developerProjects: ProjectsRepository,
+    private val planningDocs: PlanningDocsRepository,
+    private val projectDocuments: ProjectDocumentsRepository,
+    private val prefs: CoderPrefs,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CoderAiUiState())
@@ -71,6 +87,18 @@ class CoderAiViewModel(
     val setup: StateFlow<CoderAiSetup> = settings.activeProvider
         .flatMapLatest { provider -> setupFlow(provider) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, CoderAiSetup.Loading)
+
+    /** True while the project is linked to a Developer project that is still there (not deleted, not in the trash). */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val linked: StateFlow<Boolean> = projects.observeById(projectId)
+        .map { it?.developerProjectId }
+        .distinctUntilChanged()
+        .flatMapLatest { developerId -> linkedFlow(developerId) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** True when the person allowed the AI to use the notes of the linked Developer project. Off by default. */
+    val notesOn: StateFlow<Boolean> = prefs.notesOptIn(projectId)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private var nextId = 1L
     private var job: Job? = null
@@ -83,6 +111,11 @@ class CoderAiViewModel(
         return combine(settings.hasKey(provider), settings.model(provider)) { hasKey, model ->
             setupOf(provider, hasKey, model)
         }
+    }
+
+    private fun linkedFlow(developerId: String?): Flow<Boolean> {
+        if (developerId == null) return flowOf(false)
+        return developerProjects.observeById(developerId).map { it != null }
     }
 
     private fun setupOf(provider: CoderAiProvider, hasKey: Boolean, model: String?): CoderAiSetup =
@@ -107,6 +140,11 @@ class CoderAiViewModel(
     fun removeAttachedError() {
         pendingConsole = null
         _state.update { it.copy(errorAttached = false) }
+    }
+
+    /** Turns the use of the linked project's notes on or off for this project. */
+    fun setNotesOn(enabled: Boolean) {
+        viewModelScope.launch { prefs.setNotesOptIn(projectId, enabled) }
     }
 
     // ---- Sending ---------------------------------------------------------------------------
@@ -270,7 +308,7 @@ class CoderAiViewModel(
     // ---- What is sent ----------------------------------------------------------------------
 
     /** Reads the extra files and builds the text of one question. Runs on the IO dispatcher. */
-    private fun prepareTurn(
+    private suspend fun prepareTurn(
         request: String,
         context: CoderAiWorkspaceContext,
         includeOpen: Boolean,
@@ -295,8 +333,40 @@ class CoderAiViewModel(
             if (read is CoderReadResult.Text) contextFiles.add(ContextFile(path, read.text))
         }
         val selection = context.selection?.takeIf { it.isNotBlank() }
-        val turn = buildUserTurn(context.projectName, context.filePaths, contextFiles, selection, console, request)
+        val turn = buildUserTurn(
+            context.projectName, context.filePaths, contextFiles, selection, console, request, loadProjectInfo(),
+        )
         return PreparedTurn(turn, describeContext(contextFiles, selection != null, !console.isNullOrBlank()))
+    }
+
+    /**
+     * The text about the linked Developer project, or null when the project is not linked, the Developer
+     * project is gone or in the trash, or it cannot be read. Reads the name, status, description and tech stack
+     * only; the notes are added only while the person has them switched on. Runs on the IO dispatcher.
+     */
+    private suspend fun loadProjectInfo(): String? = try {
+        val developerId = projects.getById(projectId)?.developerProjectId
+        val developer = if (developerId == null) null else developerProjects.getById(developerId)
+        if (developerId == null || developer == null || developer.isDeleted) {
+            null
+        } else {
+            val notes = if (prefs.notesOptIn(projectId).first()) loadNotes(developerId) else null
+            buildProjectInfo(developer, notes)
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The newest planning documents and project documents of the Developer project, 5 at most, as title and text pairs. */
+    private suspend fun loadNotes(developerId: String): List<Pair<String, String>> {
+        val plans = planningDocs.observeByProject(developerId).first()
+        val documents = projectDocuments.observeByProject(developerId).first()
+        val all = ArrayList<Triple<Long, String, String>>()
+        for (plan in plans) all.add(Triple(plan.updatedAt, plan.title, plan.body))
+        for (document in documents) all.add(Triple(document.updatedAt, document.title, document.body))
+        return all.sortedByDescending { it.first }.take(MAX_PROJECT_NOTES).map { it.second to it.third }
     }
 
     private fun describeContext(contextFiles: List<ContextFile>, hasSelection: Boolean, hasError: Boolean): String? {

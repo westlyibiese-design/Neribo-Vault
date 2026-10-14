@@ -9,6 +9,8 @@ import androidx.room.PrimaryKey
  * [templateId] is "blank", a template id, or "zip" for an imported project.
  * [repoOwner], [repoName] and [repoBranch] are the GitHub repository the project is linked to (all null
  * when it is not linked); [lastPushedAt] is when it was last pushed there.
+ * [developerProjectId] is the id of the Developer project this project belongs to (null when it is not
+ * linked). Only the id is kept; nothing of the Developer project is copied.
  */
 @Entity(tableName = "coder_projects")
 data class CoderProjectEntity(
@@ -23,4 +25,5 @@ data class CoderProjectEntity(
     val repoName: String? = null,
     val repoBranch: String? = null,
     val lastPushedAt: Long? = null,
+    val developerProjectId: String? = null,
 )

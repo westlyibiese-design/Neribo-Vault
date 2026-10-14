@@ -11,6 +11,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
+import com.westly.neribovault.feature.coder.CoderRoutes
 import com.westly.neribovault.feature.developer.bugs.BugEditorScreen
 import com.westly.neribovault.feature.developer.docs.ProjectDocEditorScreen
 import com.westly.neribovault.feature.developer.docs.PromptEditorScreen
@@ -187,6 +188,9 @@ fun NavGraphBuilder.developerGraph(navController: NavHostController) {
                     navController.navigate(DeveloperRoutes.prompt(projectId, promptId)) {
                         launchSingleTop = true
                     }
+                },
+                onOpenCoderProject = { id ->
+                    navController.navigate(CoderRoutes.project(id)) { launchSingleTop = true }
                 },
             )
         }

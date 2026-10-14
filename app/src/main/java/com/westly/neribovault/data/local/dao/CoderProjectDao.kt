@@ -45,4 +45,10 @@ interface CoderProjectDao {
 
     @Query("UPDATE coder_projects SET lastPushedAt = :time, updatedAt = :time WHERE id = :id")
     suspend fun markPushed(id: String, time: Long)
+
+    @Query("UPDATE coder_projects SET developerProjectId = :developerProjectId, updatedAt = :now WHERE id = :id")
+    suspend fun setDeveloperLink(id: String, developerProjectId: String?, now: Long)
+
+    @Query("SELECT * FROM coder_projects WHERE developerProjectId = :developerProjectId AND isDeleted = 0 ORDER BY updatedAt DESC")
+    fun observeByDeveloperProject(developerProjectId: String): Flow<List<CoderProjectEntity>>
 }

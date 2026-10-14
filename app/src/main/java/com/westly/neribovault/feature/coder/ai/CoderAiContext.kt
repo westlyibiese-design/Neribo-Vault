@@ -17,6 +17,7 @@ private const val MAX_REQUEST_CHARS = 8_000
 private const val MAX_HISTORY_MESSAGES = 10
 private const val MAX_HISTORY_CHARS = 40_000
 private const val MAX_NAME_CHARS = 100
+private const val MAX_PROJECT_INFO_CHARS = 20_000
 private const val SHORTENED_MARKER = "[... file shortened ...]"
 
 /** The text of one project file that goes with a question. Order matters: the first file has the highest priority. */
@@ -41,7 +42,9 @@ data class CoderAiWorkspaceContext(
  * Builds the one text that is sent for a question: the project's file list, the given files, the
  * selection, the error text and the request, each in its own tag. [files] is in priority order (the
  * open file first); at most 6 are used and the last ones are dropped when the whole text would pass
- * 120,000 characters. Paths that fail [CoderPaths.isValidPath] are never listed or included. Pure.
+ * 120,000 characters. Paths that fail [CoderPaths.isValidPath] are never listed or included. [projectInfo] (the
+ * linked Developer project, see [buildProjectInfo]) goes right after the project block and before the first file;
+ * it counts toward the 120,000 characters and is never dropped, so it is cut to 20,000 characters if it were longer. Pure.
  */
 fun buildUserTurn(
     projectName: String,
@@ -50,6 +53,7 @@ fun buildUserTurn(
     selection: String?,
     console: String?,
     request: String,
+    projectInfo: String? = null,
 ): BuiltTurn {
     var shortened = false
     val validPaths = filePaths.filter { CoderPaths.isValidPath(it) }
@@ -60,6 +64,10 @@ fun buildUserTurn(
         head.append("\n- ... and ").append(validPaths.size - MAX_LISTED_PATHS).append(" more")
     }
     head.append("\n</project>")
+    val info = projectInfo?.trim()?.takeIf { it.isNotEmpty() }
+    if (info != null) {
+        head.append("\n").append(cutText(info, MAX_PROJECT_INFO_CHARS))
+    }
 
     val fileBlocks = ArrayList<String>()
     val seen = HashSet<String>()

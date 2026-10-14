@@ -36,14 +36,16 @@ import com.westly.neribovault.core.ui.components.StatusBadge
 import com.westly.neribovault.core.util.copyToClipboard
 import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.data.local.entity.ProjectEntity
+import com.westly.neribovault.feature.coder.link.CoderLinkedProjectsCard
 import com.westly.neribovault.feature.developer.projectStatusLabel
 
-/** The Overview tab: status, description, tech stack and the repo and live links. */
+/** The Overview tab: status, description, tech stack, the repo and live links, and the Coder projects linked to this project. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ProjectOverviewTab(
     project: ProjectEntity,
     onMessage: (String) -> Unit,
+    onOpenCoderProject: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -95,6 +97,7 @@ fun ProjectOverviewTab(
                 LinkRow(label = "Live site", url = project.liveUrl, onMessage = onMessage)
             }
         }
+        CoderLinkedProjectsCard(developerProjectId = project.id, onOpenProject = onOpenCoderProject)
     }
 }
 

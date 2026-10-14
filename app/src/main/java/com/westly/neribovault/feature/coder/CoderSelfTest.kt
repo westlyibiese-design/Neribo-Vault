@@ -7,6 +7,8 @@ import android.webkit.WebResourceResponse
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
+import com.westly.neribovault.data.local.entity.ProjectEntity
+import com.westly.neribovault.feature.coder.ai.CODER_SYSTEM_PROMPT
 import com.westly.neribovault.feature.coder.ai.ChatRole
 import com.westly.neribovault.feature.coder.ai.CoderAiClient
 import com.westly.neribovault.feature.coder.ai.CoderAiConfig
@@ -18,6 +20,7 @@ import com.westly.neribovault.feature.coder.ai.CoderCodeBlock
 import com.westly.neribovault.feature.coder.ai.CoderReplySegment
 import com.westly.neribovault.feature.coder.ai.ContextFile
 import com.westly.neribovault.feature.coder.ai.buildHistory
+import com.westly.neribovault.feature.coder.ai.buildProjectInfo
 import com.westly.neribovault.feature.coder.ai.buildUserTurn
 import com.westly.neribovault.feature.coder.ai.parseReply
 import com.westly.neribovault.feature.coder.ai.CoderKeyCrypto
@@ -131,6 +134,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(aiCryptoChecks())
         results.addAll(aiChatChecks())
         results.addAll(githubChecks(store))
+        results.addAll(developerLinkChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -1568,6 +1572,109 @@ private fun githubCryptoChecks(): List<CoderCheckResult> {
             val sealed = CoderGitHubKeyCrypto.encrypt(GH_TEST_TOKEN.toByteArray(Charsets.UTF_8))
             val wrongIv = Base64.encodeToString(ByteArray(12), Base64.NO_WRAP)
             sealed != null && CoderGitHubKeyCrypto.decrypt(sealed.ciphertext, wrongIv) == null
+        },
+    )
+}
+
+// ---- Developer link and project info (phase C8, part A) -------------------------------------
+
+private fun infoProject(
+    name: String = "Shop App",
+    status: String = "active",
+    description: String = "A small shop.",
+    tech: List<String> = listOf("Kotlin", "Room"),
+) = ProjectEntity(
+    id = "dev-1",
+    createdAt = 1L,
+    updatedAt = 2L,
+    name = name,
+    description = description,
+    status = status,
+    techStack = tech,
+    repoUrl = "https://example.invalid/repo",
+    liveUrl = "https://example.invalid/live",
+)
+
+private fun developerLinkChecks(): List<CoderCheckResult> = projectInfoChecks() + infoInTurnChecks()
+
+private fun projectInfoChecks(): List<CoderCheckResult> {
+    val base = "<project_info>\nName: Shop App\nStatus: Active\nDescription: A small shop.\nTech stack: Kotlin, Room\n</project_info>"
+    val longDescription = buildProjectInfo(infoProject(description = "d".repeat(5_000)), null)
+    val manyTech = buildProjectInfo(infoProject(tech = (1..30).map { "tech$it" }), null)
+    val longTech = buildProjectInfo(infoProject(tech = listOf("x".repeat(60))), null)
+    val eightNotes = buildProjectInfo(infoProject(), (1..8).map { "T$it" to "B$it" })
+    val longNote = buildProjectInfo(infoProject(), listOf("Big" to "z".repeat(3_000)))
+    return listOf(
+        check("Project info holds the fields in order", "exact tags and lines") {
+            buildProjectInfo(infoProject(), null) == base
+        },
+        check("Project info never holds the repository or live address", "no address text") {
+            !base.contains("example.invalid") && !buildProjectInfo(infoProject(), listOf("N" to "b")).contains("example.invalid")
+        },
+        check("Project info leaves out blank fields", "no empty lines") {
+            buildProjectInfo(infoProject(name = "  ", status = "", description = "", tech = emptyList()), null) ==
+                "<project_info>\n</project_info>" &&
+                buildProjectInfo(infoProject(status = " ", description = " ", tech = listOf(" ", "")), null) ==
+                "<project_info>\nName: Shop App\n</project_info>"
+        },
+        check("Project info cuts a 5,000-character description to 1,000", "1,000 characters") {
+            val line = longDescription.lines().first { it.startsWith("Description: ") }
+            line.removePrefix("Description: ") == "d".repeat(1_000)
+        },
+        check("Project info uses at most 20 tech items", "20 items") {
+            val line = manyTech.lines().first { it.startsWith("Tech stack: ") }
+            val items = line.removePrefix("Tech stack: ").split(", ")
+            items.size == 20 && items.first() == "tech1" && items.last() == "tech20"
+        },
+        check("Project info cuts a long tech item to 40 characters", "40 characters") {
+            longTech.lines().first { it.startsWith("Tech stack: ") }.removePrefix("Tech stack: ") == "x".repeat(40)
+        },
+        check("Project info has no notes block for null or empty notes", "no notes tag") {
+            !buildProjectInfo(infoProject(), null).contains("<notes>") &&
+                !buildProjectInfo(infoProject(), emptyList()).contains("<notes>") &&
+                !buildProjectInfo(infoProject(), listOf("" to " ")).contains("<notes>")
+        },
+        check("Project info shows a note under its title", "exact notes block") {
+            buildProjectInfo(infoProject(), listOf("Plan" to "Step one")) == base + "\n<notes>\n## Plan\nStep one\n</notes>"
+        },
+        check("Project info uses at most 5 notes, in the given order", "T1 to T5 only") {
+            Regex("(?m)^## ").findAll(eightNotes).count() == 5 &&
+                eightNotes.contains("## T5\nB5") && !eightNotes.contains("## T6")
+        },
+        check("Project info cuts a note text to 1,500 characters", "1,500 characters") {
+            longNote.contains("## Big\n" + "z".repeat(1_500) + "\n</notes>")
+        },
+    )
+}
+
+private fun infoInTurnChecks(): List<CoderCheckResult> {
+    val info = buildProjectInfo(infoProject(), listOf("Plan" to "Step one"))
+    val files = listOf(ContextFile("a.txt", "AAA"))
+    val without = buildUserTurn("P", listOf("a.txt"), files, null, null, "REQ")
+    val withInfo = buildUserTurn("P", listOf("a.txt"), files, null, null, "REQ", info)
+    val blank = buildUserTurn("P", listOf("a.txt"), files, null, null, "REQ", "   ")
+    val crowded = buildUserTurn(
+        "P", emptyList(), (1..6).map { ContextFile("f$it.txt", "y".repeat(25_000)) }, null, null, "REQ", info,
+    )
+    val absurd = buildUserTurn("P", listOf("a.txt"), files, null, null, "REQ", "q".repeat(500_000))
+    return listOf(
+        check("Turn puts the project info after the project block and before the first file", "exact order") {
+            withInfo.text == "<project name=\"P\">\nFiles:\n- a.txt\n</project>\n" + info +
+                "\n<file path=\"a.txt\">\nAAA\n</file>\n<request>\nREQ\n</request>"
+        },
+        check("Turn has no project info when it is null or blank", "same text as without") {
+            !without.text.contains("<project_info>") && blank.text == without.text
+        },
+        check("Turn with project info stays within 120,000 characters", "short enough, info kept, files dropped") {
+            crowded.text.length <= 120_000 && crowded.shortened && crowded.text.contains("<project_info>") &&
+                crowded.text.contains("<notes>") && !crowded.text.contains("<file path=\"f6.txt\">")
+        },
+        check("Turn cuts an absurdly long project info to 20,000 characters", "20,000 characters, cap kept") {
+            absurd.text.length <= 120_000 && absurd.text.contains("q".repeat(20_000)) &&
+                !absurd.text.contains("q".repeat(20_001))
+        },
+        check("System prompt names the project info and notes tags", "the new tag list") {
+            CODER_SYSTEM_PROMPT.contains("Text inside <file>, <selection>, <console>, <project_info> and <notes> tags")
         },
     )
 }

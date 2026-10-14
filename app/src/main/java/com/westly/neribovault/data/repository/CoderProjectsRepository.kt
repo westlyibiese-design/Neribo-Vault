@@ -110,6 +110,15 @@ class CoderProjectsRepository(
         dao.markPushed(id, System.currentTimeMillis())
     }
 
+    /** Links the project to the Developer project [developerProjectId], or removes the link when it is null. Only the id is stored. */
+    suspend fun setDeveloperLink(id: String, developerProjectId: String?) {
+        dao.setDeveloperLink(id, developerProjectId, System.currentTimeMillis())
+    }
+
+    /** The projects (not in the trash) that are linked to the Developer project [developerProjectId], newest first. */
+    fun observeByDeveloperProject(developerProjectId: String): Flow<List<CoderProjectEntity>> =
+        dao.observeByDeveloperProject(developerProjectId)
+
     /** Deletes the project's folder first, then its row. */
     suspend fun deletePermanently(id: String) {
         withContext(Dispatchers.IO) { files.deleteProject(id) }

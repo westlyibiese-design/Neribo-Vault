@@ -71,6 +71,7 @@ fun ProjectDetailScreen(
     onOpenFolderPlan: (planId: String) -> Unit,
     onOpenDocument: (docId: String) -> Unit,
     onOpenPrompt: (promptId: String) -> Unit,
+    onOpenCoderProject: (coderProjectId: String) -> Unit,
 ) {
     val vm = neriboViewModel(key = "project-detail-$projectId") { c ->
         ProjectDetailViewModel(projectId, c.projectsRepository)
@@ -144,7 +145,11 @@ fun ProjectDetailScreen(
                 )
                 Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                     when (selectedTab) {
-                        0 -> ProjectOverviewTab(project = project, onMessage = showMessage)
+                        0 -> ProjectOverviewTab(
+                            project = project,
+                            onMessage = showMessage,
+                            onOpenCoderProject = onOpenCoderProject,
+                        )
                         1 -> SecretsTab(
                             projectId = project.id,
                             snackbarHostState = snackbarHostState,

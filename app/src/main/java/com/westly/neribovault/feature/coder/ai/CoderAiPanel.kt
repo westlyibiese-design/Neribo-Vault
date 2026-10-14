@@ -92,6 +92,8 @@ fun CoderAiPanel(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val setup by viewModel.setup.collectAsStateWithLifecycle()
+    val linked by viewModel.linked.collectAsStateWithLifecycle()
+    val notesOn by viewModel.notesOn.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val existingPaths = remember(entries) { entries.map { it.path }.toSet() }
@@ -200,10 +202,13 @@ fun CoderAiPanel(
                 state = state,
                 openPath = openPath,
                 hasSelection = selection != null,
+                linked = linked,
+                notesOn = notesOn,
                 apply = apply,
                 onInput = { viewModel.setInput(it) },
                 onToggleOpenFile = { viewModel.setIncludeOpenFile(!state.includeOpenFile) },
                 onRemoveError = { viewModel.removeAttachedError() },
+                onToggleNotes = { viewModel.setNotesOn(!notesOn) },
                 onAddFiles = { showPicker = true },
                 onQuick = { viewModel.quick(it, workspaceContext()) },
                 onSend = { viewModel.send(state.input, workspaceContext()) },
@@ -275,10 +280,13 @@ private fun ChatBody(
     state: CoderAiUiState,
     openPath: String?,
     hasSelection: Boolean,
+    linked: Boolean,
+    notesOn: Boolean,
     apply: ApplyOptions,
     onInput: (String) -> Unit,
     onToggleOpenFile: () -> Unit,
     onRemoveError: () -> Unit,
+    onToggleNotes: () -> Unit,
     onAddFiles: () -> Unit,
     onQuick: (CoderQuickAction) -> Unit,
     onSend: () -> Unit,
@@ -322,6 +330,17 @@ private fun ChatBody(
                 label = if (extraCount == 0) "Add files\u2026" else "Add files\u2026 ($extraCount)",
                 selected = extraCount > 0,
                 onClick = onAddFiles,
+            )
+            if (linked) {
+                NeriboChip(label = "Project notes", selected = notesOn, onClick = onToggleNotes)
+            }
+        }
+        if (linked && notesOn) {
+            Text(
+                text = "Titles and text of your project documents are sent to ${ready.provider.company}.",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = spacing.screen),
             )
         }
         val quickEnabled = (openPath != null || hasSelection) && !state.isSending

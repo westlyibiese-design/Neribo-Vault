@@ -36,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
@@ -57,6 +58,9 @@ import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.link.CoderLinkSheet
+import com.westly.neribovault.feature.coder.link.CoderLinkState
+import com.westly.neribovault.feature.coder.link.CoderLinkViewModel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
 import com.westly.neribovault.feature.coder.zip.CoderExportResult
@@ -80,9 +84,22 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
         CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore)
     }
     val aiVm = neriboViewModel(key = "coder-ai-$projectId") { c ->
-        CoderAiViewModel(projectId, c.coderAiSettings, c.coderFileStore)
+        CoderAiViewModel(
+            projectId,
+            c.coderAiSettings,
+            c.coderFileStore,
+            c.coderProjectsRepository,
+            c.projectsRepository,
+            c.planningDocsRepository,
+            c.projectDocumentsRepository,
+            c.coderPrefs,
+        )
+    }
+    val linkVm = neriboViewModel(key = "coder-link-$projectId") { c ->
+        CoderLinkViewModel(projectId, c.coderProjectsRepository, c.projectsRepository)
     }
     val state by vm.state.collectAsStateWithLifecycle()
+    val linkState by linkVm.linkState.collectAsStateWithLifecycle()
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -99,6 +116,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     var dialogPath by rememberSaveable { mutableStateOf("") }
     var showTrustDialog by rememberSaveable { mutableStateOf(false) }
     var aiOpen by rememberSaveable { mutableStateOf(false) }
+    var showLinkSheet by rememberSaveable { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
         CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
@@ -247,6 +265,10 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                                     exportLauncher.launch(exportFileName(project?.name.orEmpty()))
                                 }),
                                 MenuAction("GitHub", onOpenGitHub),
+                            ) + linkMenuActions(
+                                linkState = linkState,
+                                onChoose = { showLinkSheet = true },
+                                onUnlink = { linkVm.unlink() },
                             ),
                         )
                     }
@@ -288,31 +310,34 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                     ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
                 }
             }
-            else -> FileTreePanel(
-                entries = state.entries,
-                expandedFolders = expandedFolders,
-                onToggleFolder = { path ->
-                    expandedFolders = if (path in expandedFolders) expandedFolders - path else expandedFolders + path
-                },
-                onOpenFile = { vm.openFile(it) },
-                onRename = {
-                    dialogPath = it.path
-                    dialog = WorkspaceDialog.Rename
-                },
-                onDelete = {
-                    dialogPath = it.path
-                    dialog = WorkspaceDialog.Delete
-                },
-                onNewFileIn = {
-                    dialogPath = it
-                    dialog = WorkspaceDialog.NewFile
-                },
-                onNewFolderIn = {
-                    dialogPath = it
-                    dialog = WorkspaceDialog.NewFolder
-                },
-                modifier = Modifier.padding(padding),
-            )
+            else -> Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+                LinkedLabel(state = linkState, onUnlink = { linkVm.unlink() })
+                FileTreePanel(
+                    entries = state.entries,
+                    expandedFolders = expandedFolders,
+                    onToggleFolder = { path ->
+                        expandedFolders = if (path in expandedFolders) expandedFolders - path else expandedFolders + path
+                    },
+                    onOpenFile = { vm.openFile(it) },
+                    onRename = {
+                        dialogPath = it.path
+                        dialog = WorkspaceDialog.Rename
+                    },
+                    onDelete = {
+                        dialogPath = it.path
+                        dialog = WorkspaceDialog.Delete
+                    },
+                    onNewFileIn = {
+                        dialogPath = it
+                        dialog = WorkspaceDialog.NewFile
+                    },
+                    onNewFolderIn = {
+                        dialogPath = it
+                        dialog = WorkspaceDialog.NewFolder
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 
@@ -400,6 +425,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
         )
     }
 
+    if (showLinkSheet) {
+        CoderLinkSheet(viewModel = linkVm, onDismiss = { showLinkSheet = false })
+    }
     if (showTrustDialog) {
         ConfirmDialog(
             title = "Run this project?",
@@ -439,6 +467,48 @@ private fun isPreviewableFile(path: String): Boolean =
 private suspend fun hasRunnableRoot(context: android.content.Context, projectId: String): Boolean {
     val store = (context.applicationContext as NeriboApp).container.coderFileStore
     return withContext(Dispatchers.IO) { CoderPreviewRoot.find(store, projectId) != null }
+}
+
+/** The menu items for the Developer link: one to link, or two to change and remove an existing link. */
+private fun linkMenuActions(linkState: CoderLinkState, onChoose: () -> Unit, onUnlink: () -> Unit): List<MenuAction> =
+    when (linkState) {
+        CoderLinkState.Unlinked -> listOf(MenuAction("Link to Developer project", onChoose))
+        is CoderLinkState.Linked, CoderLinkState.Missing -> listOf(
+            MenuAction("Change linked project", onChoose),
+            MenuAction("Unlink from Developer project", onUnlink),
+        )
+    }
+
+/** One line under the top bar: which Developer project this project is linked to, or that it is gone (with Unlink). Nothing when not linked. */
+@Composable
+private fun LinkedLabel(state: CoderLinkState, onUnlink: () -> Unit) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    when (state) {
+        CoderLinkState.Unlinked -> Unit
+        is CoderLinkState.Linked -> Text(
+            text = "Linked to ${state.name}",
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = spacing.screen, vertical = spacing.xs),
+        )
+        CoderLinkState.Missing -> Row(
+            modifier = Modifier.fillMaxWidth().padding(start = spacing.screen, end = spacing.xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Linked project is no longer available",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onUnlink) {
+                Text(text = "Unlink", style = MaterialTheme.typography.labelLarge, color = colors.primary)
+            }
+        }
+    }
 }
 
 /** The Run button in the top bar. */
