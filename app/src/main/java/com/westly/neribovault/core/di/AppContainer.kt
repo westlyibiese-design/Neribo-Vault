@@ -36,6 +36,7 @@ import com.westly.neribovault.data.repository.WritingIdeasRepository
 import com.westly.neribovault.data.settings.SettingsStore
 import com.westly.neribovault.feature.coder.ai.CoderAiSettings
 import com.westly.neribovault.feature.coder.files.CoderFileStore
+import com.westly.neribovault.feature.coder.github.CoderGitHubSettings
 import java.io.File
 
 /** Manual dependency container. Built once by [com.westly.neribovault.NeriboApp]. */
@@ -75,6 +76,7 @@ class AppContainer(context: Context) {
     val coderFileStore = CoderFileStore(File(context.applicationContext.filesDir, "coder"))
     val coderProjectsRepository = CoderProjectsRepository(db.coderProjectDao(), coderFileStore)
     val coderAiSettings: CoderAiSettings = CoderAiSettings(context.applicationContext)
+    val coderGitHubSettings: CoderGitHubSettings = CoderGitHubSettings(context.applicationContext)
 
     val cloudAuth: CloudAuth = CloudAuth(context.applicationContext, db)
     val syncEngine: SyncEngine = SyncEngine(context.applicationContext, db, cloudAuth)

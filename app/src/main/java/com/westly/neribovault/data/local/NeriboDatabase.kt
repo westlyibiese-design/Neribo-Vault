@@ -70,7 +70,7 @@ import com.westly.neribovault.data.local.entity.TaskEntity
 import com.westly.neribovault.data.local.entity.TotpAccountEntity
 import com.westly.neribovault.data.local.entity.WritingIdeaEntity
 
-/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column and version 8 the custom logo column on platform_accounts and version 9 the Coder projects table. */
+/** The single Room database of the app. Version 2 adds the sync tombstone table, version 3 the screenplays table, version 4 the songs table, version 5 the three Accounts tables, version 6 the Authenticator table, version 7 the sign-in name column and version 8 the custom logo column on platform_accounts, version 9 the Coder projects table and version 10 the GitHub link columns of Coder projects. */
 @Database(
     entities = [
         NoteEntity::class,
@@ -105,7 +105,7 @@ import com.westly.neribovault.data.local.entity.WritingIdeaEntity
         TotpAccountEntity::class,
         CoderProjectEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 @TypeConverters(StringListConverter::class)
@@ -147,7 +147,7 @@ abstract class NeriboDatabase : RoomDatabase() {
         /** Builds the database. Call once; [AppContainer] keeps the only instance. */
         fun create(context: Context): NeriboDatabase =
             Room.databaseBuilder(context.applicationContext, NeriboDatabase::class.java, FILE_NAME)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
                 .addCallback(SYNC_TRIGGER_CALLBACK)
                 .build()
 
@@ -259,6 +259,16 @@ abstract class NeriboDatabase : RoomDatabase() {
                         "`updatedAt` INTEGER NOT NULL, `isDeleted` INTEGER NOT NULL, `deletedAt` INTEGER, " +
                         "`name` TEXT NOT NULL, `templateId` TEXT NOT NULL, PRIMARY KEY(`id`))",
                 )
+            }
+        }
+
+        /** Adds the optional GitHub link columns to coder_projects. Every existing row keeps all its data (the new columns are NULL). */
+        val MIGRATION_9_10: Migration = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `coder_projects` ADD COLUMN `repoOwner` TEXT")
+                db.execSQL("ALTER TABLE `coder_projects` ADD COLUMN `repoName` TEXT")
+                db.execSQL("ALTER TABLE `coder_projects` ADD COLUMN `repoBranch` TEXT")
+                db.execSQL("ALTER TABLE `coder_projects` ADD COLUMN `lastPushedAt` INTEGER")
             }
         }
 

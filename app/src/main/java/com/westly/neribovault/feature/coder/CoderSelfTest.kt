@@ -32,6 +32,19 @@ import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
+import com.westly.neribovault.feature.coder.github.CoderGitHubErrorKind
+import com.westly.neribovault.feature.coder.github.CoderGitHubErrors
+import com.westly.neribovault.feature.coder.github.CoderGitHubKeyCrypto
+import com.westly.neribovault.feature.coder.github.CoderGitHubRequests
+import com.westly.neribovault.feature.coder.github.CoderGitSha
+import com.westly.neribovault.feature.coder.github.CoderPushPlanner
+import com.westly.neribovault.feature.coder.github.CoderSecretScanner
+import com.westly.neribovault.feature.coder.github.LocalFile
+import com.westly.neribovault.feature.coder.github.RemoteEntry
+import com.westly.neribovault.feature.coder.github.TreeEntryInput
+import com.westly.neribovault.feature.coder.github.cleanGitHubToken
+import com.westly.neribovault.feature.coder.github.isValidRepoName
+import com.westly.neribovault.feature.coder.github.parseRepoRef
 import com.westly.neribovault.feature.coder.preview.CoderBuildCheck
 import com.westly.neribovault.feature.coder.preview.CoderBuildDetector
 import com.westly.neribovault.feature.coder.preview.CoderCdnShim
@@ -56,6 +69,7 @@ import com.westly.neribovault.feature.coder.zip.writeProjectZip
 import kotlinx.coroutines.runBlocking
 import okhttp3.Request
 import okio.Buffer
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -116,6 +130,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(aiFailureTextChecks())
         results.addAll(aiCryptoChecks())
         results.addAll(aiChatChecks())
+        results.addAll(githubChecks(store))
     } finally {
         root.deleteRecursively()
     }
@@ -1202,6 +1217,357 @@ private fun errorMapChecks(): List<CoderCheckResult> {
         },
         check("Other codes give the code in plain words", "error (500)") {
             CoderAiClient.mapError(CoderAiProvider.OPENAI, 500, "").message == "The provider returned an error (500)."
+        },
+    )
+}
+
+// ---- Phase C7: GitHub foundation -----------------------------------------------------------
+// Every fake secret below is joined from pieces at run time: GitHub's push protection refuses a
+// commit that contains a token-looking text, so no such text may stand in this file.
+
+private const val GH_TEST_TOKEN = "TESTTOKEN-ABCDEFGH"
+private const val GH_OWNER = "octocat"
+private const val GH_REPO = "hello-world"
+private const val GH_SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+private const val GH_SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+private const val GH_SHA_C = "cccccccccccccccccccccccccccccccccccccccc"
+
+private fun githubChecks(store: CoderFileStore): List<CoderCheckResult> =
+    gitShaChecks(store) + repoRefChecks() + pushPlanChecks() + ignoreChecks() + snapshotChecks(store) +
+        secretScannerChecks() + githubRequestChecks() + githubErrorChecks() + githubTokenChecks() + githubCryptoChecks()
+
+private fun gitShaChecks(store: CoderFileStore): List<CoderCheckResult> = listOf(
+    check("Git hash of an empty file", "e69de29b...") {
+        CoderGitSha.blobSha(ByteArray(0)) == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    },
+    check("Git hash of hello and a new line", "ce013625...") {
+        CoderGitSha.blobSha("hello\n".toByteArray(Charsets.UTF_8)) == "ce013625030ba8dba906f756967f9e9ca394464a"
+    },
+    check("Git hash of a file equals the hash of its bytes", "same hash, text and binary") {
+        val id = "ghsha-" + newId()
+        store.write(id, "h.txt", "hello\n")
+        val dir = store.resolve(id, "")!!
+        val binary = byteArrayOf(0, -1, 10, 13, 127, -128, 65)
+        java.io.File(dir, "img.bin").writeBytes(binary)
+        val text = store.resolve(id, "h.txt")!!
+        val image = store.resolve(id, "img.bin")!!
+        CoderGitSha.blobSha(text) == "ce013625030ba8dba906f756967f9e9ca394464a" &&
+            CoderGitSha.blobSha(image) == CoderGitSha.blobSha(binary)
+    },
+)
+
+private fun repoRefChecks(): List<CoderCheckResult> {
+    val good = listOf(
+        "octocat/hello-world" to "hello-world",
+        "https://github.com/octocat/hello-world" to "hello-world",
+        "https://github.com/octocat/hello-world.git" to "hello-world",
+        "https://github.com/octocat/hello-world/" to "hello-world",
+        "github.com/octocat/hello-world" to "hello-world",
+        "  octocat/my_repo.v2  " to "my_repo.v2",
+    )
+    val bad = listOf("", "octocat", "a/b/c", "octocat/", "oct ocat/x", "octocat/..", "https://gitlab.com/o/n")
+    val out = ArrayList<CoderCheckResult>()
+    for ((raw, expectedName) in good) {
+        out.add(check("Repository reference accepted: " + raw.trim(), "octocat and $expectedName") {
+            parseRepoRef(raw) == Pair("octocat", expectedName)
+        })
+    }
+    for (raw in bad) {
+        out.add(check("Repository reference refused: " + raw.ifEmpty { "empty" }, "null") { parseRepoRef(raw) == null })
+    }
+    out.add(check("Repository owner longer than 39 characters is refused", "null") {
+        parseRepoRef("a".repeat(40) + "/x") == null && parseRepoRef("a".repeat(39) + "/x") != null
+    })
+    out.add(check("Repository names", "valid and invalid names") {
+        isValidRepoName("my-app_1.0") && !isValidRepoName("") && !isValidRepoName(".") && !isValidRepoName("..") &&
+            !isValidRepoName("a b") && !isValidRepoName("a/b") && isValidRepoName("a".repeat(100)) &&
+            !isValidRepoName("a".repeat(101))
+    })
+    return out
+}
+
+private fun ghLocal(path: String, sha: String) = LocalFile(path, 10L, sha)
+
+private fun ghRemote(path: String, sha: String, type: String = "blob", mode: String = "100644") =
+    RemoteEntry(path, type, sha, mode)
+
+private fun pushPlanChecks(): List<CoderCheckResult> {
+    val local = listOf(
+        ghLocal("new.txt", GH_SHA_A), ghLocal("changed.txt", GH_SHA_B), ghLocal("same.txt", GH_SHA_A),
+        ghLocal("run.sh", GH_SHA_B), ghLocal("docs", GH_SHA_C),
+    )
+    val remote = listOf(
+        ghRemote("changed.txt", GH_SHA_A), ghRemote("same.txt", GH_SHA_A), ghRemote("run.sh", GH_SHA_A, mode = "100755"),
+        ghRemote("docs", GH_SHA_B, type = "tree", mode = "040000"), ghRemote("only-on-github.txt", GH_SHA_C),
+    )
+    val plan = CoderPushPlanner.computePlan(local, remote)
+    return listOf(
+        check("Push plan: a file GitHub does not have is new", "new.txt only") {
+            plan.newFiles.map { it.path } == listOf("new.txt")
+        },
+        check("Push plan: a different hash is changed", "changed.txt and run.sh") {
+            plan.changedFiles.map { it.path } == listOf("changed.txt", "run.sh")
+        },
+        check("Push plan: the same hash is unchanged", "1 unchanged") { plan.unchangedCount == 1 },
+        check("Push plan: files only on GitHub are left alone", "not in any list") {
+            val all = plan.newFiles + plan.changedFiles
+            all.none { it.path == "only-on-github.txt" } && plan.conflicts.none { it == "only-on-github.txt" }
+        },
+        check("Push plan: an executable file keeps its mode", "100755 for run.sh") {
+            plan.remoteModes["run.sh"] == "100755" && plan.remoteModes["changed.txt"] == "100644" &&
+                plan.remoteModes.keys == setOf("changed.txt", "run.sh")
+        },
+        check("Push plan: a folder on GitHub is a conflict", "docs left out and listed") {
+            plan.conflicts == listOf("docs") && (plan.newFiles + plan.changedFiles).none { it.path == "docs" }
+        },
+        check("Push plan: nothing local and nothing remote", "empty plan") {
+            val empty = CoderPushPlanner.computePlan(emptyList(), emptyList())
+            empty.newFiles.isEmpty() && empty.changedFiles.isEmpty() && empty.unchangedCount == 0 && empty.conflicts.isEmpty()
+        },
+    )
+}
+
+private fun ignoreChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    for (path in listOf("node_modules/a.js", ".git/x", "a/.DS_Store", ".x.tmp-1")) {
+        out.add(check("Push ignores $path", "ignored") { CoderPushPlanner.isIgnored(path) })
+    }
+    out.add(check("Push keeps src/a.js and .gitignore", "not ignored") {
+        !CoderPushPlanner.isIgnored("src/a.js") && !CoderPushPlanner.isIgnored(".gitignore")
+    })
+    return out
+}
+
+private fun snapshotChecks(store: CoderFileStore): List<CoderCheckResult> = listOf(
+    check("Push snapshot lists real files with their git hashes", "a.txt and dir/b.txt only") {
+        val id = "ghsnap-" + newId()
+        store.write(id, "a.txt", "hello\n")
+        store.write(id, "dir/b.txt", "")
+        store.write(id, "node_modules/x.js", "x")
+        store.write(id, ".git/config", "x")
+        val files = runBlocking { CoderPushPlanner.snapshot(store, id) }
+        files.map { it.path }.sorted() == listOf("a.txt", "dir/b.txt") &&
+            files.first { it.path == "a.txt" }.sha == "ce013625030ba8dba906f756967f9e9ca394464a" &&
+            files.first { it.path == "dir/b.txt" }.sha == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" &&
+            files.first { it.path == "a.txt" }.sizeBytes == 6L
+    },
+)
+
+private fun secretScannerChecks(): List<CoderCheckResult> {
+    val aws = "AK" + "IA" + "B".repeat(16)
+    val ghToken = "gh" + "p_" + "a".repeat(36)
+    val ghFine = "github" + "_pat_" + "a".repeat(50)
+    val aiKey = "s" + "k-" + "a".repeat(24)
+    val google = "AI" + "za" + "a".repeat(35)
+    val pem = "-----BEGIN " + "RSA PRIV" + "ATE KEY-----"
+    val slack = "xo" + "xb-" + "1234567890" + "-abcdefghij"
+    val generic = "const password = \"" + "correct-horse-battery" + "\""
+    val kinds = listOf(
+        Triple("AWS access key", "key = $aws", aws),
+        Triple("GitHub token", "token $ghToken", ghToken),
+        Triple("GitHub token", "x $ghFine", ghFine),
+        Triple("AI or payment key", "KEY=$aiKey", aiKey),
+        Triple("Google API key", "k: $google", google),
+        Triple("private key", pem, pem),
+        Triple("Slack token", "hook $slack", slack),
+        Triple("possible secret", generic, "correct-horse-battery"),
+    )
+    val out = ArrayList<CoderCheckResult>()
+    for ((kind, line, secret) in kinds) {
+        out.add(check("Secret scanner finds: $kind (${secret.length} characters)", "one finding of that kind, without the text") {
+            val found = CoderSecretScanner.scan(listOf("src/config.js" to "ok\nok\n$line\n"))
+            found.size == 1 && found[0].kind == kind && found[0].line == 3 && found[0].path == "src/config.js" &&
+                !found[0].toString().contains(secret)
+        })
+    }
+    out.add(check("Secret scanner skips a line of 2001 characters, not one of 2000", "only the short line is found") {
+        val long = aws + "x".repeat(2001 - aws.length)
+        val short = aws + "x".repeat(2000 - aws.length)
+        val found = CoderSecretScanner.scan(listOf("a.txt" to "$long\n$short"))
+        long.length == 2001 && found.size == 1 && found[0].line == 2
+    })
+    out.add(check("Secret scanner skips a binary-looking file", "nothing found") {
+        CoderSecretScanner.scan(listOf("a.bin" to ("a\u0000" + aws))).isEmpty()
+    })
+    out.add(check("Secret scanner finds nothing in ordinary code", "nothing found") {
+        val code = "fun main() {\n    val total = 1 + 2\n    println(\"hello\")\n}\n" +
+            "<div class=\"ta" + "sk-management-dashboard-widget\"></div>\nconst tokenCount = 12\n"
+        CoderSecretScanner.scan(listOf("Main.kt" to code)).isEmpty()
+    })
+    out.add(check("Secret scanner returns at most 50 findings", "50") {
+        CoderSecretScanner.scan(listOf("a.txt" to List(60) { aws }.joinToString("\n"))).size == 50
+    })
+    return out
+}
+
+private fun ghBodyText(request: Request): String {
+    val body = request.body ?: return ""
+    val buffer = Buffer()
+    body.writeTo(buffer)
+    return buffer.readUtf8()
+}
+
+private fun githubRequestChecks(): List<CoderCheckResult> {
+    val blob = byteArrayOf(0, 1, 2, -1, -2, 65, 66)
+    val spaced = "my folder/na\u00efve file.txt"
+    val requests: List<Pair<String, Request>> = listOf(
+        "user" to CoderGitHubRequests.user(GH_TEST_TOKEN),
+        "repo" to CoderGitHubRequests.repo(GH_TEST_TOKEN, GH_OWNER, GH_REPO),
+        "create repo" to CoderGitHubRequests.createRepo(GH_TEST_TOKEN, GH_REPO, true),
+        "branch head" to CoderGitHubRequests.branchHead(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "feature/x"),
+        "latest commit" to CoderGitHubRequests.latestCommit(GH_TEST_TOKEN, GH_OWNER, GH_REPO),
+        "commit" to CoderGitHubRequests.commit(GH_TEST_TOKEN, GH_OWNER, GH_REPO, GH_SHA_A),
+        "tree" to CoderGitHubRequests.tree(GH_TEST_TOKEN, GH_OWNER, GH_REPO, GH_SHA_A),
+        "blob" to CoderGitHubRequests.createBlob(GH_TEST_TOKEN, GH_OWNER, GH_REPO, blob),
+        "new tree" to CoderGitHubRequests.createTree(
+            GH_TEST_TOKEN, GH_OWNER, GH_REPO, GH_SHA_A, listOf(TreeEntryInput(spaced, "100644", GH_SHA_B)),
+        ),
+        "commit create" to CoderGitHubRequests.createCommit(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "Save", GH_SHA_A, GH_SHA_B),
+        "ref update" to CoderGitHubRequests.updateRef(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "main", GH_SHA_A),
+        "first file" to CoderGitHubRequests.putFile(GH_TEST_TOKEN, GH_OWNER, GH_REPO, spaced, blob, "First"),
+    )
+    val out = ArrayList<CoderCheckResult>()
+    for ((label, request) in requests) {
+        out.add(check("GitHub request ($label): safe address, headers, no token in address or body", "https api.github.com, 4 headers") {
+            request.url.scheme == "https" && request.url.host == "api.github.com" &&
+                !request.url.toString().contains(GH_TEST_TOKEN) && !ghBodyText(request).contains(GH_TEST_TOKEN) &&
+                request.header("Accept") == "application/vnd.github+json" &&
+                request.header("Authorization") == "Bearer $GH_TEST_TOKEN" &&
+                request.header("X-GitHub-Api-Version") == "2022-11-28" &&
+                request.header("User-Agent") == "NeriboVault-Coder"
+        })
+    }
+    out.add(check("GitHub request: the blob body is valid base64 of the file", "same bytes back") {
+        val request = CoderGitHubRequests.createBlob(GH_TEST_TOKEN, GH_OWNER, GH_REPO, blob)
+        val json = JSONObject(ghBodyText(request))
+        request.method == "POST" && json.getString("encoding") == "base64" &&
+            Base64.decode(json.getString("content"), Base64.NO_WRAP).contentEquals(blob) &&
+            request.body?.contentLength() == ghBodyText(request).toByteArray(Charsets.UTF_8).size.toLong()
+    })
+    out.add(check("GitHub request: the ref update is a PATCH without force", "PATCH, force false") {
+        val request = CoderGitHubRequests.updateRef(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "main", GH_SHA_A)
+        val json = JSONObject(ghBodyText(request))
+        request.method == "PATCH" && !json.getBoolean("force") && json.getString("sha") == GH_SHA_A &&
+            request.url.encodedPath == "/repos/$GH_OWNER/$GH_REPO/git/refs/heads/main"
+    })
+    out.add(check("GitHub request: a branch name keeps its slash in the address", "heads/feature/x") {
+        CoderGitHubRequests.branchHead(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "feature/x").url.encodedPath ==
+            "/repos/$GH_OWNER/$GH_REPO/git/ref/heads/feature/x"
+    })
+    out.add(check("GitHub request: the tree call asks for everything and the empty-repo call for one commit", "query parameters") {
+        CoderGitHubRequests.tree(GH_TEST_TOKEN, GH_OWNER, GH_REPO, GH_SHA_A).url.queryParameter("recursive") == "1" &&
+            CoderGitHubRequests.latestCommit(GH_TEST_TOKEN, GH_OWNER, GH_REPO).url.queryParameter("per_page") == "1"
+    })
+    out.add(check("GitHub request: a new tree keeps file names exactly and is built from blobs", "exact path, blob, mode") {
+        val request = CoderGitHubRequests.createTree(
+            GH_TEST_TOKEN, GH_OWNER, GH_REPO, GH_SHA_A,
+            listOf(TreeEntryInput(spaced, "100755", GH_SHA_B), TreeEntryInput("b.txt", "120000", GH_SHA_C)),
+        )
+        val json = JSONObject(ghBodyText(request))
+        val tree: JSONArray = json.getJSONArray("tree")
+        json.getString("base_tree") == GH_SHA_A && tree.length() == 2 &&
+            tree.getJSONObject(0).getString("path") == spaced && tree.getJSONObject(0).getString("mode") == "100755" &&
+            tree.getJSONObject(1).getString("mode") == "100644" && tree.getJSONObject(1).getString("type") == "blob"
+    })
+    out.add(check("GitHub request: a tree without a base has no base_tree", "no base_tree key") {
+        !JSONObject(ghBodyText(CoderGitHubRequests.createTree(GH_TEST_TOKEN, GH_OWNER, GH_REPO, null, emptyList()))).has("base_tree")
+    })
+    out.add(check("GitHub request: the commit has one parent", "message, tree and parents") {
+        val json = JSONObject(ghBodyText(CoderGitHubRequests.createCommit(GH_TEST_TOKEN, GH_OWNER, GH_REPO, "Save", GH_SHA_A, GH_SHA_B)))
+        json.getString("message") == "Save" && json.getString("tree") == GH_SHA_A &&
+            json.getJSONArray("parents").length() == 1 && json.getJSONArray("parents").getString(0) == GH_SHA_B
+    })
+    out.add(check("GitHub request: a new repository is empty and private on request", "private true, auto_init false") {
+        val json = JSONObject(ghBodyText(CoderGitHubRequests.createRepo(GH_TEST_TOKEN, "my-app", true)))
+        json.getString("name") == "my-app" && json.getBoolean("private") && !json.getBoolean("auto_init")
+    })
+    out.add(check("GitHub request: the first-file upload encodes the path and has no branch", "encoded segments, PUT") {
+        val request = CoderGitHubRequests.putFile(GH_TEST_TOKEN, GH_OWNER, GH_REPO, spaced, blob, "First \"commit\"")
+        val json = JSONObject(ghBodyText(request))
+        request.method == "PUT" && request.url.encodedPath.contains("/contents/my%20folder/na") &&
+            request.url.encodedPath.endsWith("%20file.txt") && !json.has("branch") &&
+            json.getString("message") == "First \"commit\"" &&
+            Base64.decode(json.getString("content"), Base64.NO_WRAP).contentEquals(blob)
+    })
+    return out
+}
+
+private fun githubErrorChecks(): List<CoderCheckResult> {
+    fun kindOf(code: Int, remaining: String? = null) = CoderGitHubErrors.map(code, remaining, null).kind
+    return listOf(
+        check("GitHub error 401 means the token was refused", "InvalidToken and the plain text") {
+            val error = CoderGitHubErrors.map(401, null, null)
+            error.kind == CoderGitHubErrorKind.InvalidToken &&
+                error.message == "GitHub didn't accept this token. It may be wrong or expired."
+        },
+        check("GitHub error 403 with no requests left is a rate limit", "RateLimited") {
+            kindOf(403, "0") == CoderGitHubErrorKind.RateLimited
+        },
+        check("GitHub error 403 otherwise means no permission", "NoAccess") {
+            kindOf(403) == CoderGitHubErrorKind.NoAccess && kindOf(403, "42") == CoderGitHubErrorKind.NoAccess &&
+                CoderGitHubErrors.map(403, null, null).message.contains("'repo'")
+        },
+        check("GitHub error 404 means not found", "NotFound") { kindOf(404) == CoderGitHubErrorKind.NotFound },
+        check("GitHub error 409 is a conflict", "Conflict") { kindOf(409) == CoderGitHubErrorKind.Conflict },
+        check("GitHub error 422 adds GitHub's one-line message, at most 200 characters", "Invalid, one line") {
+            val error = CoderGitHubErrors.map(422, null, "Bad\nthing   here " + "x".repeat(400))
+            error.kind == CoderGitHubErrorKind.Invalid && !error.message.contains('\n') &&
+                error.message.startsWith("GitHub rejected the request. Bad thing here x") &&
+                error.message.length == "GitHub rejected the request. ".length + 200
+        },
+        check("GitHub error 422 on a ref update means the branch moved", "Conflict and the newer-changes text") {
+            val error = CoderGitHubErrors.map(422, null, "Reference update failed", forRefUpdate = true)
+            error.kind == CoderGitHubErrorKind.Conflict &&
+                error.message == "GitHub has newer changes than this phone. Try again."
+        },
+        check("GitHub error 500 and 503 mean GitHub is busy", "Busy") {
+            kindOf(500) == CoderGitHubErrorKind.Busy && kindOf(503) == CoderGitHubErrorKind.Busy
+        },
+        check("GitHub error with another code gives the code in plain words", "error (418)") {
+            val error = CoderGitHubErrors.map(418, null, null)
+            error.kind == CoderGitHubErrorKind.Other && error.message == "GitHub returned an error (418)."
+        },
+        check("A thrown error is a network error with no details from the error", "Network, no secret in the text") {
+            val error = CoderGitHubErrors.fromException(IOException("token=$GH_TEST_TOKEN https://api.github.com/x"))
+            error.kind == CoderGitHubErrorKind.Network && error.message == describeFailure(IOException()) &&
+                !error.message.contains(GH_TEST_TOKEN) && !error.message.contains("http")
+        },
+        check("A missing connection is described in plain words", "No internet connection.") {
+            CoderGitHubErrors.fromException(UnknownHostException("api.github.com")).message == "No internet connection."
+        },
+    )
+}
+
+private fun githubTokenChecks(): List<CoderCheckResult> = listOf(
+    check("GitHub token cleaning removes spaces and line breaks", "abc123") {
+        cleanGitHubToken("  abc 123\n") == "abc123"
+    },
+    check("GitHub token cleaning refuses empty text and non-ASCII characters", "null") {
+        cleanGitHubToken("") == null && cleanGitHubToken("   \n") == null && cleanGitHubToken("abc\u00e9") == null
+    },
+    check("GitHub token cleaning accepts 512 characters and refuses 513", "512 yes, 513 null") {
+        cleanGitHubToken("a".repeat(512)) != null && cleanGitHubToken("a".repeat(513)) == null
+    },
+)
+
+private fun githubCryptoChecks(): List<CoderCheckResult> {
+    if (!CoderGitHubKeyCrypto.isAvailable()) {
+        return listOf(CoderCheckResult("GitHub token crypto: Keystore unavailable on this phone, checks skipped", true, "ok"))
+    }
+    return listOf(
+        check("GitHub token crypto round trip", "same bytes back, ciphertext without the text") {
+            val secret = GH_TEST_TOKEN.toByteArray(Charsets.UTF_8)
+            val sealed = CoderGitHubKeyCrypto.encrypt(secret)
+            val back = if (sealed == null) null else CoderGitHubKeyCrypto.decrypt(sealed.ciphertext, sealed.iv)
+            sealed != null && back != null && back.contentEquals(secret) && !sealed.ciphertext.contains("TESTTOKEN")
+        },
+        check("GitHub token crypto has its own key alias", "different from the AI key alias") {
+            CoderGitHubKeyCrypto.KEY_ALIAS == "neribo_coder_github_key" && CoderGitHubKeyCrypto.KEY_ALIAS != CoderKeyCrypto.KEY_ALIAS
+        },
+        check("GitHub token crypto refuses a wrong IV", "null") {
+            val sealed = CoderGitHubKeyCrypto.encrypt(GH_TEST_TOKEN.toByteArray(Charsets.UTF_8))
+            val wrongIv = Base64.encodeToString(ByteArray(12), Base64.NO_WRAP)
+            sealed != null && CoderGitHubKeyCrypto.decrypt(sealed.ciphertext, wrongIv) == null
         },
     )
 }

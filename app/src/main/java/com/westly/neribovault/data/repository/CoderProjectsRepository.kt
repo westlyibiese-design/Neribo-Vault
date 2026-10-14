@@ -95,6 +95,21 @@ class CoderProjectsRepository(
 
     fun observeTrashed(): Flow<List<CoderProjectEntity>> = dao.observeTrashed()
 
+    /** Links the project to the GitHub repository [owner]/[name] and the branch [branch] it is pushed to. */
+    suspend fun setRepoLink(id: String, owner: String, name: String, branch: String) {
+        dao.setRepoLink(id, owner, name, branch, System.currentTimeMillis())
+    }
+
+    /** Removes the GitHub link. The files of the project and the repository itself are not touched. */
+    suspend fun clearRepoLink(id: String) {
+        dao.setRepoLink(id, null, null, null, System.currentTimeMillis())
+    }
+
+    /** Records that the project was just pushed to GitHub. */
+    suspend fun markPushed(id: String) {
+        dao.markPushed(id, System.currentTimeMillis())
+    }
+
     /** Deletes the project's folder first, then its row. */
     suspend fun deletePermanently(id: String) {
         withContext(Dispatchers.IO) { files.deleteProject(id) }
