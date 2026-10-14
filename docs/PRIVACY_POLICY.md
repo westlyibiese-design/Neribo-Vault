@@ -1,6 +1,6 @@
 # Privacy Policy for Neribo Vault
 
-**Last updated:** 3 October 2026
+**Last updated:** 14 October 2026
 
 Neribo Vault ("the app") is a private notebook app for Android made by Westly Ibiese, Benin City, Nigeria ("I", "me"). This policy explains what the app does with your information.
 
@@ -23,6 +23,8 @@ Everything you write or add is kept in the app's private storage on your phone:
 - Your app PIN and vault PINs. These are stored only as protected hashes, not as the PIN itself. If you turn on fingerprint or face unlock, the unlocking is done by Android. The app never receives your fingerprint or face data.
 - Developer secrets are encrypted on the device with a key derived from your six-digit Secrets PIN.
 - A local activity log of actions inside the Developer vault. It stays on your phone.
+- Coder projects: the files you write in the Coder vault are kept in the app's private storage on your phone. They are not synced to the cloud and are not included in the backup file. A project's ZIP export is its own backup.
+- If you add your own AI key or GitHub token in Coder, it is stored encrypted on your device. It is never sent to me. Remove key, Disconnect, or uninstalling the app removes it.
 
 Deleted items go to "Recently deleted" and are removed permanently after 30 days.
 
@@ -39,12 +41,20 @@ Cloud sync is **off until you sign in**. If you choose to sign in:
 
 The app also contains a setting to store sync data in a Supabase project that you create yourself. If you use that, your data goes to your project and is governed by your Supabase account, not by me.
 
+**Optional sending from Coder (separate from cloud sync).** These only happen if you set them up and use them, with your own accounts, and I receive none of it:
+
+- If you add your own AI key and use AI help, the text you choose to send (your request, the file content or selected text, and, only if you turn that on, your project notes) is sent straight from your phone to the AI company you selected (Anthropic, Google or OpenAI). Their own terms and privacy policy apply to it.
+- If you connect your own GitHub token and push, the project's files are uploaded to your own GitHub repository.
+- The Coder preview runs your own code in an isolated view inside the app. Your code can load web addresses that it asks for, and those sites receive ordinary web requests from your phone.
+
 ## 3. Service providers
 
 When you use cloud sync, these providers process data for the app to work:
 
 - **Google**, for sign-in. See Google's privacy policy.
 - **Supabase**, for hosting the cloud database. See Supabase's privacy policy.
+
+If you use the optional Coder features above, the AI company you chose (Anthropic, Google or OpenAI) and GitHub also receive what you choose to send them, under their own terms.
 
 Beyond this, I do not share your information with anyone. The app has no advertising, analytics or crash-reporting services.
 

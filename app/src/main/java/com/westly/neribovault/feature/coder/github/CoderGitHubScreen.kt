@@ -90,6 +90,7 @@ fun CoderGitHubScreen(projectId: String, onBack: () -> Unit) {
             settings = c.coderGitHubSettings,
             client = client,
             pusher = CoderGitHubPusher(client, c.coderGitHubSettings, c.coderFileStore, c.coderProjectsRepository),
+            developerProjects = c.projectsRepository,
         )
     }
     val state by vm.state.collectAsStateWithLifecycle()
@@ -164,6 +165,17 @@ fun CoderGitHubScreen(projectId: String, onBack: () -> Unit) {
             prepared = push.prepared,
             onConfirm = { vm.confirmPush() },
             onDismiss = { vm.dismissSummary() },
+        )
+    }
+    val addressPrompt = state.addressPrompt
+    if (addressPrompt != null) {
+        ConfirmDialog(
+            title = "Save this repository address in your Developer project?",
+            message = addressPrompt.url,
+            confirmLabel = "Yes",
+            onConfirm = { vm.answerAddressPrompt(true) },
+            onDismiss = { vm.answerAddressPrompt(false) },
+            dismissLabel = "No",
         )
     }
     if (showDisconnect) {

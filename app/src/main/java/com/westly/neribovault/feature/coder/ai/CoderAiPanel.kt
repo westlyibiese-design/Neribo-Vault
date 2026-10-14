@@ -58,6 +58,7 @@ import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.ui.CoderHintCard
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -297,6 +298,11 @@ private fun ChatBody(
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
     Column(modifier = modifier) {
+        CoderHintCard(
+            id = "ai",
+            text = "Ask in plain words. Nothing changes in your files until you tap Insert or Replace, and you can always undo.",
+            modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
+        )
         MessageList(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             state = state,

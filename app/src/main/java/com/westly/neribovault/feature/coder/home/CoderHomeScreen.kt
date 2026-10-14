@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
@@ -70,6 +71,7 @@ import com.westly.neribovault.feature.coder.CoderCheckResult
 import com.westly.neribovault.feature.coder.VAULT_ID
 import com.westly.neribovault.feature.coder.VAULT_NAME
 import com.westly.neribovault.feature.coder.files.CoderLimits
+import com.westly.neribovault.feature.coder.ui.CoderHintCard
 import com.westly.neribovault.feature.coder.workspace.NameEntryDialog
 import com.westly.neribovault.feature.coder.zip.CoderImportReport
 import com.westly.neribovault.feature.coder.zip.CoderImportResult
@@ -99,6 +101,7 @@ fun CoderHomeScreen(
     var showNewDialog by rememberSaveable { mutableStateOf(false) }
     var renameId by rememberSaveable { mutableStateOf<String?>(null) }
     var showLockSheet by rememberSaveable { mutableStateOf(false) }
+    val prefsStore = remember(context) { (context.applicationContext as NeriboApp).container.coderPrefs }
 
     val importer = remember(context) {
         val container = (context.applicationContext as NeriboApp).container
@@ -151,6 +154,7 @@ fun CoderHomeScreen(
         add(MenuAction(label = "AI settings", onClick = onOpenAiSettings, icon = Icons.Outlined.Settings))
         add(MenuAction(label = "Recently deleted", onClick = onOpenTrash, icon = Icons.Outlined.History))
         add(MenuAction(label = "Vault lock", onClick = { showLockSheet = true }, icon = Icons.Outlined.Lock))
+        add(MenuAction(label = "Show tips again", onClick = { scope.launch { prefsStore.resetHints() } }, icon = Icons.Outlined.Info))
         if (BuildConfig.DEBUG) {
             add(MenuAction(label = "Run engine self-test", onClick = { vm.runSelfTest(context) }))
         }
@@ -169,7 +173,13 @@ fun CoderHomeScreen(
         },
         snackbarHostState = snackbarHostState,
     ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            CoderHintCard(
+                id = "home",
+                text = "Start with a template. Tap New project, pick one, then tap Run to see it.",
+                modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
+            )
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 state.isLoading -> LoadingState()
                 state.projects.isEmpty() -> EmptyState(
@@ -210,6 +220,7 @@ fun CoderHomeScreen(
                         )
                     }
                 }
+            }
             }
         }
     }

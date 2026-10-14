@@ -30,6 +30,7 @@ Notes on how to answer:
 - Data that is only processed on the device and never sent off the device is not "collected".
 - Sending data to Supabase to host it for the user is a service provider acting for you, which Google does not count as "sharing". Answer **No** to sharing. Google sign-in is the user's own sign-in to Google.
 - Developer secrets and the activity log never leave the device, so they are not listed.
+- Coder (optional): if the user adds their own AI key and uses AI help, the text they choose to send goes from the phone straight to the AI company they selected (Anthropic, Google or OpenAI). If the user connects their own GitHub token and pushes, the project's files go to the user's own GitHub repository. Both are started by the user, use the user's own accounts and keys, and are not sent to or collected by the developer. The AI key and the GitHub token stay encrypted on the device. The answers above are not changed by this note; before submitting, check the Play Console's current wording on user-initiated transfers to other companies and decide whether it needs a declaration.
 
 ## Section 3. Other declarations
 

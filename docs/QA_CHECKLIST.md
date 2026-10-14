@@ -80,6 +80,32 @@ Run this on a phone, ideally on the release APK. Tick each line. Run it in light
 - [ ] Secret activity log shows reveals and copies.
 - [ ] Recently deleted for the Developer vault: restore and Delete forever.
 
+## Coder
+- [ ] Coder opens from Home. New project from a template creates it and opens it.
+- [ ] Edit a file: the status shows "Saving…" then "Saved". Leave and reopen: the text is still there.
+- [ ] Tap Run on an HTML template: the preview shows the page. Reload works.
+- [ ] Console: a `console.log` line and a deliberate error both appear. The error has a plain-English line.
+- [ ] A Markdown file and a JSON file open in the preview and look right.
+- [ ] A React template runs with the phone in flight mode (React and Babel are bundled).
+- [ ] Import ZIP: a plain website opens and runs.
+- [ ] Import ZIP: a built `dist` folder previews like a website.
+- [ ] Import ZIP: a project with `node_modules` skips that folder and says so.
+- [ ] Import ZIP: a file that is not a ZIP shows a clear message and creates nothing.
+- [ ] Export as ZIP, then import that ZIP again: the files match.
+- [ ] Delete a project with Undo. Recently deleted: Restore and Delete forever work.
+- [ ] Lock the Coder vault: it asks for its PIN. Unlock works.
+- [ ] AI settings: add a key, run the test, then remove it, for Claude, Gemini and OpenAI. Only the last 4 characters are ever shown.
+- [ ] AI help: Explain, Fix and Improve answer. Insert and Replace change the file and Undo brings it back. Nothing changes before you tap.
+- [ ] Fix with AI on a console error opens AI help with that error attached.
+- [ ] GitHub: connect with a token, link or create a repository, push. The commit appears on GitHub.
+- [ ] GitHub: a file that looks like it holds a key shows the secret warning before the push.
+- [ ] GitHub: Disconnect removes the token. The project keeps its link.
+- [ ] Developer link: link a Coder project to a Developer project. The workspace shows "Linked to …" and the Developer Overview shows the Coder project card.
+- [ ] After a push to a linked project with no repository address, the app asks to save the address. Yes fills it in. No changes nothing.
+- [ ] Hints: each of the four tips shows once and "Got it" hides it. "Show tips again" brings them back.
+- [ ] Light and dark theme, and the largest font size: every Coder screen is readable and nothing is cut off.
+- [ ] Installing this build over the previous one keeps all existing Coder projects, links and data.
+
 ## Search and Recent
 - [ ] Search finds items across all unlocked vaults, with the right vault shown on each result.
 - [ ] Recent search terms appear and can be tapped.

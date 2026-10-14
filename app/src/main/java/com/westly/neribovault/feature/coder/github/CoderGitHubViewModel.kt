@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.data.repository.CoderProjectsRepository
+import com.westly.neribovault.data.repository.ProjectsRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +35,9 @@ sealed interface CoderPushUiState {
     data class Failed(val error: CoderGitHubResult.Err) : CoderPushUiState
 }
 
+/** The question asked once after a push: save [url] as the repository address of the Developer project [developerProjectId]. */
+data class RepoAddressPrompt(val developerProjectId: String, val url: String)
+
 /** Everything the GitHub screen shows. It never holds the token. */
 data class CoderGitHubUiState(
     val project: CoderProjectEntity? = null,
@@ -49,6 +53,8 @@ data class CoderGitHubUiState(
     /** Whether the linked repository is private, or null until GitHub has said. */
     val repoIsPrivate: Boolean? = null,
     val push: CoderPushUiState = CoderPushUiState.Idle,
+    /** Set after a successful push when the linked Developer project has no repository address yet. */
+    val addressPrompt: RepoAddressPrompt? = null,
     val message: String? = null,
 )
 
@@ -90,6 +96,7 @@ class CoderGitHubViewModel(
     private val settings: CoderGitHubSettings,
     private val client: CoderGitHubClient,
     private val pusher: CoderGitHubPusher,
+    private val developerProjects: ProjectsRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(CoderGitHubUiState())
 
@@ -338,8 +345,55 @@ class CoderGitHubViewModel(
                     is CoderGitHubResult.Err -> CoderPushUiState.Failed(result)
                 }
                 _state.update { it.copy(push = next) }
+                if (result is CoderGitHubResult.Ok) {
+                    val prompt = findAddressPrompt(owner, name)
+                    _state.update { it.copy(addressPrompt = prompt) }
+                }
             } finally {
                 if (generation == pushGeneration) pushBusy = false
+            }
+        }
+    }
+
+    /**
+     * The question to ask after a push, or null when it should not be asked: the project is not linked to a
+     * Developer project, that project is missing or in the trash, or it already has a repository address.
+     */
+    private suspend fun findAddressPrompt(owner: String, name: String): RepoAddressPrompt? {
+        val developerId = _state.value.project?.developerProjectId ?: return null
+        return try {
+            val developer = developerProjects.getById(developerId)
+            if (developer == null || developer.isDeleted || developer.repoUrl.isNotBlank()) {
+                null
+            } else {
+                RepoAddressPrompt(developerId, "https://github.com/$owner/$name")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * The answer to the question after a push. Yes saves the address in the Developer project (read again
+     * first, so nothing newer is overwritten); No changes nothing. Either way the question is not asked again.
+     */
+    fun answerAddressPrompt(save: Boolean) {
+        val prompt = _state.value.addressPrompt ?: return
+        _state.update { it.copy(addressPrompt = null) }
+        if (!save) return
+        viewModelScope.launch {
+            try {
+                val developer = developerProjects.getById(prompt.developerProjectId)
+                if (developer != null && !developer.isDeleted && developer.repoUrl.isBlank()) {
+                    developerProjects.upsert(developer.copy(repoUrl = prompt.url))
+                    _state.update { it.copy(message = "Saved the repository address") }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(message = "Couldn't save the address. Try again later.") }
             }
         }
     }

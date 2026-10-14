@@ -63,6 +63,7 @@ import com.westly.neribovault.feature.coder.link.CoderLinkState
 import com.westly.neribovault.feature.coder.link.CoderLinkViewModel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import com.westly.neribovault.feature.coder.ui.CoderHintCard
 import com.westly.neribovault.feature.coder.zip.CoderExportResult
 import com.westly.neribovault.feature.coder.zip.CoderTrust
 import com.westly.neribovault.feature.coder.zip.CoderZipExporter
@@ -312,6 +313,11 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             }
             else -> Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 LinkedLabel(state = linkState, onUnlink = { linkVm.unlink() })
+                CoderHintCard(
+                    id = "workspace",
+                    text = "Tap a file to edit it. Tap Run to see your page. The row above the keyboard has the symbols you need.",
+                    modifier = Modifier.padding(horizontal = NeriboTheme.spacing.screen, vertical = NeriboTheme.spacing.xs),
+                )
                 FileTreePanel(
                     entries = state.entries,
                     expandedFolders = expandedFolders,

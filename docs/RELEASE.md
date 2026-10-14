@@ -70,7 +70,8 @@ The release build is shrunk by R8, which can break things that work in debug. Te
 1. Uninstall the debug app first. The debug and release keys are different, so one cannot install over the other. Back up your data first (Settings, Backup).
 2. Install `app-release.apk`.
 3. In order: create the app PIN, add a note and a goal, add a memory with a photo, add a document with a short reminder, set a secret with a PIN, run a search, schedule a post reminder two minutes ahead, create a backup and restore it.
-4. If anything crashes, send the error to the person helping you. It usually means one more R8 keep rule is needed.
+4. Open Coder, create a project from a template, tap Run, and check that the preview shows the page. This tests the WebView in the shrunk build.
+5. If anything crashes, send the error to the person helping you. It usually means one more R8 keep rule is needed.
 
 ## Why the backup matters
 

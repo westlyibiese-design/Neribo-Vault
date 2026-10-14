@@ -74,6 +74,7 @@ import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.ui.CoderHintCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -236,13 +237,19 @@ private fun PreviewContent(
             )
         },
     ) { padding ->
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .consumeWindowInsets(padding)
                 .imePadding(),
         ) {
+            CoderHintCard(
+                id = "preview",
+                text = "Something not working? Tap the console icon to see messages and errors.",
+                modifier = Modifier.padding(horizontal = NeriboTheme.spacing.md, vertical = NeriboTheme.spacing.xs),
+            )
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { viewContext ->
@@ -269,6 +276,7 @@ private fun PreviewContent(
                     color = MaterialTheme.colorScheme.primary,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
+            }
             }
         }
     }
