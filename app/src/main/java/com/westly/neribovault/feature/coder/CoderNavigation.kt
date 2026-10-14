@@ -8,6 +8,7 @@ import androidx.navigation.navArgument
 import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
 import com.westly.neribovault.feature.coder.ai.CoderAiSettingsScreen
+import com.westly.neribovault.feature.coder.github.CoderGitHubScreen
 import com.westly.neribovault.feature.coder.home.CoderHomeScreen
 import com.westly.neribovault.feature.coder.trash.CoderTrashScreen
 import com.westly.neribovault.feature.coder.workspace.CoderWorkspaceScreen
@@ -24,9 +25,12 @@ object CoderRoutes {
     const val PROJECT = "coder/project/{projectId}"
     const val TRASH = "coder/trash"
     const val AI_SETTINGS = "coder/ai"
+    const val GITHUB = "coder/github/{projectId}"
     const val ARG_PROJECT_ID = "projectId"
 
     fun project(id: String) = "coder/project/$id"
+
+    fun github(id: String) = "coder/github/$id"
 }
 
 /** Registers every Coder destination, each behind the vault lock. */
@@ -59,7 +63,19 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
                 onOpenAiSettings = {
                     navController.navigate(CoderRoutes.AI_SETTINGS) { launchSingleTop = true }
                 },
+                onOpenGitHub = {
+                    navController.navigate(CoderRoutes.github(projectId)) { launchSingleTop = true }
+                },
             )
+        }
+    }
+    composable(
+        route = CoderRoutes.GITHUB,
+        arguments = listOf(navArgument(CoderRoutes.ARG_PROJECT_ID) { type = NavType.StringType }),
+    ) { entry ->
+        val projectId = entry.arguments?.getString(CoderRoutes.ARG_PROJECT_ID).orEmpty()
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            CoderGitHubScreen(projectId = projectId, onBack = { navController.popBackStack() })
         }
     }
     composable(CoderRoutes.TRASH) {

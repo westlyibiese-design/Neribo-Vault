@@ -75,7 +75,7 @@ private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, 
  * code editor (Editor mode). Back saves and returns from the editor first, then leaves the project.
  */
 @Composable
-fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit) {
+fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit, onOpenGitHub: () -> Unit) {
     val vm = neriboViewModel(key = "coder-workspace-$projectId") { c ->
         CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore)
     }
@@ -246,6 +246,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                                 MenuAction("Export as ZIP", {
                                     exportLauncher.launch(exportFileName(project?.name.orEmpty()))
                                 }),
+                                MenuAction("GitHub", onOpenGitHub),
                             ),
                         )
                     }
