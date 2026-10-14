@@ -1,0 +1,649 @@
+package com.westly.neribovault.feature.coder.ai
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Lightbulb
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.westly.neribovault.core.design.NeriboTheme
+import com.westly.neribovault.core.ui.components.ButtonStyle
+import com.westly.neribovault.core.ui.components.ConfirmDialog
+import com.westly.neribovault.core.ui.components.EmptyState
+import com.westly.neribovault.core.ui.components.LoadingState
+import com.westly.neribovault.core.ui.components.NeriboButton
+import com.westly.neribovault.core.ui.components.NeriboCard
+import com.westly.neribovault.core.ui.components.NeriboChip
+import com.westly.neribovault.core.ui.components.NeriboIconButton
+import com.westly.neribovault.core.ui.components.NeriboScaffold
+import com.westly.neribovault.core.ui.components.NeriboTextField
+import com.westly.neribovault.core.ui.components.NeriboTopBar
+import com.westly.neribovault.feature.coder.files.CoderEntry
+import com.westly.neribovault.feature.coder.files.CoderPaths
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+private val CODE_FONT_SIZE = 12.sp
+private val CODE_LINE_HEIGHT = 17.sp
+private const val MAX_VISIBLE_CODE_LINES = 400
+private const val MESSAGE_APPLIED = "Done. Use Undo in the editor if you don't like it."
+private const val SAVE_CONFIRM_TIMEOUT_MS = 5_000L
+
+/**
+ * The AI help screen of one project: the chat, the context chips, the quick buttons and the input.
+ * It sits in place of the editor, file list or preview. Code from an answer is applied only when the
+ * person taps a button, and every apply is one undo step in the editor ([onInsertAtCursor],
+ * [onReplaceSelection], [onReplaceAll]) or a new file ([onCreateFile]). Applying never closes the screen.
+ * [editorValue] holds the open file's current text and selection; it is empty when no file is open.
+ */
+@Composable
+fun CoderAiPanel(
+    viewModel: CoderAiViewModel,
+    projectId: String,
+    projectName: String,
+    entries: List<CoderEntry>,
+    openPath: String?,
+    editorValue: TextFieldValue,
+    snackbarHostState: SnackbarHostState,
+    onBack: () -> Unit,
+    onOpenAiSettings: () -> Unit,
+    onInsertAtCursor: (String) -> Unit,
+    onReplaceSelection: (String) -> Unit,
+    onReplaceAll: (String) -> Unit,
+    onCreateFile: (path: String, text: String) -> Unit,
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val setup by viewModel.setup.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val existingPaths = remember(entries) { entries.map { it.path }.toSet() }
+    val selection = remember(editorValue, openPath) { if (openPath == null) null else selectedTextOf(editorValue) }
+    var pendingSave by remember { mutableStateOf<String?>(null) }
+    var replaceCode by remember { mutableStateOf<String?>(null) }
+    var showPicker by rememberSaveable { mutableStateOf(false) }
+    var showNewChat by remember { mutableStateOf(false) }
+
+    val showMessage: (String) -> Unit = { text ->
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(text)
+        }
+    }
+    val workspaceContext: () -> CoderAiWorkspaceContext = {
+        CoderAiWorkspaceContext(
+            projectName = projectName,
+            filePaths = entries.filter { !it.isDirectory }.map { it.path },
+            openPath = openPath,
+            openText = if (openPath != null) editorValue.text else null,
+            selection = selection,
+        )
+    }
+
+    // The workspace reports file creation through its own message; once the new file shows up in the list, say so here.
+    LaunchedEffect(existingPaths, pendingSave) {
+        val path = pendingSave
+        if (path != null && path in existingPaths) {
+            pendingSave = null
+            showMessage("Saved $path")
+        }
+    }
+    LaunchedEffect(pendingSave) {
+        if (pendingSave != null) {
+            delay(SAVE_CONFIRM_TIMEOUT_MS)
+            pendingSave = null
+        }
+    }
+
+    val apply = ApplyOptions(
+        openPath = openPath,
+        hasSelection = selection != null,
+        existingPaths = existingPaths,
+        onCopy = { code ->
+            clipboard.setText(AnnotatedString(code))
+            showMessage("Copied")
+        },
+        onInsert = { code ->
+            onInsertAtCursor(code)
+            showMessage(MESSAGE_APPLIED)
+        },
+        onReplaceSelection = { code ->
+            onReplaceSelection(code)
+            showMessage(MESSAGE_APPLIED)
+        },
+        onReplaceFile = { code -> replaceCode = code },
+        onSaveNew = { path, code ->
+            pendingSave = path
+            onCreateFile(path, code)
+        },
+    )
+
+    val readySetup = setup as? CoderAiSetup.Ready
+    NeriboScaffold(
+        topBar = {
+            NeriboTopBar(
+                title = "AI help",
+                subtitle = readySetup?.let { it.provider.displayName + " \u00B7 " + it.model },
+                onBack = onBack,
+                actions = {
+                    if (readySetup != null) {
+                        NeriboIconButton(
+                            icon = Icons.Outlined.Add,
+                            contentDescription = "New chat",
+                            onClick = { if (state.messages.isNotEmpty()) showNewChat = true },
+                            tint = if (state.messages.isNotEmpty()) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                            },
+                        )
+                    }
+                },
+            )
+        },
+        snackbarHostState = snackbarHostState,
+    ) { padding ->
+        when (val current = setup) {
+            CoderAiSetup.Loading -> LoadingState(modifier = Modifier.padding(padding))
+            CoderAiSetup.NotSetUp -> EmptyState(
+                icon = Icons.Outlined.Lightbulb,
+                title = "AI isn't set up yet",
+                message = "Add your own key from Claude, Gemini or OpenAI to get help. The editor works fine without it.",
+                modifier = Modifier.fillMaxSize().padding(padding),
+                actionLabel = "Set up AI",
+                onAction = onOpenAiSettings,
+            )
+            is CoderAiSetup.Ready -> ChatBody(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .consumeWindowInsets(padding)
+                    .imePadding(),
+                ready = current,
+                state = state,
+                openPath = openPath,
+                hasSelection = selection != null,
+                apply = apply,
+                onInput = { viewModel.setInput(it) },
+                onToggleOpenFile = { viewModel.setIncludeOpenFile(!state.includeOpenFile) },
+                onRemoveError = { viewModel.removeAttachedError() },
+                onAddFiles = { showPicker = true },
+                onQuick = { viewModel.quick(it, workspaceContext()) },
+                onSend = { viewModel.send(state.input, workspaceContext()) },
+                onStop = { viewModel.stop() },
+                onRetry = { viewModel.retry() },
+                onOpenAiSettings = onOpenAiSettings,
+            )
+        }
+    }
+
+    if (showPicker) {
+        CoderAiFilePicker(
+            projectId = projectId,
+            entries = entries,
+            selected = state.extraFiles,
+            onConfirm = {
+                viewModel.setExtraFiles(it)
+                showPicker = false
+            },
+            onDismiss = { showPicker = false },
+        )
+    }
+    val codeToReplace = replaceCode
+    if (codeToReplace != null) {
+        ConfirmDialog(
+            title = "Replace the whole file?",
+            message = "Replace the whole file? You can undo this.",
+            confirmLabel = "Replace",
+            onConfirm = {
+                replaceCode = null
+                onReplaceAll(codeToReplace)
+                showMessage(MESSAGE_APPLIED)
+            },
+            onDismiss = { replaceCode = null },
+            destructive = true,
+        )
+    }
+    if (showNewChat) {
+        ConfirmDialog(
+            title = "Start a new chat?",
+            message = "This clears the conversation on this screen.",
+            confirmLabel = "New chat",
+            onConfirm = {
+                showNewChat = false
+                viewModel.newChat()
+            },
+            onDismiss = { showNewChat = false },
+            destructive = true,
+        )
+    }
+}
+
+/** What the code cards need to know to offer the right buttons. */
+private class ApplyOptions(
+    val openPath: String?,
+    val hasSelection: Boolean,
+    val existingPaths: Set<String>,
+    val onCopy: (String) -> Unit,
+    val onInsert: (String) -> Unit,
+    val onReplaceSelection: (String) -> Unit,
+    val onReplaceFile: (String) -> Unit,
+    val onSaveNew: (String, String) -> Unit,
+)
+
+@Composable
+private fun ChatBody(
+    modifier: Modifier,
+    ready: CoderAiSetup.Ready,
+    state: CoderAiUiState,
+    openPath: String?,
+    hasSelection: Boolean,
+    apply: ApplyOptions,
+    onInput: (String) -> Unit,
+    onToggleOpenFile: () -> Unit,
+    onRemoveError: () -> Unit,
+    onAddFiles: () -> Unit,
+    onQuick: (CoderQuickAction) -> Unit,
+    onSend: () -> Unit,
+    onStop: () -> Unit,
+    onRetry: () -> Unit,
+    onOpenAiSettings: () -> Unit,
+) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    Column(modifier = modifier) {
+        MessageList(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            state = state,
+            apply = apply,
+            onRetry = onRetry,
+            onOpenAiSettings = onOpenAiSettings,
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = spacing.screen),
+            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (openPath != null) {
+                NeriboChip(
+                    label = "Open file: " + CoderPaths.nameOf(openPath),
+                    selected = state.includeOpenFile,
+                    onClick = onToggleOpenFile,
+                )
+            }
+            if (hasSelection) {
+                NeriboChip(label = "Selected text", selected = true, onClick = {})
+            }
+            if (state.errorAttached) {
+                NeriboChip(label = "Error attached (tap to remove)", selected = true, onClick = onRemoveError)
+            }
+            val extraCount = state.extraFiles.size
+            NeriboChip(
+                label = if (extraCount == 0) "Add files\u2026" else "Add files\u2026 ($extraCount)",
+                selected = extraCount > 0,
+                onClick = onAddFiles,
+            )
+        }
+        val quickEnabled = (openPath != null || hasSelection) && !state.isSending
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = spacing.screen),
+            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            for (action in CoderQuickAction.values()) {
+                QuickChip(label = action.label, enabled = quickEnabled, onClick = { onQuick(action) })
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = spacing.screen),
+            horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Box(modifier = Modifier.weight(1f)) {
+                NeriboTextField(
+                    value = state.input,
+                    onValueChange = onInput,
+                    placeholder = "Ask in plain words, for example: make the button red",
+                    singleLine = false,
+                    minLines = 1,
+                    maxLines = 5,
+                )
+            }
+            if (state.isSending) {
+                NeriboButton(text = "Stop", onClick = onStop, style = ButtonStyle.Secondary)
+            } else {
+                NeriboButton(text = "Send", onClick = onSend, enabled = state.input.isNotBlank())
+            }
+        }
+        val note = "Your open file and request are sent to ${ready.provider.company}." +
+            if (state.shortenedNotice) " Some of your file was shortened to fit." else ""
+        Text(
+            text = note,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.sm),
+        )
+    }
+}
+
+/** A quick-action chip that looks and behaves disabled when [enabled] is false. */
+@Composable
+private fun QuickChip(label: String, enabled: Boolean, onClick: () -> Unit) {
+    NeriboChip(
+        label = label,
+        selected = false,
+        onClick = { if (enabled) onClick() },
+        modifier = Modifier
+            .alpha(if (enabled) 1f else 0.38f)
+            .semantics { if (!enabled) disabled() },
+    )
+}
+
+// ---- Message list --------------------------------------------------------------------------
+
+private sealed interface ChatRow {
+    val key: String
+}
+
+private class UserRow(val message: CoderChatMessage, override val key: String) : ChatRow
+private class TextRow(val text: String, override val key: String) : ChatRow
+private class CodeRow(val block: CoderCodeBlock, override val key: String) : ChatRow
+private class NoticeRow(val text: String, override val key: String) : ChatRow
+
+/** The rows of the list and, for each message id, the index of its first row. */
+private class BuiltRows(val rows: List<ChatRow>, val firstIndex: Map<Long, Int>)
+
+private fun buildRows(messages: List<CoderChatMessage>): BuiltRows {
+    val rows = ArrayList<ChatRow>()
+    val firstIndex = HashMap<Long, Int>()
+    for (message in messages) {
+        firstIndex[message.id] = rows.size
+        if (message.role == ChatRole.User) {
+            rows.add(UserRow(message, "u${message.id}"))
+            continue
+        }
+        parseReply(message.text).forEachIndexed { index, segment ->
+            val key = "a${message.id}-$index"
+            when (segment) {
+                is CoderReplySegment.Text -> rows.add(TextRow(segment.text, key))
+                is CoderReplySegment.Code -> rows.add(CodeRow(segment.block, key))
+            }
+        }
+        if (message.truncated) rows.add(NoticeRow("The answer was cut short.", "a${message.id}-cut"))
+        if (firstIndex[message.id] == rows.size) rows.add(TextRow("(No text came back.)", "a${message.id}-empty"))
+    }
+    return BuiltRows(rows, firstIndex)
+}
+
+@Composable
+private fun MessageList(
+    modifier: Modifier,
+    state: CoderAiUiState,
+    apply: ApplyOptions,
+    onRetry: () -> Unit,
+    onOpenAiSettings: () -> Unit,
+) {
+    val spacing = NeriboTheme.spacing
+    val listState = rememberLazyListState()
+    val built = remember(state.messages) { buildRows(state.messages) }
+    val lastMessage = state.messages.lastOrNull()
+    val lastId = lastMessage?.id
+    LaunchedEffect(lastId, state.isSending) {
+        val target = if (state.isSending) built.rows.size else lastId?.let { built.firstIndex[it] }
+        if (target != null) listState.animateScrollToItem(target)
+    }
+    LazyColumn(
+        state = listState,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = spacing.screen, vertical = spacing.md),
+        verticalArrangement = Arrangement.spacedBy(spacing.md),
+    ) {
+        if (built.rows.isEmpty() && !state.isSending) {
+            item(key = "hint") {
+                Text(
+                    text = "Ask a question about your code, or tap Explain, Fix, Improve or Add comments.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        items(built.rows, key = { it.key }) { row ->
+            when (row) {
+                is UserRow -> UserBubble(
+                    message = row.message,
+                    isLast = row.message.id == lastId,
+                    failureKind = state.failureKind,
+                    onRetry = onRetry,
+                    onOpenAiSettings = onOpenAiSettings,
+                )
+                is TextRow -> Text(
+                    text = row.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                is CodeRow -> CodeBlockCard(block = row.block, apply = apply)
+                is NoticeRow -> Text(
+                    text = row.text,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (state.isSending) {
+            item(key = "thinking") {
+                Text(
+                    text = "Thinking\u2026",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun UserBubble(
+    message: CoderChatMessage,
+    isLast: Boolean,
+    failureKind: CoderChatFailure?,
+    onRetry: () -> Unit,
+    onOpenAiSettings: () -> Unit,
+) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .clip(MaterialTheme.shapes.medium)
+                .background(colors.primaryContainer)
+                .padding(horizontal = spacing.md, vertical = spacing.sm),
+        ) {
+            Text(
+                text = message.text,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.onPrimaryContainer,
+            )
+        }
+        if (message.failed) {
+            Text(
+                text = "Not sent",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.error,
+                modifier = Modifier.padding(top = spacing.xs),
+            )
+            val reason = message.notice
+            if (reason != null) {
+                Text(
+                    text = reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.widthIn(max = 300.dp),
+                )
+            }
+            if (isLast) {
+                Row(horizontalArrangement = Arrangement.spacedBy(spacing.sm)) {
+                    if (failureKind == CoderChatFailure.InvalidKey || failureKind == CoderChatFailure.ModelNotFound) {
+                        NeriboButton(text = "Open AI settings", onClick = onOpenAiSettings, style = ButtonStyle.Text)
+                    }
+                    NeriboButton(text = "Retry", onClick = onRetry, style = ButtonStyle.Text)
+                }
+            }
+        } else {
+            val note = message.notice
+            if (note != null) {
+                Text(
+                    text = note,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(top = spacing.xs),
+                )
+            }
+        }
+    }
+}
+
+// ---- Code blocks ---------------------------------------------------------------------------
+
+@Composable
+private fun CodeBlockCard(block: CoderCodeBlock, apply: ApplyOptions) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val lines = remember(block.code) { block.code.split('\n') }
+    val tooLong = lines.size > MAX_VISIBLE_CODE_LINES
+    val shown = remember(block.code, expanded) {
+        if (tooLong && !expanded) lines.take(MAX_VISIBLE_CODE_LINES).joinToString("\n") else block.code
+    }
+    val label = listOfNotNull(block.language.takeIf { it.isNotEmpty() }, block.path).joinToString(" \u00B7 ")
+    val path = block.path
+    val openPath = apply.openPath
+    val canReplaceFile = openPath != null && (path == null || path == openPath)
+    val canSaveNew = path != null && path !in apply.existingPaths
+    val alreadyExists = path != null && path != openPath && path in apply.existingPaths
+
+    NeriboCard(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label.ifEmpty { "Code" },
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(start = spacing.md, end = spacing.md, top = spacing.sm),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(spacing.sm)
+                .clip(MaterialTheme.shapes.small)
+                .background(colors.surfaceVariant)
+                .horizontalScroll(rememberScrollState())
+                .padding(spacing.sm),
+        ) {
+            Text(
+                text = shown,
+                color = colors.onSurface,
+                fontFamily = FontFamily.Monospace,
+                fontSize = CODE_FONT_SIZE,
+                lineHeight = CODE_LINE_HEIGHT,
+                softWrap = false,
+            )
+        }
+        if (tooLong) {
+            NeriboButton(
+                text = if (expanded) "Show less" else "Show all ${lines.size} lines",
+                onClick = { expanded = !expanded },
+                style = ButtonStyle.Text,
+                modifier = Modifier.padding(horizontal = spacing.xs),
+            )
+        }
+        Column(modifier = Modifier.padding(horizontal = spacing.xs, vertical = spacing.xs)) {
+            NeriboButton(text = "Copy", onClick = { apply.onCopy(block.code) }, style = ButtonStyle.Text)
+            if (openPath != null) {
+                NeriboButton(text = "Insert at cursor", onClick = { apply.onInsert(block.code) }, style = ButtonStyle.Text)
+            }
+            if (apply.hasSelection) {
+                NeriboButton(
+                    text = "Replace selection",
+                    onClick = { apply.onReplaceSelection(block.code) },
+                    style = ButtonStyle.Text,
+                )
+            }
+            if (canReplaceFile) {
+                NeriboButton(
+                    text = "Replace whole file",
+                    onClick = { apply.onReplaceFile(block.code) },
+                    style = ButtonStyle.Text,
+                )
+            }
+            if (canSaveNew && path != null) {
+                NeriboButton(
+                    text = "Save as new file",
+                    onClick = { apply.onSaveNew(path, block.code) },
+                    style = ButtonStyle.Text,
+                )
+            }
+            if (alreadyExists && path != null) {
+                Text(
+                    text = "$path already exists",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = spacing.md, vertical = spacing.sm),
+                )
+            }
+        }
+    }
+}
+
+/** The selected text of the editor, or null when nothing (or only blank text) is selected. */
+private fun selectedTextOf(value: TextFieldValue): String? {
+    val range = value.selection
+    if (range.collapsed) return null
+    val start = range.min.coerceIn(0, value.text.length)
+    val end = range.max.coerceIn(start, value.text.length)
+    val piece = value.text.substring(start, end)
+    return if (piece.isBlank()) null else piece
+}

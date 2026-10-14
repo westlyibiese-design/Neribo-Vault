@@ -7,8 +7,19 @@ import android.webkit.WebResourceResponse
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
+import com.westly.neribovault.feature.coder.ai.ChatRole
+import com.westly.neribovault.feature.coder.ai.CoderAiClient
 import com.westly.neribovault.feature.coder.ai.CoderAiConfig
 import com.westly.neribovault.feature.coder.ai.CoderAiProvider
+import com.westly.neribovault.feature.coder.ai.CoderChatFailure
+import com.westly.neribovault.feature.coder.ai.CoderChatMessage
+import com.westly.neribovault.feature.coder.ai.CoderChatResult
+import com.westly.neribovault.feature.coder.ai.CoderCodeBlock
+import com.westly.neribovault.feature.coder.ai.CoderReplySegment
+import com.westly.neribovault.feature.coder.ai.ContextFile
+import com.westly.neribovault.feature.coder.ai.buildHistory
+import com.westly.neribovault.feature.coder.ai.buildUserTurn
+import com.westly.neribovault.feature.coder.ai.parseReply
 import com.westly.neribovault.feature.coder.ai.CoderKeyCrypto
 import com.westly.neribovault.feature.coder.ai.cleanKey
 import com.westly.neribovault.feature.coder.ai.cleanModelName
@@ -43,6 +54,9 @@ import com.westly.neribovault.feature.coder.zip.CoderZipRules
 import com.westly.neribovault.feature.coder.zip.importStream
 import com.westly.neribovault.feature.coder.zip.writeProjectZip
 import kotlinx.coroutines.runBlocking
+import okhttp3.Request
+import okio.Buffer
+import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -101,6 +115,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(aiModelParsingChecks())
         results.addAll(aiFailureTextChecks())
         results.addAll(aiCryptoChecks())
+        results.addAll(aiChatChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -935,6 +950,258 @@ private fun aiCryptoChecks(): List<CoderCheckResult> {
             val sealed = CoderKeyCrypto.encrypt("sk-test-key-1234".toByteArray(Charsets.UTF_8))
             val wrongIv = Base64.encodeToString(ByteArray(12), Base64.NO_WRAP)
             sealed != null && CoderKeyCrypto.decrypt(sealed.ciphertext, wrongIv) == null
+        },
+    )
+}
+
+// ---- Phase C6: AI chat ---------------------------------------------------------------------
+
+private const val CHAT_TEST_KEY = "SECRET-KEY-1234"
+
+private fun chatMessage(id: Long, role: ChatRole, text: String, failed: Boolean = false) =
+    CoderChatMessage(id = id, role = role, text = text, failed = failed)
+
+private fun aiChatChecks(): List<CoderCheckResult> =
+    replyParserChecks() + userTurnChecks() + historyChecks() + requestBuildChecks() +
+        responseParseChecks() + errorMapChecks()
+
+private fun replyParserChecks(): List<CoderCheckResult> = listOf(
+    check("Reply parser keeps plain text", "one text segment") {
+        parseReply("Hello\nworld") == listOf(CoderReplySegment.Text("Hello\nworld"))
+    },
+    check("Reply parser reads a block with a path", "text, code, text") {
+        parseReply("Here:\n```html path=index.html\n<p>Hi</p>\n```\nDone") == listOf(
+            CoderReplySegment.Text("Here:"),
+            CoderReplySegment.Code(CoderCodeBlock("html", "index.html", "<p>Hi</p>")),
+            CoderReplySegment.Text("Done"),
+        )
+    },
+    check("Reply parser reads two blocks", "two code segments with a text between") {
+        parseReply("```css path=style.css\na{}\n```\nand\n```js\nlet x = 1\n```") == listOf(
+            CoderReplySegment.Code(CoderCodeBlock("css", "style.css", "a{}")),
+            CoderReplySegment.Text("and"),
+            CoderReplySegment.Code(CoderCodeBlock("js", null, "let x = 1")),
+        )
+    },
+    check("Reply parser keeps an unterminated block", "the rest becomes code") {
+        parseReply("Look:\n```js\nlet a = 1;") == listOf(
+            CoderReplySegment.Text("Look:"),
+            CoderReplySegment.Code(CoderCodeBlock("js", null, "let a = 1;")),
+        )
+    },
+    check("Reply parser drops an invalid path", "path is null") {
+        parseReply("```html path=../x\n<p></p>\n```") ==
+            listOf(CoderReplySegment.Code(CoderCodeBlock("html", null, "<p></p>")))
+    },
+    check("Reply parser keeps a short fence inside a longer one", "one block holding the inner fence") {
+        parseReply("````md\n```js\nx\n```\n````") ==
+            listOf(CoderReplySegment.Code(CoderCodeBlock("md", null, "```js\nx\n```")))
+    },
+    check("Reply parser gives nothing for empty text", "empty list") { parseReply("").isEmpty() },
+    check("Reply parser handles very long text", "finishes quickly, never throws") {
+        val start = System.nanoTime()
+        val plain = parseReply("a".repeat(100_000))
+        val fences = parseReply("```\nx\n".repeat(20_000))
+        val lines = parseReply("line\n".repeat(50_000))
+        plain.size == 1 && fences.isNotEmpty() && lines.size == 1 &&
+            (System.nanoTime() - start) < 5_000_000_000L
+    },
+)
+
+private fun userTurnChecks(): List<CoderCheckResult> {
+    val marker = "[... file shortened ...]"
+    val big = buildUserTurn("P", listOf("big.txt"), listOf(ContextFile("big.txt", "a".repeat(100_000))), null, null, "REQ")
+    val manyPaths = buildUserTurn("P", (1..250).map { "f$it.txt" }, emptyList(), null, null, "REQ")
+    val order = buildUserTurn(
+        "P", emptyList(), listOf(ContextFile("open.js", "1"), ContextFile("b.js", "2")), null, null, "REQ",
+    )
+    val sixFiles = buildUserTurn("P", emptyList(), (1..8).map { ContextFile("f$it.txt", "x") }, null, null, "REQ")
+    val huge = buildUserTurn(
+        "P", emptyList(), (1..6).map { ContextFile("f$it.txt", "y".repeat(25_000)) }, null, null, "REQ",
+    )
+    val plain = buildUserTurn("P", listOf("a.txt"), listOf(ContextFile("a.txt", "AAA")), null, null, "REQ")
+    val full = buildUserTurn("P", listOf("a.txt"), listOf(ContextFile("a.txt", "AAA")), "SEL", "ERR", "REQ")
+    val unsafe = buildUserTurn(
+        "P", listOf("a.txt", "../x"),
+        listOf(ContextFile("../x", "HIDDEN-TEXT"), ContextFile("a.txt", "ok")), null, null, "REQ",
+    )
+    return listOf(
+        check("Turn cuts a 100,000-character file to 60,000 plus the marker", "cut text, marker, shortened") {
+            val content = big.text.substringAfter("<file path=\"big.txt\">\n").substringBefore("\n</file>")
+            big.shortened && content == "a".repeat(60_000) + "\n" + marker
+        },
+        check("Turn lists at most 200 paths", "200 paths and a 50 more line") {
+            manyPaths.text.lines().count { it.startsWith("- f") } == 200 && manyPaths.text.contains("- ... and 50 more")
+        },
+        check("Turn keeps the open file first", "open.js before b.js") {
+            val open = order.text.indexOf("<file path=\"open.js\">")
+            open >= 0 && open < order.text.indexOf("<file path=\"b.js\">")
+        },
+        check("Turn uses at most 6 files", "6 file tags") {
+            Regex("<file path=").findAll(sixFiles.text).count() == 6
+        },
+        check("Turn stays within 120,000 characters", "short enough, shortened, first file kept") {
+            huge.text.length <= 120_000 && huge.shortened && huge.text.contains("<file path=\"f1.txt\">") &&
+                !huge.text.contains("<file path=\"f6.txt\">")
+        },
+        check("Turn leaves out selection and console when null", "no such tags") {
+            !plain.text.contains("<selection>") && !plain.text.contains("<console>") && !plain.shortened
+        },
+        check("Turn holds only what was supplied", "exactly the expected text") {
+            full.text == "<project name=\"P\">\nFiles:\n- a.txt\n</project>\n<file path=\"a.txt\">\nAAA\n</file>\n" +
+                "<selection>\nSEL\n</selection>\n<console>\nERR\n</console>\n<request>\nREQ\n</request>"
+        },
+        check("Turn refuses invalid paths", "no text from ../x") {
+            !unsafe.text.contains("HIDDEN-TEXT") && !unsafe.text.contains("../x") && unsafe.text.contains("ok")
+        },
+    )
+}
+
+private fun historyChecks(): List<CoderCheckResult> {
+    val u = ChatRole.User
+    val a = ChatRole.Assistant
+    val twelve = (0..12).map { chatMessage(it.toLong(), if (it % 2 == 0) u else a, if (it % 2 == 0) "u$it" else "a$it") }
+    return listOf(
+        check("History drops a leading assistant message", "starts with the user message") {
+            buildHistory(listOf(chatMessage(1, a, "a1"), chatMessage(2, u, "u1"))) == listOf(u to "u1")
+        },
+        check("History joins two user messages in a row", "one merged user message") {
+            buildHistory(listOf(chatMessage(1, u, "u1"), chatMessage(2, u, "u2"))) == listOf(u to "u1\n\nu2")
+        },
+        check("History keeps at most 10 messages and starts with the user", "10 or fewer, user first, newest last") {
+            val result = buildHistory(twelve)
+            result.size <= 10 && result.first().first == u && result.last().second == "u12"
+        },
+        check("History leaves out messages that were not sent", "failed message missing") {
+            buildHistory(
+                listOf(
+                    chatMessage(1, u, "u1"), chatMessage(2, a, "a1"),
+                    chatMessage(3, u, "u2", failed = true), chatMessage(4, u, "u3"),
+                ),
+            ) == listOf(u to "u1", a to "a1", u to "u3")
+        },
+        check("History puts the full turn on the newest question only", "older text plain, newest full") {
+            buildHistory(listOf(chatMessage(1, u, "u1"), chatMessage(2, a, "a1"), chatMessage(3, u, "u2")), "FULL") ==
+                listOf(u to "u1", a to "a1", u to "FULL")
+        },
+    )
+}
+
+private fun chatBody(request: Request): String {
+    val buffer = Buffer()
+    request.body?.writeTo(buffer)
+    return buffer.readUtf8()
+}
+
+private fun requestBuildChecks(): List<CoderCheckResult> {
+    val turns = listOf(ChatRole.User to "hi", ChatRole.Assistant to "yo", ChatRole.User to "go")
+    val claude = CoderAiClient.buildRequest(CoderAiConfig(CoderAiProvider.CLAUDE, CHAT_TEST_KEY, "claude-x"), "SYS", turns)
+    val openAi = CoderAiClient.buildRequest(CoderAiConfig(CoderAiProvider.OPENAI, CHAT_TEST_KEY, "gpt-x"), "SYS", turns)
+    val gemini = CoderAiClient.buildRequest(
+        CoderAiConfig(CoderAiProvider.GEMINI, CHAT_TEST_KEY, "models/gemini-1.5-pro"), "SYS", turns,
+    )
+    val claudeBody = chatBody(claude)
+    val openAiBody = chatBody(openAi)
+    val geminiBody = chatBody(gemini)
+    return listOf(
+        check("Claude request address, header and body", "fixed address, key only in the header") {
+            val json = JSONObject(claudeBody)
+            claude.url.toString() == "https://api.anthropic.com/v1/messages" &&
+                claude.header("x-api-key") == CHAT_TEST_KEY && claude.header("anthropic-version") == "2023-06-01" &&
+                !claude.url.toString().contains(CHAT_TEST_KEY) && !claudeBody.contains(CHAT_TEST_KEY) &&
+                json.getInt("max_tokens") == 4096 && json.getString("system") == "SYS" &&
+                json.getJSONArray("messages").length() == 3 &&
+                claude.body?.contentType()?.toString() == "application/json; charset=utf-8"
+        },
+        check("OpenAI request has no limits and a leading system message", "no temperature or token limit") {
+            val json = JSONObject(openAiBody)
+            val first = json.getJSONArray("messages").getJSONObject(0)
+            openAi.url.toString() == "https://api.openai.com/v1/chat/completions" &&
+                openAi.header("Authorization") == "Bearer $CHAT_TEST_KEY" &&
+                !openAi.url.toString().contains(CHAT_TEST_KEY) && !openAiBody.contains(CHAT_TEST_KEY) &&
+                !json.has("temperature") && !json.has("max_tokens") && !json.has("max_completion_tokens") &&
+                first.getString("role") == "system" && first.getString("content") == "SYS" &&
+                json.getJSONArray("messages").length() == 4
+        },
+        check("Gemini request strips models/ and uses model for answers", "address, header and roles") {
+            val json = JSONObject(geminiBody)
+            val contents = json.getJSONArray("contents")
+            gemini.url.toString() == "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent" &&
+                gemini.header("x-goog-api-key") == CHAT_TEST_KEY &&
+                !gemini.url.toString().contains(CHAT_TEST_KEY) && !geminiBody.contains(CHAT_TEST_KEY) &&
+                contents.getJSONObject(1).getString("role") == "model" &&
+                contents.getJSONObject(0).getString("role") == "user" &&
+                json.getJSONObject("systemInstruction").getJSONArray("parts").getJSONObject(0).getString("text") == "SYS"
+        },
+    )
+}
+
+private fun responseParseChecks(): List<CoderCheckResult> {
+    fun parsed(provider: CoderAiProvider, body: String) = CoderAiClient.parseResponse(provider, body)
+    return listOf(
+        check("Claude answer joins text parts and reads the cut-short flag", "joined text, truncated") {
+            val cut = "{\"content\":[{\"type\":\"text\",\"text\":\"Hello \"},{\"type\":\"tool_use\"}," +
+                "{\"type\":\"text\",\"text\":\"world\"}],\"stop_reason\":\"max_tokens\"}"
+            val done = "{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}],\"stop_reason\":\"end_turn\"}"
+            parsed(CoderAiProvider.CLAUDE, cut) == CoderChatResult.Success("Hello world", true) &&
+                parsed(CoderAiProvider.CLAUDE, done) == CoderChatResult.Success("Hi", false)
+        },
+        check("OpenAI answer, cut-short flag and refusal", "text, truncated, refusal as text") {
+            val cut = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":\"length\"}]}"
+            val refusal = "{\"choices\":[{\"message\":{\"content\":null,\"refusal\":\"I can't help with that.\"}," +
+                "\"finish_reason\":\"stop\"}]}"
+            parsed(CoderAiProvider.OPENAI, cut) == CoderChatResult.Success("Hi", true) &&
+                parsed(CoderAiProvider.OPENAI, refusal) == CoderChatResult.Success("I can't help with that.", false)
+        },
+        check("Gemini answer, cut-short flag and block reason", "joined text, truncated, blocked") {
+            val cut = "{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"A\"},{\"text\":\"B\"}]},\"finishReason\":\"MAX_TOKENS\"}]}"
+            val blocked = parsed(CoderAiProvider.GEMINI, "{\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}")
+            parsed(CoderAiProvider.GEMINI, cut) == CoderChatResult.Success("AB", true) &&
+                blocked is CoderChatResult.Failure && blocked.kind == CoderChatFailure.Blocked
+        },
+        check("Unreadable answers are failures, not crashes", "failure for every provider") {
+            CoderAiProvider.values().all { provider ->
+                parsed(provider, "not json") is CoderChatResult.Failure &&
+                    parsed(provider, "{}") is CoderChatResult.Failure && parsed(provider, "") is CoderChatResult.Failure
+            }
+        },
+    )
+}
+
+private fun errorMapChecks(): List<CoderCheckResult> {
+    fun kindOf(code: Int, body: String = "", provider: CoderAiProvider = CoderAiProvider.OPENAI) =
+        CoderAiClient.mapError(provider, code, body).kind
+    return listOf(
+        check("Error 401 and 403 mean the key was refused", "InvalidKey") {
+            kindOf(401) == CoderChatFailure.InvalidKey && kindOf(403) == CoderChatFailure.InvalidKey
+        },
+        check("Error 404 means the model was not found", "ModelNotFound") { kindOf(404) == CoderChatFailure.ModelNotFound },
+        check("Error 429 means a limit was reached", "RateLimited") { kindOf(429) == CoderChatFailure.RateLimited },
+        check("Error 503 and 529 mean the provider is busy", "Busy") {
+            kindOf(503) == CoderChatFailure.Busy && kindOf(529) == CoderChatFailure.Busy
+        },
+        check("Error 400 adds the provider's one-line message", "rejected text plus the message") {
+            val result = CoderAiClient.mapError(
+                CoderAiProvider.OPENAI, 400, "{\"error\":{\"message\":\"Bad\\nthing   here\"}}",
+            )
+            result.kind == CoderChatFailure.Other &&
+                result.message == "The provider rejected the request. Bad thing here"
+        },
+        check("Error 400 with an unreadable body has no detail", "only the rejected text") {
+            CoderAiClient.mapError(CoderAiProvider.CLAUDE, 400, "<html>oops</html>").message ==
+                "The provider rejected the request."
+        },
+        check("A long provider message is cut to 300 characters", "300 characters of detail") {
+            val body = "{\"error\":{\"message\":\"" + "x".repeat(500) + "\"}}"
+            CoderAiClient.mapError(CoderAiProvider.GEMINI, 400, body).message.length ==
+                "The provider rejected the request. ".length + 300
+        },
+        check("Gemini's wrong-key answer counts as an invalid key", "InvalidKey") {
+            kindOf(400, "{\"error\":{\"details\":[{\"reason\":\"API_KEY_INVALID\"}]}}", CoderAiProvider.GEMINI) ==
+                CoderChatFailure.InvalidKey
+        },
+        check("Other codes give the code in plain words", "error (500)") {
+            CoderAiClient.mapError(CoderAiProvider.OPENAI, 500, "").message == "The provider returned an error (500)."
         },
     )
 }

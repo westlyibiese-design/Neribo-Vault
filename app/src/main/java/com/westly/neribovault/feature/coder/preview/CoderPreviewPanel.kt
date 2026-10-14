@@ -126,10 +126,16 @@ private class PageDialogState(
  * Shows a project's page inside the app, read from the project folder by [CoderPreviewResponder].
  * [entryPath] is the file to open. Back goes back through the page's history first and then calls
  * [onClose]. The browser is destroyed when this leaves the screen. A rotation loads the page again;
- * nothing the page saved in its own storage is lost.
+ * nothing the page saved in its own storage is lost. When [onAskAi] is set, each error in the console
+ * gets a Fix with AI button that hands the message to it.
  */
 @Composable
-fun CoderPreviewPanel(projectId: String, entryPath: String, onClose: () -> Unit) {
+fun CoderPreviewPanel(
+    projectId: String,
+    entryPath: String,
+    onClose: () -> Unit,
+    onAskAi: ((CoderConsoleMessage) -> Unit)? = null,
+) {
     val context = LocalContext.current
     val store = remember(context) { (context.applicationContext as NeriboApp).container.coderFileStore }
     val holder = remember { PreviewHolder() }
@@ -157,7 +163,7 @@ fun CoderPreviewPanel(projectId: String, entryPath: String, onClose: () -> Unit)
             onBack = onClose,
         )
     } else {
-        PreviewContent(projectId, entryPath, current.rootPrefix, store, holder, onClose)
+        PreviewContent(projectId, entryPath, current.rootPrefix, store, holder, onClose, onAskAi)
     }
 }
 
@@ -179,6 +185,7 @@ private fun PreviewContent(
     store: CoderFileStore,
     holder: PreviewHolder,
     onClose: () -> Unit,
+    onAskAi: ((CoderConsoleMessage) -> Unit)?,
 ) {
     val context = LocalContext.current
     val host = remember(projectId) { CoderPreviewHost.hostFor(projectId) }
@@ -298,11 +305,18 @@ private fun PreviewContent(
         )
     }
     val shownMessages = remember(console.messages) { console.messages.map { withFriendlyText(it) } }
+    val askAi: ((CoderConsoleMessage) -> Unit)? = onAskAi?.let { ask ->
+        { message: CoderConsoleMessage ->
+            showConsole = false
+            ask(message)
+        }
+    }
     if (showConsole) {
         CoderConsolePanel(
             messages = shownMessages,
             onClear = { console.clear() },
             onClose = { showConsole = false },
+            onAskAi = askAi,
         )
     }
 }

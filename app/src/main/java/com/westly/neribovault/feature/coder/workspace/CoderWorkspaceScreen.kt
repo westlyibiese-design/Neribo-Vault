@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Undo
@@ -49,6 +50,8 @@ import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.util.LifecycleSaveEffect
+import com.westly.neribovault.feature.coder.ai.CoderAiPanel
+import com.westly.neribovault.feature.coder.ai.CoderAiViewModel
 import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
@@ -72,9 +75,12 @@ private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, 
  * code editor (Editor mode). Back saves and returns from the editor first, then leaves the project.
  */
 @Composable
-fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
+fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit) {
     val vm = neriboViewModel(key = "coder-workspace-$projectId") { c ->
         CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore)
+    }
+    val aiVm = neriboViewModel(key = "coder-ai-$projectId") { c ->
+        CoderAiViewModel(projectId, c.coderAiSettings, c.coderFileStore)
     }
     val state by vm.state.collectAsStateWithLifecycle()
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
@@ -92,6 +98,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     var dialog by rememberSaveable { mutableStateOf(WorkspaceDialog.None) }
     var dialogPath by rememberSaveable { mutableStateOf("") }
     var showTrustDialog by rememberSaveable { mutableStateOf(false) }
+    var aiOpen by rememberSaveable { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
         CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
@@ -138,12 +145,37 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
     val openPath = state.openPath
     val previewEntry = state.previewEntry
     // While the preview is showing it handles Back itself (page history first, then closing).
-    BackHandler(enabled = openPath != null && previewEntry == null) { vm.closeFile() }
+    BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.closeFile() }
+    // The AI help screen takes Back first and then returns to where the person was.
+    BackHandler(enabled = aiOpen) { aiOpen = false }
+    if (aiOpen) {
+        CoderAiPanel(
+            viewModel = aiVm,
+            projectId = projectId,
+            projectName = state.project?.name ?: "Project",
+            entries = state.entries,
+            openPath = openPath,
+            editorValue = editorValue,
+            snackbarHostState = snackbarHostState,
+            onBack = { aiOpen = false },
+            onOpenAiSettings = onOpenAiSettings,
+            onInsertAtCursor = { vm.insertAtCursor(it) },
+            onReplaceSelection = { vm.replaceSelection(it) },
+            onReplaceAll = { vm.replaceAll(it) },
+            onCreateFile = { path, text -> vm.createFile(path, text) },
+        )
+        return
+    }
     if (previewEntry != null) {
         CoderPreviewPanel(
             projectId = projectId,
             entryPath = previewEntry,
             onClose = { vm.stopPreview() },
+            onAskAi = { message ->
+                vm.stopPreview()
+                aiVm.prepareFromError(message)
+                aiOpen = true
+            },
         )
         return
     }
@@ -195,8 +227,10 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit) {
                             onRedo = { vm.redo() },
                             onRetry = { scope.launch { vm.saveNow() } },
                         )
+                        AiHelpAction(onClick = { aiOpen = true })
                         RunAction(onClick = onRun)
                     } else if (canBrowse) {
+                        AiHelpAction(onClick = { aiOpen = true })
                         RunAction(onClick = onRun)
                         OverflowMenu(
                             actions = listOf(
@@ -414,6 +448,16 @@ private fun RunAction(onClick: () -> Unit) {
         contentDescription = "Run",
         onClick = onClick,
         tint = MaterialTheme.colorScheme.primary,
+    )
+}
+
+/** The AI help button in the top bar. */
+@Composable
+private fun AiHelpAction(onClick: () -> Unit) {
+    NeriboIconButton(
+        icon = Icons.Outlined.Lightbulb,
+        contentDescription = "AI help",
+        onClick = onClick,
     )
 }
 

@@ -53,7 +53,13 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
     ) { entry ->
         val projectId = entry.arguments?.getString(CoderRoutes.ARG_PROJECT_ID).orEmpty()
         VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
-            CoderWorkspaceScreen(projectId = projectId, onBack = { navController.popBackStack() })
+            CoderWorkspaceScreen(
+                projectId = projectId,
+                onBack = { navController.popBackStack() },
+                onOpenAiSettings = {
+                    navController.navigate(CoderRoutes.AI_SETTINGS) { launchSingleTop = true }
+                },
+            )
         }
     }
     composable(CoderRoutes.TRASH) {

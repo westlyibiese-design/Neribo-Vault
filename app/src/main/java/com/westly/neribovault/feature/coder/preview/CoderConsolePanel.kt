@@ -31,13 +31,14 @@ private val CONSOLE_LINE_HEIGHT = 17.sp
 /**
  * The preview console as a bottom sheet. It only lists what the page wrote; nothing typed here is
  * ever run. Each line says its level in words as well as in color, and an error may have a plain-English
- * explanation under it.
+ * explanation under it. When [onAskAi] is set, every error line has a Fix with AI button.
  */
 @Composable
 fun CoderConsolePanel(
     messages: List<CoderConsoleMessage>,
     onClear: () -> Unit,
     onClose: () -> Unit,
+    onAskAi: ((CoderConsoleMessage) -> Unit)? = null,
 ) {
     val spacing = NeriboTheme.spacing
     val listState = rememberLazyListState()
@@ -64,7 +65,7 @@ fun CoderConsolePanel(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
                 verticalArrangement = Arrangement.spacedBy(spacing.sm),
             ) {
-                items(messages, key = { it.id }) { message -> ConsoleLine(message) }
+                items(messages, key = { it.id }) { message -> ConsoleLine(message, onAskAi) }
             }
         }
         Spacer(modifier = Modifier.height(spacing.md))
@@ -81,7 +82,7 @@ fun CoderConsolePanel(
 }
 
 @Composable
-private fun ConsoleLine(message: CoderConsoleMessage) {
+private fun ConsoleLine(message: CoderConsoleMessage, onAskAi: ((CoderConsoleMessage) -> Unit)?) {
     val colors = MaterialTheme.colorScheme
     val color: Color = when (message.level) {
         ConsoleLevel.Error -> colors.error
@@ -121,6 +122,13 @@ private fun ConsoleLine(message: CoderConsoleMessage) {
                 style = MaterialTheme.typography.bodySmall,
                 color = colors.onSurfaceVariant,
                 modifier = Modifier.padding(top = NeriboTheme.spacing.xs),
+            )
+        }
+        if (onAskAi != null && message.level == ConsoleLevel.Error) {
+            NeriboButton(
+                text = "Fix with AI",
+                onClick = { onAskAi(message) },
+                style = ButtonStyle.Text,
             )
         }
     }
