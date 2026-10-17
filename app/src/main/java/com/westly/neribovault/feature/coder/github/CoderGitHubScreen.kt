@@ -621,7 +621,7 @@ private fun PushSummaryDialog(prepared: PushPrepared, onConfirm: () -> Unit, onD
                         text = if (noFilesAtAll) {
                             "Nothing to push. This project has no files yet."
                         } else {
-                            "Nothing to push. GitHub already has your latest files."
+                            "GitHub already has your latest files."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                     )

@@ -82,6 +82,10 @@ private const val BUFFER_SIZE = 64 * 1024
 private const val MSG_ZIP_TOO_BIG = "This ZIP is bigger than 50 MB, which is too large to import."
 private const val MSG_UNPACKED_TOO_BIG = "This ZIP is bigger than 50 MB once unpacked, which is too large to import."
 private const val MSG_BAD_NAMES = "This ZIP uses file names the app can't read."
+
+/** The message for a ZIP whose entry names try to leave the project folder. Shared with the self-test. */
+internal const val ZIP_UNSAFE_NAMES_MESSAGE =
+    "This ZIP has file names that try to leave the project folder, so it was not imported."
 private const val MSG_PASSWORD = "This ZIP is password-protected. Remove the password and try again."
 private const val MSG_NOT_ZIP = "This doesn't look like a valid ZIP file."
 private const val MSG_NO_FILES = "This ZIP has no files the app can import."
@@ -98,7 +102,15 @@ private class Counters {
     var imported = 0
 }
 
-private class ScanResult(val wrapper: String?)
+/**
+ * What the first pass learned. [wrapper] is the outer folder to remove, or null. [folderPaths] are the
+ * zero-byte entries that some tools write as a folder without the trailing slash; they are treated as
+ * folders. [nameClashes] are files with content whose name is also used as a folder; they are skipped.
+ */
+private class ScanResult(val wrapper: String?, val folderPaths: Set<String>, val nameClashes: Set<String>)
+
+/** One accepted entry of the first pass: its project path, whether the ZIP marks it as a folder and the bytes it really holds. */
+private class AcceptedEntry(val path: String, val folderEntry: Boolean, val bytes: Long)
 
 /** What to do with one ZIP entry. The same entry always gets the same verdict in both passes. */
 private sealed interface Verdict {
@@ -116,6 +128,7 @@ private class Tally {
     private var unsafeNames = false
     private var tooLarge = 0
     private var suspicious = 0
+    private var nameClashes = 0
 
     var skippedFiles = 0
         private set
@@ -146,6 +159,12 @@ private class Tally {
         skippedFiles++
     }
 
+    /** A file with content that has the same name as a folder. */
+    fun nameClash() {
+        nameClashes++
+        skippedFiles++
+    }
+
     fun reasons(): List<String> {
         val out = ArrayList<String>()
         if (nodeModules) out.add("node_modules folders (not needed, skipped)")
@@ -153,6 +172,7 @@ private class Tally {
         if (systemFiles) out.add("system files (skipped)")
         if (tooLarge > 0) out.add(countOf(tooLarge, "file too large", "files too large") + " (skipped)")
         if (suspicious > 0) out.add(countOf(suspicious, "suspicious file", "suspicious files") + " (skipped)")
+        if (nameClashes > 0) out.add(countOf(nameClashes, "file", "files") + " skipped because a folder has the same name")
         if (unsafeNames) out.add("unsafe or duplicate names (skipped)")
         return out
     }
@@ -175,7 +195,7 @@ internal suspend fun importStream(
     val id = newId()
     return try {
         val scan = scanZip(open)
-        val report = extractZip(open, store, id, scan.wrapper)
+        val report = extractZip(open, store, id, scan)
         currentCoroutineContext().ensureActive()
         if (!finish(id, CoderZipRules.projectNameFromFile(suggestedName))) throw ImportFailure(MSG_GENERIC)
         CoderImportResult.Success(id, report)
@@ -213,40 +233,63 @@ private fun withoutWrapper(path: String, wrapper: String?): String? {
     return if (path.startsWith(prefix)) path.substring(prefix.length) else null
 }
 
-/** Reads the rest of the current entry and throws it away, counting the bytes. */
-private suspend fun drain(zip: ZipInputStream, buffer: ByteArray, counters: Counters) {
+/** Reads the rest of the current entry and throws it away, counting the bytes. Returns how many bytes this entry held. */
+private suspend fun drain(zip: ZipInputStream, buffer: ByteArray, counters: Counters): Long {
+    var entryBytes = 0L
     while (true) {
         currentCoroutineContext().ensureActive()
         val read = zip.read(buffer)
-        if (read < 0) return
+        if (read < 0) return entryBytes
+        entryBytes += read
         counters.scanned += read
         if (counters.scanned > CoderZipRules.MAX_SCAN_BYTES) throw ImportFailure(MSG_UNPACKED_TOO_BIG)
     }
 }
 
-/** First pass: looks at every entry without unpacking, checks the counts and finds the outer folder. */
+/**
+ * Reads the next entry. From Android 14 the reader itself refuses a name that contains ".." or starts with "/",
+ * so that case is turned into a plain message here. The exception's own text is never shown or kept.
+ */
+private fun nextEntry(zip: ZipInputStream): ZipEntry? = try {
+    zip.nextEntry
+} catch (e: ZipException) {
+    throw ImportFailure(entryFailureMessage(e.message))
+}
+
+/** The message for a [ZipException] raised while reading an entry name: password, unsafe names, or not a valid ZIP. */
+private fun entryFailureMessage(raw: String?): String {
+    val text = (raw ?: "").lowercase()
+    if (text.contains("encrypt")) return MSG_PASSWORD
+    val unsafe = text.contains("path") || text.contains("..") || text.contains("invalid") || text.contains("traversal")
+    return if (unsafe) ZIP_UNSAFE_NAMES_MESSAGE else MSG_NOT_ZIP
+}
+
+/** First pass: looks at every entry without unpacking, checks the counts, finds folders written without a slash and the outer folder. */
 private suspend fun scanZip(open: () -> InputStream): ScanResult {
     val input = open()
-    val files = ArrayList<String>()
+    val accepted = ArrayList<AcceptedEntry>()
     val seen = HashSet<String>()
     val counters = Counters()
     val buffer = ByteArray(BUFFER_SIZE)
     var entries = 0
+    var fileEntries = 0
     var folders = 0
     try {
         ZipInputStream(BufferedInputStream(input)).use { zip ->
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val entry = zip.nextEntry ?: break
+                val entry = nextEntry(zip) ?: break
                 entries++
                 val verdict = judge(entry.name, seen)
+                val bytes = drain(zip, buffer, counters)
                 if (verdict is Verdict.Accept) {
-                    if (isFolderEntry(entry)) folders++ else files.add(verdict.path)
-                    if (files.size > CoderLimits.MAX_FILES_PER_PROJECT || folders > CoderLimits.MAX_FILES_PER_PROJECT) {
+                    val folder = isFolderEntry(entry)
+                    accepted.add(AcceptedEntry(verdict.path, folder, bytes))
+                    if (folder) folders++ else fileEntries++
+                    if (fileEntries > CoderLimits.MAX_FILES_PER_PROJECT || folders > CoderLimits.MAX_FILES_PER_PROJECT) {
                         throw ImportFailure(MSG_TOO_MANY)
                     }
                 }
-                drain(zip, buffer, counters)
             }
         }
     } catch (e: IllegalArgumentException) {
@@ -258,12 +301,42 @@ private suspend fun scanZip(open: () -> InputStream): ScanResult {
         throw ImportFailure(MSG_NOT_ZIP)
     }
     if (entries == 0) throw ImportFailure(MSG_NOT_ZIP)
+    return classify(accepted)
+}
+
+/**
+ * Sorts the accepted entries. A zero-byte entry that is not marked as a folder but whose path is the start of
+ * another accepted entry's path is a folder. A file with content in that position is a name clash. Everything
+ * else is a file, and only files decide the outer folder. Both passes use this one result.
+ */
+private fun classify(accepted: List<AcceptedEntry>): ScanResult {
+    val parents = HashSet<String>()
+    for (item in accepted) {
+        var slash = item.path.indexOf('/')
+        while (slash > 0) {
+            parents.add(item.path.substring(0, slash))
+            slash = item.path.indexOf('/', slash + 1)
+        }
+    }
+    val folderPaths = HashSet<String>()
+    val nameClashes = HashSet<String>()
+    val files = ArrayList<String>()
+    for (item in accepted) {
+        if (item.folderEntry) continue
+        if (item.path !in parents) {
+            files.add(item.path)
+        } else if (item.bytes == 0L) {
+            folderPaths.add(item.path)
+        } else {
+            nameClashes.add(item.path)
+        }
+    }
     if (files.isEmpty()) throw ImportFailure(MSG_NO_FILES)
-    return ScanResult(CoderZipRules.stripWrapperFolder(files))
+    return ScanResult(CoderZipRules.stripWrapperFolder(files), folderPaths, nameClashes)
 }
 
 /** Second pass: unpacks the importable files into the new project folder and builds the report. */
-private suspend fun extractZip(open: () -> InputStream, store: CoderFileStore, id: String, wrapper: String?): CoderImportReport {
+private suspend fun extractZip(open: () -> InputStream, store: CoderFileStore, id: String, scan: ScanResult): CoderImportReport {
     val seen = HashSet<String>()
     val tally = Tally()
     val counters = Counters()
@@ -271,19 +344,23 @@ private suspend fun extractZip(open: () -> InputStream, store: CoderFileStore, i
     ZipInputStream(BufferedInputStream(open())).use { zip ->
         while (true) {
             currentCoroutineContext().ensureActive()
-            val entry = zip.nextEntry ?: break
+            val entry = nextEntry(zip) ?: break
             val folder = isFolderEntry(entry)
             when (val verdict = judge(entry.name, seen)) {
                 is Verdict.Skipped -> tally.skip(verdict.reason, folder)
                 Verdict.Unsafe -> tally.rejected(folder)
                 Verdict.Duplicate -> tally.rejected(folder)
                 is Verdict.Accept -> {
-                    val relative = withoutWrapper(verdict.path, wrapper)
-                    if (relative != null) {
-                        if (folder) {
-                            makeFolder(store, id, relative)
-                        } else {
-                            extractFile(zip, entry, store, id, relative, buffer, counters, tally)
+                    if (verdict.path in scan.nameClashes) {
+                        tally.nameClash()
+                    } else {
+                        val relative = withoutWrapper(verdict.path, scan.wrapper)
+                        if (relative != null) {
+                            if (folder || verdict.path in scan.folderPaths) {
+                                makeFolder(store, id, relative)
+                            } else {
+                                extractFile(zip, entry, store, id, relative, buffer, counters, tally)
+                            }
                         }
                     }
                 }
@@ -291,7 +368,7 @@ private suspend fun extractZip(open: () -> InputStream, store: CoderFileStore, i
             drain(zip, buffer, counters)
         }
     }
-    return CoderImportReport(counters.imported, tally.skippedFiles, tally.reasons(), wrapper)
+    return CoderImportReport(counters.imported, tally.skippedFiles, tally.reasons(), scan.wrapper)
 }
 
 private fun makeFolder(store: CoderFileStore, id: String, relative: String) {

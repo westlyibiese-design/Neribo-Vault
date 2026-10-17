@@ -73,7 +73,10 @@ private const val SAVE_CONFIRM_TIMEOUT_MS = 5_000L
  * It sits in place of the editor, file list or preview. Code from an answer is applied only when the
  * person taps a button, and every apply is one undo step in the editor ([onInsertAtCursor],
  * [onReplaceSelection], [onReplaceAll]) or a new file ([onCreateFile]). Applying never closes the screen.
- * [editorValue] holds the open file's current text and selection; it is empty when no file is open.
+ * [editorValue] holds the open file's current text; it is empty when no file is open. The selection comes
+ * from [selectionSnapshot], taken when the AI help button was tapped, because the editor loses its selection
+ * as soon as it leaves the screen. [onReplaceSelection] replaces exactly the snapshot's range. [onOpenAndReplace]
+ * saves the open file, opens another one and replaces all of its text; it returns false when that file could not be opened.
  */
 @Composable
 fun CoderAiPanel(
@@ -83,12 +86,14 @@ fun CoderAiPanel(
     entries: List<CoderEntry>,
     openPath: String?,
     editorValue: TextFieldValue,
+    selectionSnapshot: AiSelectionSnapshot?,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
     onOpenAiSettings: () -> Unit,
     onInsertAtCursor: (String) -> Unit,
     onReplaceSelection: (String) -> Unit,
     onReplaceAll: (String) -> Unit,
+    onOpenAndReplace: suspend (path: String, text: String) -> Boolean,
     onCreateFile: (path: String, text: String) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -98,9 +103,16 @@ fun CoderAiPanel(
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val existingPaths = remember(entries) { entries.map { it.path }.toSet() }
-    val selection = remember(editorValue, openPath) { if (openPath == null) null else selectedTextOf(editorValue) }
+    val existingFiles = remember(entries) { entries.filter { !it.isDirectory }.map { it.path }.toSet() }
+    val currentText = editorValue.text
+    // The snapshot counts only while the same file is open and the text under it is unchanged.
+    val activeSnapshot = remember(selectionSnapshot, openPath, currentText) {
+        selectionSnapshot?.takeIf { aiSnapshotApplies(it, openPath, currentText) }
+    }
+    val selection = activeSnapshot?.text
     var pendingSave by remember { mutableStateOf<String?>(null) }
     var replaceCode by remember { mutableStateOf<String?>(null) }
+    var openReplace by remember { mutableStateOf<Pair<String, String>?>(null) }
     var showPicker by rememberSaveable { mutableStateOf(false) }
     var showNewChat by remember { mutableStateOf(false) }
 
@@ -139,6 +151,7 @@ fun CoderAiPanel(
         openPath = openPath,
         hasSelection = selection != null,
         existingPaths = existingPaths,
+        existingFiles = existingFiles,
         onCopy = { code ->
             clipboard.setText(AnnotatedString(code))
             showMessage("Copied")
@@ -152,6 +165,7 @@ fun CoderAiPanel(
             showMessage(MESSAGE_APPLIED)
         },
         onReplaceFile = { code -> replaceCode = code },
+        onOpenAndReplace = { path, code -> openReplace = path to code },
         onSaveNew = { path, code ->
             pendingSave = path
             onCreateFile(path, code)
@@ -247,6 +261,22 @@ fun CoderAiPanel(
             destructive = true,
         )
     }
+    val pendingReplace = openReplace
+    if (pendingReplace != null) {
+        ConfirmDialog(
+            title = "Replace ${pendingReplace.first}?",
+            message = "The file will open in the editor and its content will be replaced. You can undo this in the editor.",
+            confirmLabel = "Replace",
+            onConfirm = {
+                openReplace = null
+                scope.launch {
+                    if (onOpenAndReplace(pendingReplace.first, pendingReplace.second)) showMessage(MESSAGE_APPLIED)
+                }
+            },
+            onDismiss = { openReplace = null },
+            destructive = true,
+        )
+    }
     if (showNewChat) {
         ConfirmDialog(
             title = "Start a new chat?",
@@ -267,10 +297,12 @@ private class ApplyOptions(
     val openPath: String?,
     val hasSelection: Boolean,
     val existingPaths: Set<String>,
+    val existingFiles: Set<String>,
     val onCopy: (String) -> Unit,
     val onInsert: (String) -> Unit,
     val onReplaceSelection: (String) -> Unit,
     val onReplaceFile: (String) -> Unit,
+    val onOpenAndReplace: (String, String) -> Unit,
     val onSaveNew: (String, String) -> Unit,
 )
 
@@ -587,10 +619,7 @@ private fun CodeBlockCard(block: CoderCodeBlock, apply: ApplyOptions) {
     }
     val label = listOfNotNull(block.language.takeIf { it.isNotEmpty() }, block.path).joinToString(" \u00B7 ")
     val path = block.path
-    val openPath = apply.openPath
-    val canReplaceFile = openPath != null && (path == null || path == openPath)
-    val canSaveNew = path != null && path !in apply.existingPaths
-    val alreadyExists = path != null && path != openPath && path in apply.existingPaths
+    val buttons = aiApplyButtonsFor(path, apply.openPath, apply.hasSelection, apply.existingPaths, apply.existingFiles)
 
     NeriboCard(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -627,31 +656,38 @@ private fun CodeBlockCard(block: CoderCodeBlock, apply: ApplyOptions) {
         }
         Column(modifier = Modifier.padding(horizontal = spacing.xs, vertical = spacing.xs)) {
             NeriboButton(text = "Copy", onClick = { apply.onCopy(block.code) }, style = ButtonStyle.Text)
-            if (openPath != null) {
+            if (buttons.insertAtCursor) {
                 NeriboButton(text = "Insert at cursor", onClick = { apply.onInsert(block.code) }, style = ButtonStyle.Text)
             }
-            if (apply.hasSelection) {
+            if (buttons.replaceSelection) {
                 NeriboButton(
                     text = "Replace selection",
                     onClick = { apply.onReplaceSelection(block.code) },
                     style = ButtonStyle.Text,
                 )
             }
-            if (canReplaceFile) {
+            if (buttons.replaceWholeFile) {
                 NeriboButton(
                     text = "Replace whole file",
                     onClick = { apply.onReplaceFile(block.code) },
                     style = ButtonStyle.Text,
                 )
             }
-            if (canSaveNew && path != null) {
+            if (buttons.saveAsNewFile && path != null) {
                 NeriboButton(
                     text = "Save as new file",
                     onClick = { apply.onSaveNew(path, block.code) },
                     style = ButtonStyle.Text,
                 )
             }
-            if (alreadyExists && path != null) {
+            if (buttons.openAndReplace && path != null) {
+                NeriboButton(
+                    text = "Open and replace " + CoderPaths.nameOf(path),
+                    onClick = { apply.onOpenAndReplace(path, block.code) },
+                    style = ButtonStyle.Text,
+                )
+            }
+            if (buttons.nameTaken && path != null) {
                 Text(
                     text = "$path already exists",
                     style = MaterialTheme.typography.labelSmall,
@@ -663,12 +699,64 @@ private fun CodeBlockCard(block: CoderCodeBlock, apply: ApplyOptions) {
     }
 }
 
-/** The selected text of the editor, or null when nothing (or only blank text) is selected. */
-private fun selectedTextOf(value: TextFieldValue): String? {
+/**
+ * The text that was selected in the open file [path] when the AI help button was tapped. [start] is inclusive
+ * and [end] exclusive, both counted in the file's text at that moment.
+ */
+data class AiSelectionSnapshot(val path: String, val start: Int, val end: Int, val text: String)
+
+/**
+ * The selection of [value] as a snapshot, or null when no file is open, the selection is collapsed or only
+ * blank text is selected. A selection made backwards is turned around. Pure.
+ */
+fun aiSelectionSnapshotOf(path: String?, value: TextFieldValue): AiSelectionSnapshot? {
+    if (path == null) return null
     val range = value.selection
     if (range.collapsed) return null
     val start = range.min.coerceIn(0, value.text.length)
     val end = range.max.coerceIn(start, value.text.length)
     val piece = value.text.substring(start, end)
-    return if (piece.isBlank()) null else piece
+    return if (piece.isBlank()) null else AiSelectionSnapshot(path, start, end, piece)
+}
+
+/** True while [snapshot] still describes the open file: the same file is open and the text under the range is unchanged. Pure. */
+fun aiSnapshotApplies(snapshot: AiSelectionSnapshot, openPath: String?, currentText: String): Boolean =
+    snapshot.path == openPath &&
+        snapshot.start >= 0 &&
+        snapshot.end <= currentText.length &&
+        currentText.substring(snapshot.start, snapshot.end) == snapshot.text
+
+/** Which apply buttons one code block of an answer gets. */
+data class AiApplyButtons(
+    val insertAtCursor: Boolean,
+    val replaceSelection: Boolean,
+    val replaceWholeFile: Boolean,
+    val saveAsNewFile: Boolean,
+    val openAndReplace: Boolean,
+    /** True when the block's path is taken by a folder, so no button fits and a short note is shown instead. */
+    val nameTaken: Boolean,
+)
+
+/**
+ * Decides the buttons of a code block from what is open, selected and in the project. [existingPaths] holds
+ * every file and folder; [existingFiles] only the files. A block for another existing file offers
+ * "Open and replace"; a block for a new path offers "Save as new file". Pure.
+ */
+fun aiApplyButtonsFor(
+    blockPath: String?,
+    openPath: String?,
+    hasSelection: Boolean,
+    existingPaths: Set<String>,
+    existingFiles: Set<String>,
+): AiApplyButtons {
+    val path = blockPath?.takeIf { CoderPaths.isValidPath(it) }
+    val isOpenFile = path != null && path == openPath
+    return AiApplyButtons(
+        insertAtCursor = openPath != null,
+        replaceSelection = hasSelection,
+        replaceWholeFile = openPath != null && (path == null || isOpenFile),
+        saveAsNewFile = path != null && path !in existingPaths,
+        openAndReplace = path != null && !isOpenFile && path in existingFiles,
+        nameTaken = path != null && !isOpenFile && path in existingPaths && path !in existingFiles,
+    )
 }

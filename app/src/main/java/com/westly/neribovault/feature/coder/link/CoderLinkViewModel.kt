@@ -61,9 +61,7 @@ class CoderLinkViewModel(
 
     private fun stateOf(developerId: String?): Flow<CoderLinkState> {
         if (developerId == null) return flowOf(CoderLinkState.Unlinked)
-        return developerProjects.observeById(developerId).map { project ->
-            if (project == null) CoderLinkState.Missing else CoderLinkState.Linked(displayName(project))
-        }
+        return developerProjects.observeById(developerId).map { project -> linkStateOf(project) }
     }
 
     /** Links the Coder project to the Developer project [developerProjectId]. Ignored when that project is missing or in the trash. */
@@ -80,6 +78,13 @@ class CoderLinkViewModel(
         viewModelScope.launch { coderProjects.setDeveloperLink(coderProjectId, null) }
     }
 }
+
+/**
+ * The state of a stored link whose Developer project is [project]: Missing when the project is gone or deleted,
+ * otherwise Linked with its name. Pure, so the self-test can check it.
+ */
+internal fun linkStateOf(project: ProjectEntity?): CoderLinkState =
+    if (project == null || project.isDeleted) CoderLinkState.Missing else CoderLinkState.Linked(displayName(project))
 
 /** The name of a Developer project as shown next to a link. */
 internal fun displayName(project: ProjectEntity): String = project.name.trim().ifEmpty { UNTITLED_PROJECT }

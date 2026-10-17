@@ -115,7 +115,7 @@ class CoderAiViewModel(
 
     private fun linkedFlow(developerId: String?): Flow<Boolean> {
         if (developerId == null) return flowOf(false)
-        return developerProjects.observeById(developerId).map { it != null }
+        return developerProjects.observeById(developerId).map { it != null && !it.isDeleted }
     }
 
     private fun setupOf(provider: CoderAiProvider, hasKey: Boolean, model: String?): CoderAiSetup =

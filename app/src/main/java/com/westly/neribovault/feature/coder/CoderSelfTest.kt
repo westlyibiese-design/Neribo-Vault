@@ -5,9 +5,11 @@ import android.net.Uri
 import android.util.Base64
 import android.webkit.WebResourceResponse
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.data.local.entity.ProjectEntity
+import com.westly.neribovault.feature.coder.ai.AiSelectionSnapshot
 import com.westly.neribovault.feature.coder.ai.CODER_SYSTEM_PROMPT
 import com.westly.neribovault.feature.coder.ai.ChatRole
 import com.westly.neribovault.feature.coder.ai.CoderAiClient
@@ -19,6 +21,9 @@ import com.westly.neribovault.feature.coder.ai.CoderChatResult
 import com.westly.neribovault.feature.coder.ai.CoderCodeBlock
 import com.westly.neribovault.feature.coder.ai.CoderReplySegment
 import com.westly.neribovault.feature.coder.ai.ContextFile
+import com.westly.neribovault.feature.coder.ai.aiApplyButtonsFor
+import com.westly.neribovault.feature.coder.ai.aiSelectionSnapshotOf
+import com.westly.neribovault.feature.coder.ai.aiSnapshotApplies
 import com.westly.neribovault.feature.coder.ai.buildHistory
 import com.westly.neribovault.feature.coder.ai.buildProjectInfo
 import com.westly.neribovault.feature.coder.ai.buildUserTurn
@@ -48,6 +53,8 @@ import com.westly.neribovault.feature.coder.github.TreeEntryInput
 import com.westly.neribovault.feature.coder.github.cleanGitHubToken
 import com.westly.neribovault.feature.coder.github.isValidRepoName
 import com.westly.neribovault.feature.coder.github.parseRepoRef
+import com.westly.neribovault.feature.coder.link.CoderLinkState
+import com.westly.neribovault.feature.coder.link.linkStateOf
 import com.westly.neribovault.feature.coder.preview.CoderBuildCheck
 import com.westly.neribovault.feature.coder.preview.CoderBuildDetector
 import com.westly.neribovault.feature.coder.preview.CoderCdnShim
@@ -67,6 +74,7 @@ import com.westly.neribovault.feature.coder.zip.CoderImportReport
 import com.westly.neribovault.feature.coder.zip.CoderImportResult
 import com.westly.neribovault.feature.coder.zip.CoderZipExporter
 import com.westly.neribovault.feature.coder.zip.CoderZipRules
+import com.westly.neribovault.feature.coder.zip.ZIP_UNSAFE_NAMES_MESSAGE
 import com.westly.neribovault.feature.coder.zip.importStream
 import com.westly.neribovault.feature.coder.zip.writeProjectZip
 import kotlinx.coroutines.runBlocking
@@ -91,13 +99,24 @@ import javax.net.ssl.SSLException
 /** The outcome of one Coder check. [detail] says what was expected when [passed] is false. */
 data class CoderCheckResult(val name: String, val passed: Boolean, val detail: String)
 
-private fun check(name: String, expectation: String, body: () -> Boolean): CoderCheckResult =
+private fun check(name: String, expectation: String, actual: (() -> String)? = null, body: () -> Boolean): CoderCheckResult =
     try {
         val ok = body()
-        CoderCheckResult(name, ok, if (ok) "ok" else "expected: $expectation")
+        CoderCheckResult(name, ok, if (ok) "ok" else failureDetail(expectation, actual))
     } catch (e: Exception) {
         CoderCheckResult(name, false, "threw " + e.javaClass.simpleName + ": " + (e.message ?: "no message"))
     }
+
+/** The detail of a failed check: what was expected and, when the check can say, what really happened. */
+private fun failureDetail(expectation: String, actual: (() -> String)?): String {
+    if (actual == null) return "expected: $expectation"
+    val got = try {
+        actual()
+    } catch (e: Exception) {
+        "could not be read (" + e.javaClass.simpleName + ")"
+    }
+    return "expected: $expectation; got: $got"
+}
 
 private fun fileBytes(store: CoderFileStore, id: String, path: String): ByteArray? =
     store.resolve(id, path)?.readBytes()
@@ -124,6 +143,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(templateChecks())
         results.addAll(zipChecks(context, store, root))
         results.addAll(shimChecks())
+        results.addAll(vendorBundleChecks(context))
         results.addAll(buildDetectorChecks(store))
         results.addAll(explainerChecks())
         results.addAll(reactTemplateChecks())
@@ -135,6 +155,9 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(aiChatChecks())
         results.addAll(githubChecks(store))
         results.addAll(developerLinkChecks())
+        results.addAll(selectionSnapshotChecks())
+        results.addAll(applyButtonChecks())
+        results.addAll(linkStateChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -501,6 +524,8 @@ private fun zipChecks(context: Context, store: CoderFileStore, root: File): List
     out.addAll(zipNameChecks())
     out.addAll(zipRuleChecks())
     out.addAll(zipRoundTripChecks(context, store, root))
+    out.add(zipTraversalCheck(store, root))
+    out.addAll(zipFolderChecks(store))
     out.addAll(previewRootChecks(store))
     return out
 }
@@ -509,49 +534,107 @@ private fun zipNameChecks(): List<CoderCheckResult> {
     val out = ArrayList<CoderCheckResult>()
     val names = listOf(
         "a/b.txt" to "a/b.txt", "a\\b.txt" to "a/b.txt", "./a.txt" to "a.txt", "dir/" to "dir",
-        "../evil" to null, "a/../../evil" to null, "/abs" to null, "C:\\x" to null, "" to null,
+        "../evil" to null, "../evil.txt" to null, "a/../../evil" to null, "/abs" to null, "C:\\x" to null, "" to null,
     )
     for ((raw, expected) in names) {
-        out.add(check("ZIP name \"$raw\" becomes ${expected ?: "refused"}", expected ?: "null") {
-            CoderZipRules.normalizeEntryName(raw) == expected
-        })
+        out.add(
+            check(
+                "ZIP name \"$raw\" becomes ${expected ?: "refused"}",
+                expected ?: "null",
+                actual = { CoderZipRules.normalizeEntryName(raw).toString() },
+            ) { CoderZipRules.normalizeEntryName(raw) == expected },
+        )
     }
     val skipped = listOf(
         "node_modules/x/y.js", "src/node_modules/a", ".git/config", "__MACOSX/._a", "a/.DS_Store", "docs/Thumbs.db",
     )
     for (path in skipped) {
-        out.add(check("ZIP skips $path", "a skip reason") { CoderZipRules.shouldSkip(path) != null })
+        out.add(check("ZIP skips $path", "a skip reason", actual = { CoderZipRules.shouldSkip(path).toString() }) {
+            CoderZipRules.shouldSkip(path) != null
+        })
     }
-    out.add(check("ZIP keeps src/app.js and .gitignore", "no skip reason") {
-        CoderZipRules.shouldSkip("src/app.js") == null && CoderZipRules.shouldSkip(".gitignore") == null
-    })
+    out.add(
+        check(
+            "ZIP keeps src/app.js and .gitignore",
+            "no skip reason",
+            actual = { CoderZipRules.shouldSkip("src/app.js").toString() + ", " + CoderZipRules.shouldSkip(".gitignore").toString() },
+        ) { CoderZipRules.shouldSkip("src/app.js") == null && CoderZipRules.shouldSkip(".gitignore") == null },
+    )
     return out
 }
 
 private fun zipRuleChecks(): List<CoderCheckResult> = listOf(
-    check("Outer folder is found", "repo-main") {
+    check(
+        "Outer folder is found",
+        "repo-main",
+        actual = { CoderZipRules.stripWrapperFolder(listOf("repo-main/a", "repo-main/b/c")).toString() },
+    ) {
         CoderZipRules.stripWrapperFolder(listOf("repo-main/a", "repo-main/b/c")) == "repo-main"
     },
-    check("Mixed top folders have no outer folder", "null") {
+    check(
+        "Mixed top folders have no outer folder",
+        "null",
+        actual = {
+            CoderZipRules.stripWrapperFolder(listOf("a/x", "b/y")).toString() + ", " +
+                CoderZipRules.stripWrapperFolder(listOf("repo/a.txt", "b.txt")).toString()
+        },
+    ) {
         CoderZipRules.stripWrapperFolder(listOf("a/x", "b/y")) == null &&
             CoderZipRules.stripWrapperFolder(listOf("repo/a.txt", "b.txt")) == null
     },
-    check("A lone top-level file has no outer folder", "null") {
+    check(
+        "A lone top-level file has no outer folder",
+        "null",
+        actual = { CoderZipRules.stripWrapperFolder(listOf("a.txt")).toString() },
+    ) {
         CoderZipRules.stripWrapperFolder(listOf("a.txt")) == null
     },
-    check("Project name comes from the file name", "My App, then Imported project") {
+    check(
+        "Project name comes from the file name",
+        "My App, then Imported project",
+        actual = {
+            listOf(
+                CoderZipRules.projectNameFromFile("My App.ZIP"),
+                CoderZipRules.projectNameFromFile(null),
+                CoderZipRules.projectNameFromFile(".zip"),
+                CoderZipRules.projectNameFromFile("x".repeat(80) + ".zip").length.toString(),
+            ).joinToString(" | ")
+        },
+    ) {
         CoderZipRules.projectNameFromFile("My App.ZIP") == "My App" &&
             CoderZipRules.projectNameFromFile(null) == "Imported project" &&
             CoderZipRules.projectNameFromFile(".zip") == "Imported project" &&
             CoderZipRules.projectNameFromFile("x".repeat(80) + ".zip").length == 60
     },
-    check("Same name gets (2), then (3)", "Name (2), Name (3)") {
+    check(
+        "Same name gets (2), then (3)",
+        "Name (2), Name (3)",
+        actual = {
+            listOf(
+                CoderZipRules.uniqueProjectName("Name", listOf("Other")),
+                CoderZipRules.uniqueProjectName("Name", listOf("Name")),
+                CoderZipRules.uniqueProjectName("Name", listOf("Name", "name (2)")),
+                CoderZipRules.uniqueProjectName("y".repeat(60), listOf("y".repeat(60))).length.toString(),
+            ).joinToString(" | ")
+        },
+    ) {
         CoderZipRules.uniqueProjectName("Name", listOf("Other")) == "Name" &&
             CoderZipRules.uniqueProjectName("Name", listOf("Name")) == "Name (2)" &&
             CoderZipRules.uniqueProjectName("Name", listOf("Name", "name (2)")) == "Name (3)" &&
             CoderZipRules.uniqueProjectName("y".repeat(60), listOf("y".repeat(60))).length <= 60
     },
-    check("Zip bomb ratio rule", "above 200 times is refused; unknown sizes are not") {
+    check(
+        "Zip bomb ratio rule",
+        "above 200 times is refused; unknown sizes are not",
+        actual = {
+            listOf(
+                CoderZipRules.isSuspiciousRatio(201_000L, 1_000L),
+                CoderZipRules.isSuspiciousRatio(200_000L, 1_000L),
+                CoderZipRules.isSuspiciousRatio(500_000L, -1L),
+                CoderZipRules.isSuspiciousRatio(500_000L, 0L),
+            ).toString()
+        },
+    ) {
         CoderZipRules.isSuspiciousRatio(201_000L, 1_000L) &&
             !CoderZipRules.isSuspiciousRatio(200_000L, 1_000L) &&
             !CoderZipRules.isSuspiciousRatio(500_000L, -1L) &&
@@ -559,6 +642,11 @@ private fun zipRuleChecks(): List<CoderCheckResult> = listOf(
     },
 )
 
+/**
+ * The test site: an outer folder, three good files, a node_modules file, a name Coder refuses (`bad:name.txt`, which
+ * Android's ZIP reader accepts) and two names that differ only by case. Names with ".." are tested separately,
+ * because Android 14 and later refuse them while reading.
+ */
 private fun buildTestZip(): ByteArray {
     val bytes = ByteArrayOutputStream()
     ZipOutputStream(bytes).use { zip ->
@@ -573,9 +661,22 @@ private fun buildTestZip(): ByteArray {
         add("repo-main/css/style.css", "body{}".toByteArray(Charsets.UTF_8))
         add("repo-main/img/logo.png", byteArrayOf(-119, 80, 78, 71, 0, 1, 2, 3))
         add("repo-main/node_modules/x/y.js", "1".toByteArray(Charsets.UTF_8))
-        add("../evil.txt", "evil".toByteArray(Charsets.UTF_8))
+        add("bad:name.txt", "bad".toByteArray(Charsets.UTF_8))
         add("repo-main/A.txt", "first".toByteArray(Charsets.UTF_8))
         add("repo-main/a.txt", "second".toByteArray(Charsets.UTF_8))
+    }
+    return bytes.toByteArray()
+}
+
+/** A ZIP made in memory. A name that ends in "/" becomes a folder entry; any other name becomes a file holding the given text (an empty text gives a zero-byte entry). */
+private fun zipOf(vararg entries: Pair<String, String>): ByteArray {
+    val bytes = ByteArrayOutputStream()
+    ZipOutputStream(bytes).use { zip ->
+        for ((name, text) in entries) {
+            zip.putNextEntry(ZipEntry(name))
+            if (!name.endsWith("/")) zip.write(text.toByteArray(Charsets.UTF_8))
+            zip.closeEntry()
+        }
     }
     return bytes.toByteArray()
 }
@@ -591,39 +692,95 @@ private fun zipEntryNames(bytes: ByteArray): Set<String> {
     return names
 }
 
+/** Runs [bytes] through the importer without a database. An exception becomes a Failure that names its type. */
+private fun importBytes(store: CoderFileStore, bytes: ByteArray, suggestedName: String = "Test Site.zip"): CoderImportResult {
+    val keepAll: suspend (String, String) -> Boolean = { _, _ -> true }
+    return try {
+        runBlocking { importStream(store, { ByteArrayInputStream(bytes) }, suggestedName, keepAll) }
+    } catch (e: Exception) {
+        CoderImportResult.Failure("threw " + e.javaClass.simpleName)
+    }
+}
+
+/** What an import did, in one line, for a check's detail. */
+private fun describeImport(result: CoderImportResult): String = when (result) {
+    is CoderImportResult.Success ->
+        "Success (" + result.report.importedFiles + " added, " + result.report.skippedFiles + " skipped, outer folder " +
+            result.report.strippedWrapperFolder + ", notes " + result.report.skippedReasons + ")"
+    is CoderImportResult.Failure -> "Failure: " + result.message
+}
+
+/** The paths of the project made by [result], or "no project" when the import failed. */
+private fun importedPaths(store: CoderFileStore, result: CoderImportResult): String =
+    if (result is CoderImportResult.Success) store.listAll(result.projectId).joinToString(", ") { it.path } else "no project"
+
 private fun zipRoundTripChecks(context: Context, store: CoderFileStore, root: File): List<CoderCheckResult> {
     val out = ArrayList<CoderCheckResult>()
     val zipBytes = buildTestZip()
     val keepAll: suspend (String, String) -> Boolean = { _, _ -> true }
-    val first = try {
-        runBlocking { importStream(store, { ByteArrayInputStream(zipBytes) }, "Test Site.zip", keepAll) }
-    } catch (e: Exception) {
-        CoderImportResult.Failure("threw " + e.javaClass.simpleName)
-    }
+    val first = importBytes(store, zipBytes)
     val success = first as? CoderImportResult.Success
     val id = success?.projectId ?: ""
     val report = success?.report
-    out.add(check("ZIP import of the test site succeeds", "Success") { success != null })
-    out.add(check("ZIP import keeps the right files and folders", "css, img and three files") {
-        store.listAll(id).map { it.path } == listOf("css", "css/style.css", "img", "img/logo.png", "A.txt", "index.html")
-    })
-    out.add(check("ZIP import removes the outer folder", "repo-main") { report?.strippedWrapperFolder == "repo-main" })
-    out.add(check("ZIP import counts files", "4 added, 3 skipped") { report != null && report.importedFiles == 4 && report.skippedFiles == 3 })
-    out.add(check("ZIP import reports what it skipped", "node_modules and unsafe or duplicate names") {
-        report != null && report.skippedReasons.any { it.startsWith("node_modules") } &&
-            report.skippedReasons.any { it.startsWith("unsafe or duplicate") }
-    })
-    out.add(check("ZIP import never writes outside the project", "no evil.txt anywhere") {
-        val above = store.projectDir(id).parentFile
-        above != null && !File(above, "evil.txt").exists() && store.listAll(id).none { it.path.contains("evil") }
-    })
-    out.add(check("ZIP import keeps the first of two names that differ only by case", "A.txt holds first, no second file") {
-        store.read(id, "A.txt").let { it is CoderReadResult.Text && it.text == "first" } &&
-            store.listAll(id).count { it.path.equals("a.txt", ignoreCase = true) } == 1
-    })
-    out.add(check("ZIP import keeps binary bytes exactly", "same 8 bytes") {
-        fileBytes(store, id, "img/logo.png")?.toList() == listOf<Byte>(-119, 80, 78, 71, 0, 1, 2, 3)
-    })
+    out.add(check("ZIP import of the test site succeeds", "Success", actual = { "got " + describeImport(first) }) { success != null })
+    out.add(
+        check(
+            "ZIP import keeps the right files and folders",
+            "css, img and three files",
+            actual = { "files: " + importedPaths(store, first) },
+        ) {
+            store.listAll(id).map { it.path } == listOf("css", "css/style.css", "img", "img/logo.png", "A.txt", "index.html")
+        },
+    )
+    out.add(
+        check("ZIP import removes the outer folder", "repo-main", actual = { "outer folder: " + report?.strippedWrapperFolder }) {
+            report?.strippedWrapperFolder == "repo-main"
+        },
+    )
+    out.add(
+        check(
+            "ZIP import counts files",
+            "4 added, 3 skipped",
+            actual = { "imported " + report?.importedFiles + ", skipped " + report?.skippedFiles },
+        ) { report != null && report.importedFiles == 4 && report.skippedFiles == 3 },
+    )
+    out.add(
+        check(
+            "ZIP import reports what it skipped",
+            "node_modules and unsafe or duplicate names",
+            actual = { "notes: " + report?.skippedReasons },
+        ) {
+            report != null && report.skippedReasons.any { it.startsWith("node_modules") } &&
+                report.skippedReasons.any { it.startsWith("unsafe or duplicate") }
+        },
+    )
+    out.add(
+        check(
+            "ZIP import never writes outside the project",
+            "no evil.txt anywhere",
+            actual = { "files: " + importedPaths(store, first) + "; evil.txt above the project: " + File(store.projectDir(id).parentFile, "evil.txt").exists() },
+        ) {
+            val above = store.projectDir(id).parentFile
+            above != null && !File(above, "evil.txt").exists() && store.listAll(id).none { it.path.contains("evil") }
+        },
+    )
+    out.add(
+        check(
+            "ZIP import keeps the first of two names that differ only by case",
+            "A.txt holds first, no second file",
+            actual = { "files: " + importedPaths(store, first) },
+        ) {
+            store.read(id, "A.txt").let { it is CoderReadResult.Text && it.text == "first" } &&
+                store.listAll(id).count { it.path.equals("a.txt", ignoreCase = true) } == 1
+        },
+    )
+    out.add(
+        check(
+            "ZIP import keeps binary bytes exactly",
+            "same 8 bytes",
+            actual = { "bytes: " + fileBytes(store, id, "img/logo.png")?.toList() },
+        ) { fileBytes(store, id, "img/logo.png")?.toList() == listOf<Byte>(-119, 80, 78, 71, 0, 1, 2, 3) },
+    )
 
     val exportFile = File(context.cacheDir, "coder-selftest-export-" + newId() + ".zip")
     try {
@@ -634,40 +791,61 @@ private fun zipRoundTripChecks(context: Context, store: CoderFileStore, root: Fi
         } catch (e: Exception) {
             -1
         }
-        out.add(check("ZIP export counts files", "4") { exported == 4 })
-        out.add(check("ZIP export keeps folders and names", "folder entries end in a slash") {
-            zipEntryNames(exportFile.readBytes()) ==
-                setOf("css/", "css/style.css", "img/", "img/logo.png", "A.txt", "index.html")
-        })
+        out.add(check("ZIP export counts files", "4", actual = { "exported $exported" }) { exported == 4 })
+        out.add(
+            check(
+                "ZIP export keeps folders and names",
+                "folder entries end in a slash",
+                actual = { "entries: " + zipEntryNames(exportFile.readBytes()).sorted() },
+            ) {
+                zipEntryNames(exportFile.readBytes()) ==
+                    setOf("css/", "css/style.css", "img/", "img/logo.png", "A.txt", "index.html")
+            },
+        )
         val again = try {
             runBlocking { importStream(store, { exportFile.inputStream() }, "Test Site.zip", keepAll) }
         } catch (e: Exception) {
             CoderImportResult.Failure("threw " + e.javaClass.simpleName)
         }
         val againSuccess = again as? CoderImportResult.Success
-        out.add(check("An exported ZIP imports again with the same files", "same list, no outer folder") {
-            againSuccess != null && againSuccess.report.strippedWrapperFolder == null &&
-                store.listAll(againSuccess.projectId).map { it.path } == store.listAll(id).map { it.path }
-        })
+        out.add(
+            check(
+                "An exported ZIP imports again with the same files",
+                "same list, no outer folder",
+                actual = { describeImport(again) + "; files: " + importedPaths(store, again) },
+            ) {
+                againSuccess != null && againSuccess.report.strippedWrapperFolder == null &&
+                    store.listAll(againSuccess.projectId).map { it.path } == store.listAll(id).map { it.path }
+            },
+        )
     } finally {
         exportFile.delete()
     }
 
     val emptyTarget = File(context.cacheDir, "coder-selftest-empty-" + newId() + ".zip")
-    out.add(check("An empty project is not exported", "Failure that says the project is empty") {
-        val result = runBlocking { CoderZipExporter(context, store).export(newId(), Uri.fromFile(emptyTarget)) }
-        result is CoderExportResult.Failure && result.message.contains("empty") && !emptyTarget.exists()
-    })
+    val emptyResult = try {
+        runBlocking { CoderZipExporter(context, store).export(newId(), Uri.fromFile(emptyTarget)) }
+    } catch (e: Exception) {
+        null
+    }
+    out.add(
+        check(
+            "An empty project is not exported",
+            "Failure that says the project is empty",
+            actual = {
+                val text = if (emptyResult is CoderExportResult.Failure) "Failure: " + emptyResult.message else emptyResult.toString()
+                text + "; file created: " + emptyTarget.exists()
+            },
+        ) { emptyResult is CoderExportResult.Failure && emptyResult.message.contains("empty") && !emptyTarget.exists() },
+    )
 
     val before = root.list()?.size ?: 0
-    val notZip = try {
-        runBlocking { importStream(store, { ByteArrayInputStream("just some text".toByteArray(Charsets.UTF_8)) }, "x.zip", keepAll) }
-    } catch (e: Exception) {
-        CoderImportResult.Failure("threw " + e.javaClass.simpleName)
-    }
-    out.add(check("A text file is refused as not a ZIP", "Failure about a valid ZIP") {
-        notZip is CoderImportResult.Failure && notZip.message.contains("valid ZIP")
-    })
+    val notZip = importBytes(store, "just some text".toByteArray(Charsets.UTF_8), "x.zip")
+    out.add(
+        check("A text file is refused as not a ZIP", "Failure about a valid ZIP", actual = { "got " + describeImport(notZip) }) {
+            notZip is CoderImportResult.Failure && notZip.message.contains("valid ZIP")
+        },
+    )
     val onlySkipped = ByteArrayOutputStream().also { bytes ->
         ZipOutputStream(bytes).use { zip ->
             zip.putNextEntry(ZipEntry("node_modules/a.js"))
@@ -677,24 +855,100 @@ private fun zipRoundTripChecks(context: Context, store: CoderFileStore, root: Fi
             zip.closeEntry()
         }
     }.toByteArray()
-    val noFiles = try {
-        runBlocking { importStream(store, { ByteArrayInputStream(onlySkipped) }, "x.zip", keepAll) }
-    } catch (e: Exception) {
-        CoderImportResult.Failure("threw " + e.javaClass.simpleName)
-    }
-    out.add(check("A ZIP with nothing importable is refused", "Failure about no files") {
-        noFiles is CoderImportResult.Failure && noFiles.message.contains("no files")
-    })
+    val noFiles = importBytes(store, onlySkipped, "x.zip")
+    out.add(
+        check("A ZIP with nothing importable is refused", "Failure about no files", actual = { "got " + describeImport(noFiles) }) {
+            noFiles is CoderImportResult.Failure && noFiles.message.contains("no files")
+        },
+    )
     val noRow = try {
         runBlocking { importStream(store, { ByteArrayInputStream(zipBytes) }, "x.zip", { _, _ -> false }) }
     } catch (e: Exception) {
         CoderImportResult.Success("", CoderImportReport(0, 0, emptyList(), null))
     }
-    out.add(check("An import whose project row fails removes its files", "Failure") { noRow is CoderImportResult.Failure })
-    out.add(check("A refused ZIP leaves no project folder behind", "same number of folders") {
-        (root.list()?.size ?: 0) == before
+    out.add(check("An import whose project row fails removes its files", "Failure", actual = { "got " + describeImport(noRow) }) {
+        noRow is CoderImportResult.Failure
     })
+    out.add(
+        check(
+            "A refused ZIP leaves no project folder behind",
+            "same number of folders",
+            actual = { "folders before $before, now " + (root.list()?.size ?: 0) },
+        ) { (root.list()?.size ?: 0) == before },
+    )
     return out
+}
+
+/**
+ * A ZIP with a "../" name must never write outside the project. From Android 14 the reader refuses such a name, so the
+ * import fails with the unsafe-names message; on older Android the entry is skipped. The detail says which happened.
+ */
+private fun zipTraversalCheck(store: CoderFileStore, root: File): CoderCheckResult {
+    val name = "A ZIP with a ../ name never writes outside the project"
+    val result = importBytes(store, zipOf("ok.txt" to "fine", "../evil.txt" to "evil"), "Traversal.zip")
+    val stray = root.walkTopDown().any { it.name == "evil.txt" }
+    val outcome: Pair<Boolean, String> = when (result) {
+        is CoderImportResult.Failure -> {
+            val expectedMessage = result.message == ZIP_UNSAFE_NAMES_MESSAGE
+            val passed = expectedMessage && !stray
+            Pair(passed, if (passed) "Failure with the unsafe-names message (Android 14 and later)" else "got Failure: " + result.message + "; evil.txt on disk: " + stray)
+        }
+        is CoderImportResult.Success -> {
+            val inProject = store.listAll(result.projectId).any { it.path == "evil.txt" }
+            val parent = store.projectDir(result.projectId).parentFile
+            val inParent = parent != null && File(parent, "evil.txt").exists()
+            val passed = !stray && !inProject && !inParent
+            Pair(
+                passed,
+                if (passed) "Success, evil.txt was not written (older Android)" else "got Success; evil.txt in the project: $inProject, above it: $inParent, anywhere: $stray",
+            )
+        }
+    }
+    return CoderCheckResult(name, outcome.first, outcome.second)
+}
+
+private fun zipFolderChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val page = "<h1>Hi</h1>"
+    val withSlash = importBytes(store, zipOf("dist/" to "", "dist/index.html" to page), "Built.zip")
+    val withoutSlash = importBytes(store, zipOf("dist" to "", "dist/index.html" to page), "Built.zip")
+    val clash = importBytes(store, zipOf("dist" to "not a folder", "dist/index.html" to page), "Built.zip")
+    val emptyFile = importBytes(store, zipOf("empty.txt" to "", "a.txt" to "a"), "Empty.zip")
+    fun isDistImport(result: CoderImportResult): Boolean {
+        val success = result as? CoderImportResult.Success ?: return false
+        return success.report.importedFiles == 1 && success.report.strippedWrapperFolder == "dist" &&
+            store.listAll(success.projectId).map { it.path } == listOf("index.html")
+    }
+    return listOf(
+        check(
+            "A ZIP with dist/ and dist/index.html imports one file and removes the folder",
+            "1 file, outer folder dist, no file named dist",
+            actual = { describeImport(withSlash) + "; files: " + importedPaths(store, withSlash) },
+        ) { isDistImport(withSlash) },
+        check(
+            "A folder written as a zero-byte dist entry gives the same result",
+            "1 file, outer folder dist, no file named dist",
+            actual = { describeImport(withoutSlash) + "; files: " + importedPaths(store, withoutSlash) },
+        ) { isDistImport(withoutSlash) },
+        check(
+            "A file with content named like a folder is skipped and reported",
+            "index.html only, 1 file skipped because a folder has the same name",
+            actual = { describeImport(clash) + "; files: " + importedPaths(store, clash) },
+        ) {
+            val success = clash as? CoderImportResult.Success
+            success != null && success.report.importedFiles == 1 && success.report.skippedFiles == 1 &&
+                success.report.skippedReasons.contains("1 file skipped because a folder has the same name") &&
+                store.listAll(success.projectId).map { it.path } == listOf("index.html")
+        },
+        check(
+            "A zero-byte file that is not a folder stays a file",
+            "a.txt and empty.txt, 2 added",
+            actual = { describeImport(emptyFile) + "; files: " + importedPaths(store, emptyFile) },
+        ) {
+            val success = emptyFile as? CoderImportResult.Success
+            success != null && success.report.importedFiles == 2 && success.report.strippedWrapperFolder == null &&
+                store.listAll(success.projectId).map { it.path } == listOf("a.txt", "empty.txt")
+        },
+    )
 }
 
 private fun previewRootChecks(store: CoderFileStore): List<CoderCheckResult> {
@@ -1678,3 +1932,171 @@ private fun infoInTurnChecks(): List<CoderCheckResult> {
         },
     )
 }
+
+// ---- Phase C9: bundled libraries, AI selection, applying code, link state --------------------
+
+/** The three libraries the React preview needs offline. The CI build fetches them; see scripts/fetch-coder-vendor.sh. */
+private fun vendorBundleChecks(context: Context): List<CoderCheckResult> {
+    val required = listOf(
+        CoderVendorAsset.React to 20_000L,
+        CoderVendorAsset.ReactDom to 500_000L,
+        CoderVendorAsset.Babel to 1_000_000L,
+    )
+    val problems = ArrayList<String>()
+    for ((asset, minimum) in required) {
+        val size = try {
+            assetSize(context, "coder/vendor/" + asset.assetName)
+        } catch (e: IOException) {
+            -1L
+        }
+        if (size < 0L) {
+            problems.add(asset.assetName + " is missing")
+        } else if (size < minimum) {
+            problems.add(asset.assetName + " is too small ($size bytes, needs $minimum)")
+        }
+    }
+    val detail = if (problems.isEmpty()) {
+        "ok"
+    } else {
+        problems.joinToString("; ") + ". The build did not fetch the libraries (see scripts/fetch-coder-vendor.sh)"
+    }
+    return listOf(CoderCheckResult("React, ReactDOM and Babel are bundled", problems.isEmpty(), detail))
+}
+
+/** The size in bytes of the bundled file at [path]; throws an IOException when it is not in the app. */
+private fun assetSize(context: Context, path: String): Long =
+    context.assets.open(path).use { input ->
+        val buffer = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            total += read
+        }
+        total
+    }
+
+private fun selectionSnapshotChecks(): List<CoderCheckResult> {
+    val text = "one\ntwo\nthree\nfour"
+    val threeLines = AiSelectionSnapshot("page.html", 0, 13, "one\ntwo\nthree")
+    fun snap(path: String?, start: Int, end: Int): AiSelectionSnapshot? =
+        aiSelectionSnapshotOf(path, TextFieldValue(text, TextRange(start, end)))
+    return listOf(
+        check("Selection snapshot: a cursor without a selection gives null", "null", actual = { snap("a.txt", 3, 3).toString() }) {
+            snap("a.txt", 3, 3) == null
+        },
+        check("Selection snapshot: a blank selection gives null", "null", actual = { snap("a.txt", 3, 4).toString() }) {
+            snap("a.txt", 3, 4) == null
+        },
+        check("Selection snapshot: no open file gives null", "null", actual = { snap(null, 0, 3).toString() }) {
+            snap(null, 0, 3) == null
+        },
+        check("Selection snapshot: three lines give the exact text and range", "0 to 13, three lines", actual = { snap("page.html", 0, 13).toString() }) {
+            snap("page.html", 0, 13) == threeLines
+        },
+        check("Selection snapshot: a backwards selection is turned around", "0 to 13, three lines", actual = { snap("page.html", 13, 0).toString() }) {
+            snap("page.html", 13, 0) == threeLines
+        },
+        check("Selection snapshot applies only to the same file and unchanged text", "true, then false three times") {
+            aiSnapshotApplies(threeLines, "page.html", text) &&
+                !aiSnapshotApplies(threeLines, "other.html", text) &&
+                !aiSnapshotApplies(threeLines, "page.html", "X" + text) &&
+                !aiSnapshotApplies(threeLines, "page.html", "one\ntwo")
+        },
+    )
+}
+
+private fun applyButtonChecks(): List<CoderCheckResult> {
+    val existing = setOf("index.html", "style.css", "css")
+    val files = setOf("index.html", "style.css")
+    fun buttons(path: String?, open: String?, selection: Boolean) = aiApplyButtonsFor(path, open, selection, existing, files)
+    return listOf(
+        check(
+            "Apply buttons: code without a path, file open and text selected",
+            "insert, replace selection, replace whole file; nothing else",
+            actual = { buttons(null, "index.html", true).toString() },
+        ) {
+            val b = buttons(null, "index.html", true)
+            b.insertAtCursor && b.replaceSelection && b.replaceWholeFile && !b.saveAsNewFile && !b.openAndReplace && !b.nameTaken
+        },
+        check(
+            "Apply buttons: code for the open file",
+            "replace whole file, no open and replace",
+            actual = { buttons("index.html", "index.html", false).toString() },
+        ) {
+            val b = buttons("index.html", "index.html", false)
+            b.insertAtCursor && !b.replaceSelection && b.replaceWholeFile && !b.saveAsNewFile && !b.openAndReplace && !b.nameTaken
+        },
+        check(
+            "Apply buttons: code for another file that exists",
+            "open and replace, no replace whole file, no save as new",
+            actual = { buttons("style.css", "index.html", false).toString() },
+        ) {
+            val b = buttons("style.css", "index.html", false)
+            b.openAndReplace && !b.replaceWholeFile && !b.saveAsNewFile && !b.nameTaken
+        },
+        check(
+            "Apply buttons: code for a file that does not exist",
+            "save as new file only",
+            actual = { buttons("new.js", "index.html", false).toString() },
+        ) {
+            val b = buttons("new.js", "index.html", false)
+            b.saveAsNewFile && !b.openAndReplace && !b.replaceWholeFile && !b.nameTaken
+        },
+        check(
+            "Apply buttons: no file open and code for an existing file",
+            "open and replace, no insert",
+            actual = { buttons("style.css", null, false).toString() },
+        ) {
+            val b = buttons("style.css", null, false)
+            b.openAndReplace && !b.insertAtCursor && !b.replaceWholeFile && !b.saveAsNewFile
+        },
+        check(
+            "Apply buttons: no file open and code without a path",
+            "no apply button",
+            actual = { buttons(null, null, false).toString() },
+        ) {
+            val b = buttons(null, null, false)
+            !b.insertAtCursor && !b.replaceSelection && !b.replaceWholeFile && !b.saveAsNewFile && !b.openAndReplace && !b.nameTaken
+        },
+        check(
+            "Apply buttons: a path that is a folder",
+            "only the note that the name is taken",
+            actual = { buttons("css", "index.html", false).toString() },
+        ) {
+            val b = buttons("css", "index.html", false)
+            b.nameTaken && !b.openAndReplace && !b.saveAsNewFile && !b.replaceWholeFile
+        },
+        check(
+            "Apply buttons: an unsafe path is treated like no path",
+            "no open and replace, no save as new",
+            actual = { buttons("../style.css", "index.html", false).toString() },
+        ) {
+            val b = buttons("../style.css", "index.html", false)
+            !b.openAndReplace && !b.saveAsNewFile && !b.nameTaken && b.replaceWholeFile
+        },
+    )
+}
+
+private fun linkStateChecks(): List<CoderCheckResult> = listOf(
+    check("Link state: a Developer project that is not there is missing", "Missing", actual = { linkStateOf(null).toString() }) {
+        linkStateOf(null) == CoderLinkState.Missing
+    },
+    check(
+        "Link state: a Developer project in the trash is missing",
+        "Missing",
+        actual = { linkStateOf(infoProject().copy(isDeleted = true, deletedAt = 3L)).toString() },
+    ) {
+        linkStateOf(infoProject().copy(isDeleted = true, deletedAt = 3L)) == CoderLinkState.Missing
+    },
+    check("Link state: an active Developer project is linked by name", "Linked(Shop App)", actual = { linkStateOf(infoProject()).toString() }) {
+        linkStateOf(infoProject()) == CoderLinkState.Linked("Shop App")
+    },
+    check(
+        "Link state: a project without a name shows Untitled project",
+        "Linked(Untitled project)",
+        actual = { linkStateOf(infoProject(name = "  ")).toString() },
+    ) {
+        linkStateOf(infoProject(name = "  ")) == CoderLinkState.Linked("Untitled project")
+    },
+)

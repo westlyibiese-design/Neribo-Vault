@@ -12,6 +12,7 @@ import com.westly.neribovault.feature.coder.editor.CoderUndoStack
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderLimits
+import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
 import kotlinx.coroutines.CancellationException
@@ -247,6 +248,48 @@ class CoderWorkspaceViewModel(
     fun replaceAll(text: String) {
         if (openEditorValue() == null) return
         applyStep(text, TextRange(0))
+    }
+
+    /**
+     * Replaces the characters from [start] up to [end] of the open file with [text] as exactly one undo step.
+     * Ignored when no file is open or the range does not fit the current text.
+     */
+    fun replaceRange(start: Int, end: Int, text: String) {
+        val old = openEditorValue() ?: return
+        if (start < 0 || end < start || end > old.text.length) return
+        applyStep(old.text.substring(0, start) + text + old.text.substring(end), TextRange(start + text.length))
+    }
+
+    /**
+     * Saves the open file, opens [path] and replaces all of its text with [text] as one undo step. False when
+     * the file could not be saved or opened; a calm message says why and nothing is replaced.
+     */
+    suspend fun openAndReplaceAll(path: String, text: String): Boolean {
+        if (!CoderPaths.isValidPath(path)) {
+            postMessage(MSG_CANNOT_OPEN)
+            return false
+        }
+        val current = _state.value.openPath
+        if (current != path) {
+            if (current != null && !saveNow()) return false
+            when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
+                is CoderReadResult.Text -> showFile(path, result)
+                CoderReadResult.TooLarge -> {
+                    postMessage(MSG_TOO_BIG_TO_OPEN)
+                    return false
+                }
+                CoderReadResult.Binary -> {
+                    postMessage(MSG_NOT_TEXT)
+                    return false
+                }
+                CoderReadResult.Missing, CoderReadResult.Failed -> {
+                    postMessage(MSG_CANNOT_OPEN)
+                    return false
+                }
+            }
+        }
+        replaceAll(text)
+        return true
     }
 
     fun undo() {

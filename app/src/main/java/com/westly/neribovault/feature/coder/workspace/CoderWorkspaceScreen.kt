@@ -51,8 +51,11 @@ import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.util.LifecycleSaveEffect
+import com.westly.neribovault.feature.coder.ai.AiSelectionSnapshot
 import com.westly.neribovault.feature.coder.ai.CoderAiPanel
 import com.westly.neribovault.feature.coder.ai.CoderAiViewModel
+import com.westly.neribovault.feature.coder.ai.aiSelectionSnapshotOf
+import com.westly.neribovault.feature.coder.ai.aiSnapshotApplies
 import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
@@ -117,6 +120,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     var dialogPath by rememberSaveable { mutableStateOf("") }
     var showTrustDialog by rememberSaveable { mutableStateOf(false) }
     var aiOpen by rememberSaveable { mutableStateOf(false) }
+    // The selection as it was when AI help was opened; the editor loses its selection once it leaves the screen.
+    var aiSnapshot by remember { mutableStateOf<AiSelectionSnapshot?>(null) }
     var showLinkSheet by rememberSaveable { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
@@ -165,8 +170,16 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val previewEntry = state.previewEntry
     // While the preview is showing it handles Back itself (page history first, then closing).
     BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.closeFile() }
+    val openAiHelp: () -> Unit = {
+        aiSnapshot = aiSelectionSnapshotOf(vm.state.value.openPath, vm.editorValue.value)
+        aiOpen = true
+    }
+    val closeAiHelp: () -> Unit = {
+        aiOpen = false
+        aiSnapshot = null
+    }
     // The AI help screen takes Back first and then returns to where the person was.
-    BackHandler(enabled = aiOpen) { aiOpen = false }
+    BackHandler(enabled = aiOpen) { closeAiHelp() }
     if (aiOpen) {
         CoderAiPanel(
             viewModel = aiVm,
@@ -175,12 +188,19 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             entries = state.entries,
             openPath = openPath,
             editorValue = editorValue,
+            selectionSnapshot = aiSnapshot,
             snackbarHostState = snackbarHostState,
-            onBack = { aiOpen = false },
+            onBack = closeAiHelp,
             onOpenAiSettings = onOpenAiSettings,
             onInsertAtCursor = { vm.insertAtCursor(it) },
-            onReplaceSelection = { vm.replaceSelection(it) },
+            onReplaceSelection = { code ->
+                val snapshot = aiSnapshot
+                if (snapshot != null && aiSnapshotApplies(snapshot, vm.state.value.openPath, vm.editorValue.value.text)) {
+                    vm.replaceRange(snapshot.start, snapshot.end, code)
+                }
+            },
             onReplaceAll = { vm.replaceAll(it) },
+            onOpenAndReplace = { path, text -> vm.openAndReplaceAll(path, text) },
             onCreateFile = { path, text -> vm.createFile(path, text) },
         )
         return
@@ -193,6 +213,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             onAskAi = { message ->
                 vm.stopPreview()
                 aiVm.prepareFromError(message)
+                aiSnapshot = null
                 aiOpen = true
             },
         )
@@ -246,10 +267,10 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                             onRedo = { vm.redo() },
                             onRetry = { scope.launch { vm.saveNow() } },
                         )
-                        AiHelpAction(onClick = { aiOpen = true })
+                        AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
                     } else if (canBrowse) {
-                        AiHelpAction(onClick = { aiOpen = true })
+                        AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
                         OverflowMenu(
                             actions = listOf(

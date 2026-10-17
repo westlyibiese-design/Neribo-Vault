@@ -5,3 +5,5 @@ local.properties
 *.iml
 .kotlin/
 .DS_Store
+# Coder preview libraries are downloaded by the CI build, never committed
+app/src/main/assets/coder/vendor/
