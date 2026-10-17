@@ -59,6 +59,8 @@ import com.westly.neribovault.feature.coder.ai.aiSnapshotApplies
 import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
+import com.westly.neribovault.feature.coder.editor.smart.EditorSettingsSheet
+import com.westly.neribovault.feature.coder.editor.smart.SuggestionStrip
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.link.CoderLinkSheet
@@ -85,7 +87,7 @@ private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, 
 @Composable
 fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit, onOpenGitHub: () -> Unit) {
     val vm = neriboViewModel(key = "coder-workspace-$projectId") { c ->
-        CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore)
+        CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore, c.coderPrefs)
     }
     val aiVm = neriboViewModel(key = "coder-ai-$projectId") { c ->
         CoderAiViewModel(
@@ -105,6 +107,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val state by vm.state.collectAsStateWithLifecycle()
     val linkState by linkVm.linkState.collectAsStateWithLifecycle()
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
+    val suggestions by vm.suggestions.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -123,6 +126,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     // The selection as it was when AI help was opened; the editor loses its selection once it leaves the screen.
     var aiSnapshot by remember { mutableStateOf<AiSelectionSnapshot?>(null) }
     var showLinkSheet by rememberSaveable { mutableStateOf(false) }
+    var showEditorSettings by rememberSaveable { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
         CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
@@ -269,6 +273,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                         )
                         AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
+                        OverflowMenu(actions = listOf(MenuAction("Editor settings", { showEditorSettings = true })))
                     } else if (canBrowse) {
                         AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
@@ -328,6 +333,11 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                         onValueChange = { vm.onEditorChange(it) },
                         language = language,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
+                    )
+                    SuggestionStrip(
+                        suggestions = suggestions,
+                        issueMessage = null,
+                        onAccept = { vm.acceptSuggestion(it) },
                     )
                     ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
                 }
@@ -452,6 +462,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
         )
     }
 
+    if (showEditorSettings) {
+        EditorSettingsSheet(onDismiss = { showEditorSettings = false })
+    }
     if (showLinkSheet) {
         CoderLinkSheet(viewModel = linkVm, onDismiss = { showLinkSheet = false })
     }

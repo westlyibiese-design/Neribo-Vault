@@ -36,6 +36,14 @@ import com.westly.neribovault.feature.coder.ai.parseModels
 import com.westly.neribovault.feature.coder.editor.CoderHighlighter
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
+import com.westly.neribovault.feature.coder.editor.smart.CoderAutoClose
+import com.westly.neribovault.feature.coder.editor.smart.CoderSnippets
+import com.westly.neribovault.feature.coder.editor.smart.CoderSuggestionEngine
+import com.westly.neribovault.feature.coder.editor.smart.SMART_CSS_PROPERTIES
+import com.westly.neribovault.feature.coder.editor.smart.SMART_HTML_TAGS
+import com.westly.neribovault.feature.coder.editor.smart.Suggestion
+import com.westly.neribovault.feature.coder.editor.smart.SuggestionKind
+import com.westly.neribovault.feature.coder.editor.smart.SuggestionResult
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
@@ -158,6 +166,9 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(selectionSnapshotChecks())
         results.addAll(applyButtonChecks())
         results.addAll(linkStateChecks())
+        results.addAll(smartSuggestionChecks())
+        results.addAll(smartAutoCloseChecks())
+        results.addAll(smartDictionaryChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -2100,3 +2111,258 @@ private fun linkStateChecks(): List<CoderCheckResult> = listOf(
         linkStateOf(infoProject(name = "  ")) == CoderLinkState.Linked("Untitled project")
     },
 )
+
+// ---- Smart editor: suggestions, auto-close and their dictionaries ---------------------------------
+
+/** Runs the engine on [marked], a text with one `|` that marks the caret. */
+private fun smartSuggest(
+    marked: String,
+    language: CoderLanguage = CoderLanguage.Html,
+    recent: List<String> = emptyList(),
+): SuggestionResult {
+    val at = marked.indexOf('|')
+    val text = marked.substring(0, at) + marked.substring(at + 1)
+    return CoderSuggestionEngine.suggest(text, at, language, recent)
+}
+
+private fun smartLabels(result: SuggestionResult): String = result.items.joinToString(",") { it.label }
+
+private fun smartItem(result: SuggestionResult, label: String): Suggestion? = result.items.firstOrNull { it.label == label }
+
+/** One suggestion check: [test] gets the result for [marked]; a failure shows the labels that came back. */
+private fun smartSuggestionCheck(
+    name: String,
+    expectation: String,
+    marked: String,
+    language: CoderLanguage = CoderLanguage.Html,
+    recent: List<String> = emptyList(),
+    test: (SuggestionResult) -> Boolean,
+): CoderCheckResult =
+    check(name, expectation, actual = { smartLabels(smartSuggest(marked, language, recent)) }) {
+        test(smartSuggest(marked, language, recent))
+    }
+
+private fun smartSuggestionChecks(): List<CoderCheckResult> {
+    val js = CoderLanguage.JavaScript
+    val css = CoderLanguage.Css
+    return listOf(
+        smartSuggestionCheck("Suggest: <d gives tags that start with d, div first", "div first, five at most, all start with d", "<d|") { r ->
+            r.items.isNotEmpty() && r.items.size <= 5 && r.items[0].label == "div" && r.items.all { it.label.startsWith("d") } && r.replaceStart == 1
+        },
+        smartSuggestionCheck("Suggest: div inserts the tag pair and the caret goes between", "div></div> and caret 4", "<d|") { r ->
+            smartItem(r, "div")?.let { it.insertText == "div></div>" && it.caretOffset == 4 && it.kind == SuggestionKind.Tag } == true
+        },
+        smartSuggestionCheck("Suggest: a void tag inserts its name and a space", "img with caret 4", "<im|") { r ->
+            smartItem(r, "img")?.let { it.insertText == "img " && it.caretOffset == 4 } == true
+        },
+        smartSuggestionCheck("Suggest: inside <a an attribute is offered", "href", "<a hr|") { r ->
+            smartLabels(r) == "href" && r.replaceStart == 3
+        },
+        smartSuggestionCheck("Suggest: an attribute inserts name and empty quotes", "href=\"\" with caret 6", "<a hr|") { r ->
+            smartItem(r, "href")?.let { it.insertText == "href=\"\"" && it.caretOffset == 6 && it.kind == SuggestionKind.Attribute } == true
+        },
+        smartSuggestionCheck("Suggest: a boolean attribute inserts only its name and a space", "required with caret 9", "<input requ|") { r ->
+            smartItem(r, "required")?.let { it.insertText == "required " && it.caretOffset == 9 } == true
+        },
+        smartSuggestionCheck("Suggest: no attribute ideas before two letters are typed", "nothing", "<a |") { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: one letter in page text gives nothing", "nothing", "<p>d|") { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: </ closes the nearest open tag", "span>", "<div><span>hi</s|") { r ->
+            smartItem(r, "span")?.let { it.insertText == "span>" && it.caretOffset == 5 } == true && r.replaceStart == 15
+        },
+        smartSuggestionCheck("Suggest: </ skips a tag that is already closed", "li", "<ul><li>a</li><li>b</l|") { r -> smartLabels(r) == "li" },
+        smartSuggestionCheck("Suggest: </ offers nothing when the letters do not match", "nothing", "<div></x|") { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: a type value inside input", "text first", "<input type=\"te|") { r ->
+            r.items.isNotEmpty() && r.items[0].label == "text" && r.items[0].kind == SuggestionKind.Value
+        },
+        smartSuggestionCheck("Suggest: CSS disp gives display", "display, insert display: ; caret 9", ".a {\n  disp|\n}", css) { r ->
+            smartLabels(r) == "display" && r.items[0].insertText == "display: ;" && r.items[0].caretOffset == 9 &&
+                r.items[0].kind == SuggestionKind.Property
+        },
+        smartSuggestionCheck("Suggest: display: fl gives flex first", "flex, flow", ".a {\n  display: fl|\n}", css) { r ->
+            r.items.size >= 2 && r.items[0].label == "flex" && smartItem(r, "flow") != null
+        },
+        smartSuggestionCheck("Suggest: color: re gives red", "red first", ".a {\n  color: re|\n}", css) { r ->
+            r.items.isNotEmpty() && r.items[0].label == "red" && r.items[0].kind == SuggestionKind.Value
+        },
+        smartSuggestionCheck("Suggest: @me gives media", "media", "@me|", css) { r -> smartLabels(r) == "media" && r.replaceStart == 1 },
+        smartSuggestionCheck("Suggest: one letter after @ is enough", "media", "@m|", css) { r -> smartLabels(r) == "media" },
+        smartSuggestionCheck("Suggest: a pseudo-class after a colon in a selector", "hover", "a:ho|", css) { r -> smartLabels(r) == "hover" },
+        smartSuggestionCheck("Suggest: JavaScript con gives const and console", "const, continue, console, confirm", "con|", js) { r ->
+            smartLabels(r) == "const,continue,console,confirm"
+        },
+        smartSuggestionCheck("Suggest: console.l gives log", "log as a member", "console.l|", js) { r ->
+            r.items.isNotEmpty() && r.items[0].label == "log" && r.items[0].kind == SuggestionKind.Member && r.replaceStart == 8
+        },
+        smartSuggestionCheck("Suggest: document.get gives getElementById only", "getElementById", "document.get|", js) { r ->
+            smartLabels(r) == "getElementById"
+        },
+        smartSuggestionCheck("Suggest: members of other names are not guessed", "nothing", "thing.l|", js) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: one letter in JavaScript gives nothing", "nothing", "c|", js) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: the fn snippet", "function name() with caret 20", "fn|", js) { r ->
+            r.items.isNotEmpty() && r.items[0].kind == SuggestionKind.Snippet && r.items[0].insertText == "function name() {\n  \n}" &&
+                r.items[0].caretOffset == 20
+        },
+        smartSuggestionCheck("Suggest: the html5 snippet in page text", "a full page", "html5|") { r ->
+            r.items.isNotEmpty() && r.items[0].kind == SuggestionKind.Snippet && r.items[0].insertText.startsWith("<!DOCTYPE html>")
+        },
+        smartSuggestionCheck("Suggest: a snippet takes the indent of its line", "second and third line indented by two", ".a {\n  flexcenter|\n}", css) { r ->
+            r.items.isNotEmpty() &&
+                r.items[0].insertText == "display: flex;\n  justify-content: center;\n  align-items: center;" &&
+                r.items[0].caretOffset == r.items[0].insertText.length
+        },
+        smartSuggestionCheck("Suggest: nothing inside a line comment", "nothing", "// con|", js) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: nothing inside a block comment", "nothing", "/* con|", js) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: nothing inside a JavaScript string", "nothing", "const s = \"con|\"", js) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: nothing in JSON", "nothing", "{\"con|", CoderLanguage.Json) { r -> r.items.isEmpty() },
+        smartSuggestionCheck("Suggest: nothing in Markdown or plain text", "nothing", "con|", CoderLanguage.Markdown) { r ->
+            r.items.isEmpty() && smartSuggest("con|", CoderLanguage.Plain).items.isEmpty()
+        },
+        smartSuggestionCheck("Suggest: nothing in the middle of a word", "nothing", "con|st", js) { r -> r.items.isEmpty() },
+        check("Suggest: nothing while text is selected", "nothing") {
+            CoderSuggestionEngine.suggestFor(TextFieldValue("con", TextRange(0, 3)), js, emptyList()).items.isEmpty() &&
+                CoderSuggestionEngine.suggestFor(TextFieldValue("con", TextRange(3)), js, emptyList()).items.isNotEmpty()
+        },
+        smartSuggestionCheck("Suggest: a recent label ranks first in JavaScript", "console first", "con|", js, listOf("console")) { r ->
+            r.items.isNotEmpty() && r.items[0].label == "console"
+        },
+        smartSuggestionCheck("Suggest: without recent the common one is first", "span first", "<s|") { r ->
+            r.items.isNotEmpty() && r.items[0].label == "span"
+        },
+        smartSuggestionCheck("Suggest: a recent label ranks first in HTML", "section first", "<s|", CoderLanguage.Html, listOf("section")) { r ->
+            r.items.isNotEmpty() && r.items[0].label == "section"
+        },
+        smartSuggestionCheck("Suggest: at most five items", "five", "<h|") { r -> r.items.size == 5 },
+        smartSuggestionCheck("Suggest: JavaScript inside a script block", "const among them", "<script>\ncon|") { r ->
+            smartItem(r, "const") != null
+        },
+        smartSuggestionCheck("Suggest: CSS inside a style block", "display", "<style>\n.a {\n  disp|\n}\n</style>") { r ->
+            smartLabels(r) == "display"
+        },
+        smartSuggestionCheck("Suggest: page text after a script block gives nothing", "nothing", "<script>x</script>\n<p>con|") { r ->
+            r.items.isEmpty()
+        },
+        check("Suggest: a 300 KB page is answered quickly", "an average under 25 ms", actual = { "see detail of the timing check" }) {
+            val text = "<div class=\"a\">hello</div>\n".repeat(11_000) + "<d"
+            CoderSuggestionEngine.suggest(text, text.length, CoderLanguage.Html, emptyList())
+            val started = System.nanoTime()
+            var found = 0
+            for (round in 1..20) {
+                found += CoderSuggestionEngine.suggest(text, text.length, CoderLanguage.Html, emptyList()).items.size
+            }
+            val averageMs = (System.nanoTime() - started) / 20_000_000.0
+            found > 0 && averageMs < 25.0
+        },
+    )
+}
+
+/** Marks the caret of [value] with a `|`. */
+private fun smartMark(value: TextFieldValue): String =
+    value.text.substring(0, value.selection.start) + "|" + value.text.substring(value.selection.start)
+
+/** Types [typed] at the `|` of [marked] and returns the result with the caret marked, or null when auto-close does nothing. */
+private fun smartType(marked: String, typed: Char, language: CoderLanguage = CoderLanguage.JavaScript): String? {
+    val at = marked.indexOf('|')
+    val text = marked.substring(0, at) + marked.substring(at + 1)
+    val before = TextFieldValue(text, TextRange(at))
+    val after = TextFieldValue(text.substring(0, at) + typed + text.substring(at), TextRange(at + 1))
+    val result = CoderAutoClose.apply(before, after, language) ?: return null
+    return smartMark(result)
+}
+
+/** Presses Backspace at the `|` of [marked]. */
+private fun smartBackspace(marked: String, language: CoderLanguage = CoderLanguage.JavaScript): String? {
+    val at = marked.indexOf('|')
+    val text = marked.substring(0, at) + marked.substring(at + 1)
+    val before = TextFieldValue(text, TextRange(at))
+    val after = TextFieldValue(text.substring(0, at - 1) + text.substring(at), TextRange(at - 1))
+    val result = CoderAutoClose.apply(before, after, language) ?: return null
+    return smartMark(result)
+}
+
+private fun smartAutoCloseCheck(name: String, expected: String?, actual: () -> String?): CoderCheckResult =
+    check(name, expected ?: "no change", actual = { actual() ?: "no change" }) { actual() == expected }
+
+private fun smartAutoCloseChecks(): List<CoderCheckResult> {
+    val html = CoderLanguage.Html
+    val md = CoderLanguage.Markdown
+    return listOf(
+        smartAutoCloseCheck("Auto-close: ( adds )", "(|)") { smartType("|", '(') },
+        smartAutoCloseCheck("Auto-close: [ adds ]", "[|]") { smartType("|", '[') },
+        smartAutoCloseCheck("Auto-close: { adds }", "{|}") { smartType("|", '{') },
+        smartAutoCloseCheck("Auto-close: no closer before a letter", null) { smartType("|abc", '(') },
+        smartAutoCloseCheck("Auto-close: a closer is added before a closing bracket", "((|))") { smartType("(|)", '(') },
+        smartAutoCloseCheck("Auto-close: a double quote adds a pair", "\"|\"") { smartType("|", '"') },
+        smartAutoCloseCheck("Auto-close: a quote after a space adds a pair", "x = \"|\"") { smartType("x = |", '"') },
+        smartAutoCloseCheck("Auto-close: an apostrophe in don't stays single", null) { smartType("don|", '\'') },
+        smartAutoCloseCheck("Auto-close: a quote after the same quote stays single", null) { smartType("\"\"|", '"') },
+        smartAutoCloseCheck("Auto-close: typing ) steps over an existing )", "()|") { smartType("(|)", ')') },
+        smartAutoCloseCheck("Auto-close: typing a quote steps over an existing quote", "\"\"|") { smartType("\"|\"", '"') },
+        smartAutoCloseCheck("Auto-close: Backspace in () removes both", "|") { smartBackspace("(|)") },
+        smartAutoCloseCheck("Auto-close: Backspace in quotes removes both", "|") { smartBackspace("\"|\"") },
+        smartAutoCloseCheck("Auto-close: Backspace in a pair inside text", "a|b") { smartBackspace("a(|)b") },
+        smartAutoCloseCheck("Auto-close: Backspace in a pair that is not empty does nothing special", null) { smartBackspace("(x|)") },
+        smartAutoCloseCheck("Auto-close: Enter between braces", "{\n  |\n}") { smartType("{|}", '\n') },
+        smartAutoCloseCheck("Auto-close: Enter between braces keeps the line indent", "  if (x) {\n    |\n  }") { smartType("  if (x) {|}", '\n') },
+        smartAutoCloseCheck("Auto-close: Enter after an open brace alone is left to auto-indent", null) { smartType("{|", '\n') },
+        smartAutoCloseCheck("Auto-close: > closes an opening HTML tag", "<div>|</div>") { smartType("<div|", '>', html) },
+        smartAutoCloseCheck("Auto-close: > after attributes closes the tag", "<a href=\"x\">|</a>") { smartType("<a href=\"x\"|", '>', html) },
+        smartAutoCloseCheck("Auto-close: a void tag is not closed", null) { smartType("<br|", '>', html) },
+        smartAutoCloseCheck("Auto-close: a self-closing tag is not closed", null) { smartType("<Foo /|", '>', html) },
+        smartAutoCloseCheck("Auto-close: > inside an attribute value is left alone", null) { smartType("<a title=\"x|", '>', html) },
+        smartAutoCloseCheck("Auto-close: > of a closing tag is left alone", null) { smartType("</div|", '>', html) },
+        smartAutoCloseCheck("Auto-close: </ writes the nearest open tag", "<div><p>hi</p></div>|") { smartType("<div><p>hi</p><|", '/', html) },
+        smartAutoCloseCheck("Auto-close: </ with nothing open does nothing", null) { smartType("<|", '/', html) },
+        smartAutoCloseCheck("Auto-close: Markdown closes ( but not quotes or braces", "(|)") { smartType("|", '(', md) },
+        smartAutoCloseCheck("Auto-close: Markdown never pairs quotes", null) { smartType("|", '"', md) },
+        smartAutoCloseCheck("Auto-close: Markdown never pairs braces", null) { smartType("|", '{', md) },
+        smartAutoCloseCheck("Auto-close: plain text never pairs braces", null) { smartType("|", '{', CoderLanguage.Plain) },
+        smartAutoCloseCheck("Auto-close: nothing inside a // comment", null) { smartType("// foo |", '(') },
+        smartAutoCloseCheck("Auto-close: nothing inside a block comment", null) { smartType("/* x |", '(') },
+        smartAutoCloseCheck("Auto-close: nothing inside an HTML comment", null) { smartType("<!-- |", '(', html) },
+        smartAutoCloseCheck("Auto-close: a closer is added before an emoji only when safe", null) { smartType("|\uD83D\uDE00", '(') },
+        smartAutoCloseCheck("Auto-close: the caret stays on a character boundary after an emoji", "\uD83D\uDE00(|)") {
+            smartType("\uD83D\uDE00|", '(')
+        },
+        smartAutoCloseCheck("Auto-close: a generic type in TypeScript is not a tag", null) {
+            smartType("Promise<void|", '>', CoderLanguage.TypeScript)
+        },
+        smartAutoCloseCheck("Auto-close: a JSX tag closes in JavaScript", "return <div>|</div>") {
+            smartType("return <div|", '>', CoderLanguage.JavaScript)
+        },
+        check("Auto-close: a paste of several characters is skipped", "no change") {
+            val before = TextFieldValue("", TextRange(0))
+            val pasted = TextFieldValue("(a", TextRange(2))
+            CoderAutoClose.apply(before, pasted, CoderLanguage.JavaScript) == null
+        },
+        check("Auto-close: a selection is never adjusted", "no change") {
+            val before = TextFieldValue("x", TextRange(0, 1))
+            val after = TextFieldValue("(", TextRange(1))
+            CoderAutoClose.apply(before, after, CoderLanguage.JavaScript) == null
+        },
+        check("Auto-close: text that is still composing is ignored", "no change") {
+            val before = TextFieldValue("", TextRange(0))
+            val after = TextFieldValue("(", TextRange(1), TextRange(0, 1))
+            CoderAutoClose.apply(before, after, CoderLanguage.JavaScript) == null
+        },
+    )
+}
+
+private fun smartDictionaryChecks(): List<CoderCheckResult> {
+    val triggers = (CoderSnippets.HTML + CoderSnippets.CSS + CoderSnippets.JAVASCRIPT).map { it.trigger }
+    val wanted = listOf("html5", "link:css", "script:src", "flexcenter", "reset", "log", "fn", "af", "for", "click", "fetchjson")
+    val snippets = CoderSnippets.HTML + CoderSnippets.CSS + CoderSnippets.JAVASCRIPT
+    return listOf(
+        check("Dictionary: about 110 HTML tags, none twice", "at least 100 and no duplicates") {
+            SMART_HTML_TAGS.size >= 100 && SMART_HTML_TAGS.map { it.word }.toSet().size == SMART_HTML_TAGS.size
+        },
+        check("Dictionary: at least 150 CSS properties, none twice", "at least 150 and no duplicates") {
+            SMART_CSS_PROPERTIES.size >= 150 && SMART_CSS_PROPERTIES.map { it.word }.toSet().size == SMART_CSS_PROPERTIES.size
+        },
+        check("Dictionary: every promised snippet exists", "all eleven triggers", actual = { triggers.joinToString(",") }) {
+            wanted.all { it in triggers }
+        },
+        check("Dictionary: every snippet caret is inside its text", "0 to length") {
+            snippets.all { it.caretOffset in 0..it.body.length && it.body.isNotEmpty() }
+        },
+    )
+}

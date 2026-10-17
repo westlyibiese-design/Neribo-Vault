@@ -7,8 +7,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.data.repository.CoderProjectsRepository
+import com.westly.neribovault.feature.coder.CoderPrefs
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
+import com.westly.neribovault.feature.coder.editor.smart.CoderAutoClose
+import com.westly.neribovault.feature.coder.editor.smart.CoderSuggestionEngine
+import com.westly.neribovault.feature.coder.editor.smart.Suggestion
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderLimits
@@ -56,6 +60,13 @@ private const val AUTOSAVE_DELAY_MS = 800L
 private const val UNDO_PAUSE_MS = 800L
 private const val BIG_CHANGE_CHARS = 20
 private const val INDENT_UNIT = "  "
+private const val MAX_RECENT_SUGGESTIONS = 20
+
+/**
+ * Gboard and other keyboards keep the word being typed as "composing text". When this is true, suggestions
+ * still follow such typing (they never change the text). Auto-close never acts while text is composing.
+ */
+private const val SUGGEST_WHILE_COMPOSING = true
 
 private const val MSG_TOO_BIG_TO_OPEN = "This file is bigger than 300 KB, so it can't be edited here."
 private const val MSG_NOT_TEXT = "This file isn't plain text, so it can't be edited here."
@@ -71,13 +82,15 @@ private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer
 
 /**
  * State and actions of one project's workspace: the file list, the open file's text, undo and redo,
- * autosave and the file operations. The editor text is only ever changed here, and everything that
+ * autosave, the file operations and the smart editor (suggestions and auto-close). The editor text is only
+ * ever changed here, and everything that
  * touches the disk runs on `Dispatchers.IO`.
  */
 class CoderWorkspaceViewModel(
     private val projectId: String,
     private val projects: CoderProjectsRepository,
     private val files: CoderFileStore,
+    private val prefs: CoderPrefs,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(CoderWorkspaceUiState())
@@ -99,7 +112,27 @@ class CoderWorkspaceViewModel(
     private var entriesLoaded = false
     private var projectLoaded = false
 
+    private val _suggestions = MutableStateFlow<List<Suggestion>>(emptyList())
+
+    /** The ideas shown above the extra keys. Empty when there is nothing to offer. */
+    val suggestions: StateFlow<List<Suggestion>> = _suggestions.asStateFlow()
+
+    private var suggestionStart = 0
+    private var suggestionCaret = -1
+    private val recentLabels = ArrayList<String>()
+    private var suggestionsOn = true
+    private var autoCloseOn = true
+
     init {
+        viewModelScope.launch {
+            prefs.suggestionsEnabled.collect { on ->
+                suggestionsOn = on
+                if (!on) clearSuggestions()
+            }
+        }
+        viewModelScope.launch {
+            prefs.autoCloseEnabled.collect { on -> autoCloseOn = on }
+        }
         viewModelScope.launch {
             projects.observeById(projectId).collect { project ->
                 projectLoaded = true
@@ -170,6 +203,7 @@ class CoderWorkspaceViewModel(
 
     private fun showFile(path: String, result: CoderReadResult.Text) {
         autosaveJob?.cancel()
+        clearSuggestions()
         lastSavedText = result.text
         usesCrlf = result.usesCrlf
         undoStack.clear()
@@ -183,6 +217,7 @@ class CoderWorkspaceViewModel(
 
     private fun resetEditor() {
         autosaveJob?.cancel()
+        clearSuggestions()
         undoStack.clear()
         lastSavedText = ""
         usesCrlf = false
@@ -196,20 +231,33 @@ class CoderWorkspaceViewModel(
 
     // ---- Typing ----------------------------------------------------------------------------
 
-    /** Takes what the keyboard produced, adds auto-indent after Enter and decides whether this starts a new undo step. */
+    /**
+     * Takes what the keyboard produced, applies auto-close for a single typed character, adds auto-indent after
+     * Enter and decides whether this starts a new undo step. Also refreshes the suggestions.
+     */
     fun onEditorChange(value: TextFieldValue) {
         val path = _state.value.openPath ?: return
         val old = _editorValue.value
         if (value.text == old.text) {
             _editorValue.value = value
+            dropSuggestionsWhenCaretMoved(value)
+            return
+        }
+        val language = CoderLanguage.fromPath(path)
+        val edit = singleEditKind(old, value)
+        val smart = if (autoCloseOn && edit != SingleEdit.None) CoderAutoClose.apply(old, value, language) else null
+        if (smart != null && smart.text == old.text) {
+            // Typing a closing bracket or quote that is already there only moves the caret.
+            _editorValue.value = smart
+            clearSuggestions()
             return
         }
         val change = describeChange(old.text, value.text)
         val newlineAt = newlineInsertionIndex(old.text, value) ?: if (change.isSingleNewline) change.start else -1
-        val applied = if (newlineAt >= 0) {
-            withAutoIndent(old.text, value, newlineAt, CoderLanguage.fromPath(path))
-        } else {
-            value
+        val applied = when {
+            smart != null -> smart
+            newlineAt >= 0 -> withAutoIndent(old.text, value, newlineAt, language)
+            else -> value
         }
         val kind = if (value.text.length < old.text.length) ChangeKind.Deleting else ChangeKind.Typing
         val now = SystemClock.elapsedRealtime()
@@ -226,6 +274,56 @@ class CoderWorkspaceViewModel(
         lastKind = kind
         _editorValue.value = applied
         afterEdit()
+        refreshSuggestions(edit, value, applied, language)
+    }
+
+    // ---- Suggestions -----------------------------------------------------------------------
+
+    /**
+     * Replaces the typed word with [s] as exactly one undo step and puts the caret where the suggestion says.
+     * Ignored when the caret has moved since the suggestions were made. Remembers the label among the last 20 accepted.
+     */
+    fun acceptSuggestion(s: Suggestion) {
+        val current = openEditorValue() ?: return
+        val caret = current.selection.start
+        val stale = !current.selection.collapsed || caret != suggestionCaret ||
+            suggestionStart < 0 || suggestionStart > caret || caret > current.text.length
+        if (stale) {
+            clearSuggestions()
+            return
+        }
+        replaceRangeWithCaret(suggestionStart, caret, s.insertText, s.caretOffset)
+        recentLabels.remove(s.label)
+        recentLabels.add(s.label)
+        while (recentLabels.size > MAX_RECENT_SUGGESTIONS) recentLabels.removeAt(0)
+        clearSuggestions()
+    }
+
+    private fun refreshSuggestions(edit: SingleEdit, typed: TextFieldValue, applied: TextFieldValue, language: CoderLanguage) {
+        val composing = typed.composition
+        val compositionOk = composing == null || (SUGGEST_WHILE_COMPOSING && composing.end == typed.selection.end)
+        if (!suggestionsOn || edit == SingleEdit.None || !compositionOk || !applied.selection.collapsed) {
+            clearSuggestions()
+            return
+        }
+        val result = CoderSuggestionEngine.suggestFor(applied, language, recentLabels)
+        if (result.items.isEmpty()) {
+            clearSuggestions()
+            return
+        }
+        suggestionStart = result.replaceStart
+        suggestionCaret = applied.selection.start
+        _suggestions.value = result.items
+    }
+
+    private fun dropSuggestionsWhenCaretMoved(value: TextFieldValue) {
+        if (_suggestions.value.isEmpty()) return
+        if (!value.selection.collapsed || value.selection.start != suggestionCaret) clearSuggestions()
+    }
+
+    private fun clearSuggestions() {
+        suggestionCaret = -1
+        if (_suggestions.value.isNotEmpty()) _suggestions.value = emptyList()
     }
 
     /** Inserts [text] at the cursor (after the selection, if any) as exactly one undo step. */
@@ -255,9 +353,15 @@ class CoderWorkspaceViewModel(
      * Ignored when no file is open or the range does not fit the current text.
      */
     fun replaceRange(start: Int, end: Int, text: String) {
+        replaceRangeWithCaret(start, end, text, text.length)
+    }
+
+    /** Like [replaceRange], but the caret ends [caretInText] characters into the inserted [text]. */
+    private fun replaceRangeWithCaret(start: Int, end: Int, text: String, caretInText: Int) {
         val old = openEditorValue() ?: return
         if (start < 0 || end < start || end > old.text.length) return
-        applyStep(old.text.substring(0, start) + text + old.text.substring(end), TextRange(start + text.length))
+        val caret = start + caretInText.coerceIn(0, text.length)
+        applyStep(old.text.substring(0, start) + text + old.text.substring(end), TextRange(caret))
     }
 
     /**
@@ -306,6 +410,7 @@ class CoderWorkspaceViewModel(
         if (_state.value.openPath == null) null else _editorValue.value
 
     private fun applyStep(newText: String, selection: TextRange) {
+        clearSuggestions()
         val old = _editorValue.value
         if (newText == old.text) {
             _editorValue.value = TextFieldValue(newText, selection)
@@ -319,6 +424,7 @@ class CoderWorkspaceViewModel(
     }
 
     private fun applyHistory(value: TextFieldValue) {
+        clearSuggestions()
         lastPushAt = 0L
         lastKind = ChangeKind.None
         _editorValue.value = value
@@ -540,4 +646,34 @@ private fun opensBlock(line: String, language: CoderLanguage): Boolean {
     val trimmed = line.trimEnd()
     if (trimmed.endsWith("{") || trimmed.endsWith("[") || trimmed.endsWith("(")) return true
     return (language == CoderLanguage.Python || language == CoderLanguage.Yaml) && trimmed.endsWith(":")
+}
+
+private enum class SingleEdit { None, Insert, Delete }
+
+/**
+ * Tells a plain keystroke from every other change. [SingleEdit.Insert] means [updated] is [old] plus exactly one
+ * character typed at the caret; [SingleEdit.Delete] means exactly one character before the caret was removed
+ * (Backspace). Nothing may be selected before or after. Paste, several characters, replacing a selection and
+ * every other change give [SingleEdit.None]. Whether the keyboard still has text composing is checked by the callers.
+ */
+private fun singleEditKind(old: TextFieldValue, updated: TextFieldValue): SingleEdit {
+    if (!old.selection.collapsed || !updated.selection.collapsed) return SingleEdit.None
+    val before = old.text
+    val after = updated.text
+    val caretBefore = old.selection.start
+    val caretAfter = updated.selection.start
+    if (caretBefore < 0 || caretBefore > before.length) return SingleEdit.None
+    if (after.length == before.length + 1) {
+        if (caretAfter != caretBefore + 1) return SingleEdit.None
+        if (!after.regionMatches(0, before, 0, caretBefore)) return SingleEdit.None
+        if (!after.regionMatches(caretBefore + 1, before, caretBefore, before.length - caretBefore)) return SingleEdit.None
+        return SingleEdit.Insert
+    }
+    if (after.length == before.length - 1) {
+        if (caretBefore < 1 || caretAfter != caretBefore - 1) return SingleEdit.None
+        if (!after.regionMatches(0, before, 0, caretAfter)) return SingleEdit.None
+        if (!after.regionMatches(caretAfter, before, caretBefore, before.length - caretBefore)) return SingleEdit.None
+        return SingleEdit.Delete
+    }
+    return SingleEdit.None
 }
