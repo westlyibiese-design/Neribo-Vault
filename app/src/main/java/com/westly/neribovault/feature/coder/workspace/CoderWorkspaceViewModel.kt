@@ -11,7 +11,11 @@ import com.westly.neribovault.feature.coder.CoderPrefs
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
 import com.westly.neribovault.feature.coder.editor.smart.CoderAutoClose
+import com.westly.neribovault.feature.coder.editor.smart.CoderFind
+import com.westly.neribovault.feature.coder.editor.smart.CoderIssue
+import com.westly.neribovault.feature.coder.editor.smart.CoderLinter
 import com.westly.neribovault.feature.coder.editor.smart.CoderSuggestionEngine
+import com.westly.neribovault.feature.coder.editor.smart.FindState
 import com.westly.neribovault.feature.coder.editor.smart.Suggestion
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderFileStore
@@ -61,6 +65,8 @@ private const val UNDO_PAUSE_MS = 800L
 private const val BIG_CHANGE_CHARS = 20
 private const val INDENT_UNIT = "  "
 private const val MAX_RECENT_SUGGESTIONS = 20
+private const val LINT_DELAY_MS = 600L
+private const val MAX_QUERY_CHARS = 200
 
 /**
  * Gboard and other keyboards keep the word being typed as "composing text". When this is true, suggestions
@@ -79,11 +85,13 @@ private const val MSG_LIMIT = "This project has reached its size or file limit."
 private const val MSG_FAILED = "Couldn't complete that. Please try again."
 private const val MSG_PREVIEW_NOT_STARTED = "Couldn't save, so the preview was not started."
 private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer than 60 characters."
+private const val MSG_TOO_MANY_MATCHES = "There are too many matches to replace at once. Search for something longer."
+private const val MSG_NOTHING_TO_REPLACE = "Nothing changed. The replacement is the same as the text."
 
 /**
  * State and actions of one project's workspace: the file list, the open file's text, undo and redo,
- * autosave, the file operations and the smart editor (suggestions and auto-close). The editor text is only
- * ever changed here, and everything that
+ * autosave, the file operations and the smart editor (suggestions, auto-close, mistake underlines and
+ * find and replace). The editor text is only ever changed here, and everything that
  * touches the disk runs on `Dispatchers.IO`.
  */
 class CoderWorkspaceViewModel(
@@ -123,6 +131,19 @@ class CoderWorkspaceViewModel(
     private var suggestionsOn = true
     private var autoCloseOn = true
 
+    private val _issues = MutableStateFlow<List<CoderIssue>>(emptyList())
+
+    /** The mistakes to underline in the open file. Checked 600 ms after the last change; empty when the switch is off. */
+    val issues: StateFlow<List<CoderIssue>> = _issues.asStateFlow()
+
+    private var lintJob: Job? = null
+    private var lintOn = true
+
+    private val _find = MutableStateFlow(FindState())
+
+    /** The find and replace bar: its texts, switches and the matches in the open file. */
+    val find: StateFlow<FindState> = _find.asStateFlow()
+
     init {
         viewModelScope.launch {
             prefs.suggestionsEnabled.collect { on ->
@@ -132,6 +153,12 @@ class CoderWorkspaceViewModel(
         }
         viewModelScope.launch {
             prefs.autoCloseEnabled.collect { on -> autoCloseOn = on }
+        }
+        viewModelScope.launch {
+            prefs.lintEnabled.collect { on ->
+                lintOn = on
+                if (on) scheduleLint() else clearIssues()
+            }
         }
         viewModelScope.launch {
             projects.observeById(projectId).collect { project ->
@@ -204,6 +231,8 @@ class CoderWorkspaceViewModel(
     private fun showFile(path: String, result: CoderReadResult.Text) {
         autosaveJob?.cancel()
         clearSuggestions()
+        clearFind()
+        clearIssues()
         lastSavedText = result.text
         usesCrlf = result.usesCrlf
         undoStack.clear()
@@ -213,11 +242,14 @@ class CoderWorkspaceViewModel(
         _state.update {
             it.copy(openPath = path, saveStatus = CoderSaveStatus.Saved, canUndo = false, canRedo = false)
         }
+        scheduleLint()
     }
 
     private fun resetEditor() {
         autosaveJob?.cancel()
         clearSuggestions()
+        clearFind()
+        clearIssues()
         undoStack.clear()
         lastSavedText = ""
         usesCrlf = false
@@ -274,6 +306,7 @@ class CoderWorkspaceViewModel(
         lastKind = kind
         _editorValue.value = applied
         afterEdit()
+        onTextChanged(old.text, applied.text)
         refreshSuggestions(edit, value, applied, language)
     }
 
@@ -421,14 +454,17 @@ class CoderWorkspaceViewModel(
         lastKind = ChangeKind.None
         _editorValue.value = TextFieldValue(newText, selection)
         afterEdit()
+        onTextChanged(old.text, newText)
     }
 
     private fun applyHistory(value: TextFieldValue) {
         clearSuggestions()
+        val oldText = _editorValue.value.text
         lastPushAt = 0L
         lastKind = ChangeKind.None
         _editorValue.value = value
         afterEdit()
+        if (oldText != value.text) onTextChanged(oldText, value.text)
     }
 
     private fun snapshot(value: TextFieldValue): TextFieldValue = TextFieldValue(value.text, value.selection)
@@ -442,6 +478,187 @@ class CoderWorkspaceViewModel(
             )
         }
         scheduleAutosave()
+    }
+
+    // ---- Mistake underlines ----------------------------------------------------------------
+
+    /** Called after every change of the open file's text: keeps the underlines in place, checks again later and refreshes the find matches. */
+    private fun onTextChanged(oldText: String, newText: String) {
+        val change = describeChange(oldText, newText)
+        shiftIssues(change.start, change.oldLength, change.newLength)
+        scheduleLint()
+        if (_find.value.open) recomputeMatches(select = false)
+    }
+
+    /** Moves the underlines that lie after the change, and drops the ones the change touched. */
+    private fun shiftIssues(changeStart: Int, oldLength: Int, newLength: Int) {
+        val current = _issues.value
+        if (current.isEmpty()) return
+        val delta = newLength - oldLength
+        val changeEnd = changeStart + oldLength
+        val kept = ArrayList<CoderIssue>(current.size)
+        for (issue in current) {
+            if (issue.end <= changeStart) {
+                kept.add(issue)
+            } else if (issue.start >= changeEnd) {
+                kept.add(if (delta == 0) issue else issue.copy(start = issue.start + delta, end = issue.end + delta))
+            }
+        }
+        _issues.value = kept
+    }
+
+    /** Checks the open file once the person has paused for 600 ms. Does nothing (and clears) when underlines are off or the file is too long. */
+    private fun scheduleLint() {
+        lintJob?.cancel()
+        val path = _state.value.openPath
+        val text = _editorValue.value.text
+        if (!lintOn || path == null || text.length > CoderLinter.MAX_CHARS) {
+            clearIssues()
+            return
+        }
+        val language = CoderLanguage.fromPath(path)
+        lintJob = viewModelScope.launch {
+            delay(LINT_DELAY_MS)
+            val found = withContext(Dispatchers.Default) { CoderLinter.lint(text, language) }
+            if (_state.value.openPath == path && _editorValue.value.text == text) _issues.value = found
+        }
+    }
+
+    private fun clearIssues() {
+        lintJob?.cancel()
+        if (_issues.value.isNotEmpty()) _issues.value = emptyList()
+    }
+
+    // ---- Find and replace ------------------------------------------------------------------
+
+    /** Opens the find bar. A search typed earlier in this file is still there. */
+    fun openFind() {
+        if (_state.value.openPath == null) return
+        _find.update { it.copy(open = true) }
+        recomputeMatches(select = false)
+    }
+
+    /** Closes the find bar and removes the match tints. The query is kept until another file opens. */
+    fun closeFind() {
+        _find.update { it.copy(open = false, matches = emptyList(), current = -1) }
+    }
+
+    /** Sets what to look for and moves to the nearest match. */
+    fun setQuery(query: String) {
+        _find.update { it.copy(query = query.take(MAX_QUERY_CHARS)) }
+        recomputeMatches(select = true)
+    }
+
+    fun setReplacement(replacement: String) {
+        _find.update { it.copy(replacement = replacement.take(MAX_QUERY_CHARS)) }
+    }
+
+    /** Switches between matching upper and lower case exactly and ignoring it. */
+    fun toggleCase() {
+        _find.update { it.copy(caseSensitive = !it.caseSensitive) }
+        recomputeMatches(select = true)
+    }
+
+    /** Switches whole-word matching on or off. */
+    fun toggleWholeWord() {
+        _find.update { it.copy(wholeWord = !it.wholeWord) }
+        recomputeMatches(select = true)
+    }
+
+    /** Goes to the next match, wrapping around at the end. */
+    fun next() {
+        step(forward = true)
+    }
+
+    /** Goes to the previous match, wrapping around at the start. */
+    fun previous() {
+        step(forward = false)
+    }
+
+    /** Replaces the current match as exactly one undo step, then moves to the next one. */
+    fun replaceCurrent() {
+        val state = _find.value
+        val range = state.matches.getOrNull(state.current) ?: return
+        val text = openEditorValue()?.text ?: return
+        val end = range.last + 1
+        if (range.first < 0 || end > text.length) return
+        if (text.substring(range.first, end) == state.replacement) {
+            step(forward = true)
+            return
+        }
+        replaceRange(range.first, end, state.replacement)
+        selectCurrentMatch()
+    }
+
+    /** Replaces every match as exactly one undo step. Not offered when the match list was cut at its limit. */
+    fun replaceAllMatches() {
+        val state = _find.value
+        if (state.matches.isEmpty()) return
+        if (state.matches.size >= CoderFind.MAX_MATCHES) {
+            postMessage(MSG_TOO_MANY_MATCHES)
+            return
+        }
+        val old = openEditorValue()?.text ?: return
+        val updated = CoderFind.replaceAll(old, state.matches, state.replacement)
+        if (updated == old) {
+            postMessage(MSG_NOTHING_TO_REPLACE)
+            return
+        }
+        val count = state.matches.size
+        applyReplaceAll(updated)
+        postMessage(if (count == 1) "Replaced 1 match" else "Replaced $count matches")
+    }
+
+    /** Puts [newText] in place of the whole file as exactly one undo step. The caret stays where it was, or at the end when the text got shorter. */
+    fun applyReplaceAll(newText: String) {
+        val old = openEditorValue() ?: return
+        applyStep(newText, TextRange(old.selection.min.coerceIn(0, newText.length)))
+    }
+
+    /** Finds the matches again for the current text and settings; with [select] the editor also moves to the nearest one. */
+    private fun recomputeMatches(select: Boolean) {
+        val state = _find.value
+        val value = openEditorValue()
+        if (!state.open || state.query.isEmpty() || value == null) {
+            _find.update { it.copy(matches = emptyList(), current = -1) }
+            return
+        }
+        val matches = CoderFind.findAll(value.text, state.query, state.caseSensitive, state.wholeWord)
+        val current = CoderFind.nextIndex(matches, value.selection.min, true)
+        _find.update { it.copy(matches = matches, current = current) }
+        if (select) selectCurrentMatch()
+    }
+
+    private fun step(forward: Boolean) {
+        val state = _find.value
+        val value = openEditorValue() ?: return
+        if (state.matches.isEmpty()) return
+        val range = state.matches.getOrNull(state.current)
+        val caret = if (range != null && value.selection.min == range.first && value.selection.max == range.last + 1) {
+            if (forward) range.last + 1 else range.first
+        } else if (forward) {
+            value.selection.max
+        } else {
+            value.selection.min
+        }
+        _find.update { it.copy(current = CoderFind.nextIndex(state.matches, caret, forward)) }
+        selectCurrentMatch()
+    }
+
+    /** Selects the current match so the editor shows it, and asks the editor to scroll there. The text is not changed. */
+    private fun selectCurrentMatch() {
+        val state = _find.value
+        val range = state.matches.getOrNull(state.current) ?: return
+        val value = openEditorValue() ?: return
+        val end = range.last + 1
+        if (range.first < 0 || end > value.text.length) return
+        clearSuggestions()
+        _editorValue.value = TextFieldValue(value.text, TextRange(range.first, end))
+        _find.update { it.copy(reveal = it.reveal + 1) }
+    }
+
+    private fun clearFind() {
+        _find.value = FindState()
     }
 
     // ---- Saving ----------------------------------------------------------------------------

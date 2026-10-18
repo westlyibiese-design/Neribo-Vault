@@ -37,8 +37,13 @@ import com.westly.neribovault.feature.coder.editor.CoderHighlighter
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
 import com.westly.neribovault.feature.coder.editor.smart.CoderAutoClose
+import com.westly.neribovault.feature.coder.editor.smart.CoderFind
+import com.westly.neribovault.feature.coder.editor.smart.CoderIssue
+import com.westly.neribovault.feature.coder.editor.smart.CoderLinter
 import com.westly.neribovault.feature.coder.editor.smart.CoderSnippets
 import com.westly.neribovault.feature.coder.editor.smart.CoderSuggestionEngine
+import com.westly.neribovault.feature.coder.editor.smart.FindState
+import com.westly.neribovault.feature.coder.editor.smart.IssueSeverity
 import com.westly.neribovault.feature.coder.editor.smart.SMART_CSS_PROPERTIES
 import com.westly.neribovault.feature.coder.editor.smart.SMART_HTML_TAGS
 import com.westly.neribovault.feature.coder.editor.smart.Suggestion
@@ -169,6 +174,8 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(smartSuggestionChecks())
         results.addAll(smartAutoCloseChecks())
         results.addAll(smartDictionaryChecks())
+        results.addAll(smartLintChecks())
+        results.addAll(smartFindChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -2363,6 +2370,212 @@ private fun smartDictionaryChecks(): List<CoderCheckResult> {
         },
         check("Dictionary: every snippet caret is inside its text", "0 to length") {
             snippets.all { it.caretOffset in 0..it.body.length && it.body.isNotEmpty() }
+        },
+    )
+}
+
+/** The issues as one line of text, for the detail of a failed check. */
+private fun smartDescribeIssues(issues: List<CoderIssue>): String =
+    if (issues.isEmpty()) "no issues" else issues.joinToString(" | ") { "${it.severity} ${it.start}-${it.end} ${it.message}" }
+
+private fun smartLintCheck(
+    name: String,
+    expectation: String,
+    text: String,
+    language: CoderLanguage,
+    accept: (List<CoderIssue>) -> Boolean,
+): CoderCheckResult =
+    check(name, expectation, actual = { smartDescribeIssues(CoderLinter.lint(text, language)) }) {
+        accept(CoderLinter.lint(text, language))
+    }
+
+private fun smartLineOf(text: String, index: Int): Int = text.substring(0, index).count { it == '\n' } + 1
+
+private fun smartLintChecks(): List<CoderCheckResult> {
+    val html = CoderLanguage.Html
+    val css = CoderLanguage.Css
+    val js = CoderLanguage.JavaScript
+    val json = CoderLanguage.Json
+    val page = "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>Hi</title>" +
+        "<style>body { color: red; }</style></head>\n<body>\n<ul><li>One</li><li>Two</li></ul>\n" +
+        "<img src=\"a.png\" alt=\"A picture\">\n<script>if (a < b) { x = \"</div>\"; }</script>\n" +
+        "<!-- <div> -->\n</body>\n</html>\n"
+    val validCss = "a { color: red; }\n@media (min-width: 600px) {\n  .b { margin: 0 auto }\n}\n/* { */\n" +
+        ".c { content: \"}\"; background: url(data:image/png;base64,AAA;BBB); }\n"
+    val validJs = "const a = [1, 2, (3 + 4)];\nfunction f(x) { return x / 2; }\nconst re = /[/(]\\)/g;\n" +
+        "const s = `a \${ {b: 1}.b } c`;\n// it's a \"comment\" (\n/* ( */\nconst t = 'it\\'s';\n"
+    val messy = listOf(
+        "<div><span></p></div>(" to html,
+        "a { b: c\n d: e }}\n{" to css,
+        "foo(['x\n}) `t\${" to js,
+        "{\"a\": [1, }" to json,
+    )
+    return listOf(
+        smartLintCheck("Lint: a correct HTML page has no issues", "no issues", page, html) { it.isEmpty() },
+        smartLintCheck("Lint: an unclosed div is reported", "one Error at 0", "<div><p>Hi</p>", html) { r ->
+            r.size == 1 && r[0].severity == IssueSeverity.Error && r[0].start == 0 && r[0].message.contains("<div> is never closed")
+        },
+        smartLintCheck("Lint: a closing tag with no opener is reported", "one Error at 11", "<div></div></div>", html) { r ->
+            r.size == 1 && r[0].start == 11 && r[0].message.contains("no opening <div>")
+        },
+        smartLintCheck("Lint: a closing tag that does not match is reported", "Expected </ul> but found </div>", "<ul><li>a</li></div></ul>", html) { r ->
+            r.size == 1 && r[0].message.startsWith("Expected </ul> but found </div>")
+        },
+        smartLintCheck("Lint: a tag left open inside another is reported", "<span> at 5", "<div><span></div>", html) { r ->
+            r.size == 1 && r[0].start == 5 && r[0].message.contains("<span> is never closed")
+        },
+        smartLintCheck("Lint: an image without alt gets a warning", "one Warning", "<img src=\"a.png\">", html) { r ->
+            r.size == 1 && r[0].severity == IssueSeverity.Warning && r[0].message.contains("alt text")
+        },
+        smartLintCheck("Lint: an image with alt (even empty) is fine", "no issues", "<img src=\"a.png\" alt=\"\"><IMG SRC=a.png ALT=x>", html) { it.isEmpty() },
+        smartLintCheck(
+            "Lint: script, style and comments are skipped",
+            "no issues",
+            "<script>var s = \"<div>\";</script><style>a:before{content:\"<b>\"}</style><!-- <i> -->",
+            html,
+        ) { it.isEmpty() },
+        smartLintCheck("Lint: void and self-closing tags need no closing", "no issues", "<br><hr><input type=\"text\"><svg><path d=\"M0 0\"/></svg><br/>", html) { it.isEmpty() },
+        smartLintCheck("Lint: tags HTML lets you leave open are not reported", "no issues", "<ul><li>One<li>Two</ul><p>Para", html) { it.isEmpty() },
+        smartLintCheck("Lint: tag names ignore upper and lower case", "no issues", "<DIV><P>x</p></div>", html) { it.isEmpty() },
+        smartLintCheck("Lint: an unfinished tag reports nothing", "no issues", "<div class=\"a", html) { it.isEmpty() },
+        smartLintCheck("Lint: correct CSS has no issues", "no issues", validCss, css) { it.isEmpty() },
+        smartLintCheck("Lint: a CSS block that is never closed", "one Error at 2", "a { color: red;", css) { r ->
+            r.size == 1 && r[0].start == 2 && r[0].message.contains("never closed")
+        },
+        smartLintCheck("Lint: a stray } in CSS", "one Error on the last }", "a { color: red; } }", css) { r ->
+            r.size == 1 && r[0].start == 18 && r[0].message.contains("no matching {")
+        },
+        smartLintCheck("Lint: a CSS line without ; before another declaration", "color: red underlined", "a {\n  color: red\n  margin: 0;\n}", css) { r ->
+            r.size == 1 && r[0].message == "Add a ; at the end of this line." && "a {\n  color: red\n  margin: 0;\n}".substring(r[0].start, r[0].end) == "color: red"
+        },
+        smartLintCheck("Lint: the last CSS declaration may leave out ;", "no issues", "a {\n  color: red;\n  margin: 0\n}", css) { it.isEmpty() },
+        smartLintCheck("Lint: a CSS value over two lines is fine", "no issues", "a {\n  font-family: Arial,\n    sans-serif;\n  margin: 0\n}", css) { it.isEmpty() },
+        smartLintCheck("Lint: correct JavaScript has no issues", "no issues", validJs, js) { it.isEmpty() },
+        smartLintCheck("Lint: a ( that is never closed", "one Error at 3", "foo(1, 2;", js) { r ->
+            r.size == 1 && r[0].start == 3 && r[0].message.contains("( is never closed")
+        },
+        smartLintCheck("Lint: a stray ) in JavaScript", "one Error at 5", "foo());", js) { r ->
+            r.size == 1 && r[0].start == 5 && r[0].message.contains("no matching (")
+        },
+        smartLintCheck("Lint: a ) that does not fit the [ before it", "one Error at 9", "foo([1, 2)", js) { r ->
+            r.size == 1 && r[0].start == 9 && r[0].message.contains("doesn't match the [")
+        },
+        smartLintCheck("Lint: a string not closed on its line", "one Error at 10", "const a = \"hello;\nconst b = 1;", js) { r ->
+            r.size == 1 && r[0].start == 10 && r[0].message.contains("isn't closed")
+        },
+        smartLintCheck("Lint: an apostrophe in page text is not a string", "no issues", "const x = <p>Don't stop</p>;", js) { it.isEmpty() },
+        smartLintCheck("Lint: apostrophes in comments and strings are fine", "no issues", "// don't\nconst a = \"it's\";\n/* don't */", js) { it.isEmpty() },
+        smartLintCheck("Lint: only the first bracket problem is reported", "one Error at 3", "foo(((", js) { r ->
+            r.size == 1 && r[0].start == 3
+        },
+        smartLintCheck("Lint: TypeScript follows the same rules", "one Error at 10", "function f(a: number { }", CoderLanguage.TypeScript) { r ->
+            r.size == 1 && r[0].start == 10
+        },
+        smartLintCheck("Lint: valid JSON has no issues", "no issues", "{\"a\": [1, 2, {\"b\": null}], \"c\": \"d\"}", json) { it.isEmpty() },
+        smartLintCheck("Lint: JSON with a missing comma", "one Error", "{\"a\": 1 \"b\": 2}", json) { r ->
+            r.size == 1 && r[0].severity == IssueSeverity.Error && r[0].message.startsWith("This isn't valid JSON:")
+        },
+        smartLintCheck("Lint: a JSON error is placed on its line", "line 3 or 4", "{\n  \"a\": 1,\n  \"b\": [1, 2\n}", json) { r ->
+            r.size == 1 && smartLineOf("{\n  \"a\": 1,\n  \"b\": [1, 2\n}", r[0].start) >= 3
+        },
+        smartLintCheck("Lint: an empty JSON file reports nothing", "no issues", "  \n", json) { it.isEmpty() },
+        smartLintCheck("Lint: at most 50 issues", "exactly 50", "<div>".repeat(60), html) { it.size == 50 },
+        smartLintCheck("Lint: Markdown and plain text have no rules", "no issues", "<div>(", CoderLanguage.Markdown) { it.isEmpty() },
+        smartLintCheck("Lint: a file over 100,000 characters is not checked", "no issues", "(" + " ".repeat(100_000), js) { it.isEmpty() },
+        check("Lint: 100,000-character files are finished quickly", "all three under 3 seconds in total") {
+            val htmlText = "<p class=\"a\">Hello <b>there</b></p>\n".repeat(3_000).take(100_000)
+            val jsText = "const a = (1 + [2]) / 3; // it's\n".repeat(3_000).take(100_000)
+            val cssText = ".a { color: red; margin: 0 }\n".repeat(4_000).take(100_000)
+            val started = System.nanoTime()
+            val sizes = CoderLinter.lint(htmlText, html).size + CoderLinter.lint(jsText, js).size + CoderLinter.lint(cssText, css).size
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            sizes >= 0 && elapsedMs < 3_000
+        },
+        check("Lint: every range fits the text", "start before end, end inside the text") {
+            messy.all { (text, language) ->
+                CoderLinter.lint(text, language).all { it.start >= 0 && it.start < it.end && it.end <= text.length }
+            }
+        },
+    )
+}
+
+private fun smartFindCheck(name: String, expected: String, actual: () -> String): CoderCheckResult =
+    check(name, expected, actual = actual) { actual() == expected }
+
+private fun smartRanges(ranges: List<IntRange>): String = ranges.joinToString(",") { "${it.first}..${it.last}" }
+
+private fun smartFindChecks(): List<CoderCheckResult> {
+    val sample = listOf(2..3, 8..9, 12..13)
+    return listOf(
+        smartFindCheck("Find: upper and lower case are ignored by default", "0..4,6..10,12..16") {
+            smartRanges(CoderFind.findAll("Hello hello HELLO", "hello", false, false))
+        },
+        smartFindCheck("Find: exact case finds only the exact word", "6..10") {
+            smartRanges(CoderFind.findAll("Hello hello HELLO", "hello", true, false))
+        },
+        smartFindCheck("Find: whole word skips parts of other words", "0..2,17..19") {
+            smartRanges(CoderFind.findAll("cat concat cat_x cat", "cat", false, true))
+        },
+        smartFindCheck("Find: exact case and whole word together", "4..6") {
+            smartRanges(CoderFind.findAll("Cat cat CAT", "cat", true, true))
+        },
+        smartFindCheck("Find: matches never overlap", "0..1,2..3") {
+            smartRanges(CoderFind.findAll("aaaa", "aa", true, false))
+        },
+        smartFindCheck("Find: an odd run gives one match", "0..1") {
+            smartRanges(CoderFind.findAll("aaa", "aa", true, false))
+        },
+        smartFindCheck("Find: whole word keeps looking after a refused match", "4..5") {
+            smartRanges(CoderFind.findAll("aaa aa", "aa", true, true))
+        },
+        smartFindCheck("Find: an empty query finds nothing", "") {
+            smartRanges(CoderFind.findAll("abc", "", false, false))
+        },
+        smartFindCheck("Find: a query longer than the text finds nothing", "") {
+            smartRanges(CoderFind.findAll("ab", "abc", false, false))
+        },
+        smartFindCheck("Find: at most 5,000 matches", "5000") {
+            CoderFind.findAll("a".repeat(6_000), "a", true, false).size.toString()
+        },
+        smartFindCheck("Find: an emoji is found as a whole", "1..2,4..5") {
+            smartRanges(CoderFind.findAll("x😀y😀", "😀", true, false))
+        },
+        smartFindCheck("Find: a 300 KB text is searched quickly", "found in under a second") {
+            val text = "lorem ipsum dolor ".repeat(17_000) + "needle"
+            val started = System.nanoTime()
+            val found = CoderFind.findAll(text, "NEEDLE", false, true)
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000
+            if (found.size == 1 && elapsedMs < 1_000) "found in under a second" else "${found.size} matches in $elapsedMs ms"
+        },
+        smartFindCheck("Find: Replace all swaps every match", "xyz-b-xyz") {
+            CoderFind.replaceAll("a-b-a", CoderFind.findAll("a-b-a", "a", true, false), "xyz")
+        },
+        smartFindCheck("Find: Replace all with nothing removes the matches", "-b-") {
+            CoderFind.replaceAll("a-b-a", CoderFind.findAll("a-b-a", "a", true, false), "")
+        },
+        smartFindCheck("Find: Replace all with no matches changes nothing", "abc") {
+            CoderFind.replaceAll("abc", emptyList(), "X")
+        },
+        smartFindCheck("Find: Replace all skips overlapping and outside ranges", "Xcabc") {
+            CoderFind.replaceAll("abcabc", listOf(0..1, 1..2, 40..41), "X")
+        },
+        smartFindCheck("Find: after Replace all the old word is gone", "") {
+            val text = "one two one"
+            val updated = CoderFind.replaceAll(text, CoderFind.findAll(text, "one", false, true), "Z")
+            smartRanges(CoderFind.findAll(updated, "one", false, true))
+        },
+        smartFindCheck("Find: next goes to the first match at or after the caret", "0,1,2,0") {
+            listOf(0, 3, 9, 13).joinToString(",") { CoderFind.nextIndex(sample, it, true).toString() }
+        },
+        smartFindCheck("Find: previous goes to the last match before the caret", "0,1,2,2") {
+            listOf(8, 12, 2, 20).joinToString(",") { CoderFind.nextIndex(sample, it, false).toString() }
+        },
+        smartFindCheck("Find: no matches gives -1 both ways", "-1,-1") {
+            CoderFind.nextIndex(emptyList(), 5, true).toString() + "," + CoderFind.nextIndex(emptyList(), 5, false)
+        },
+        check("Find: a new search state is closed and empty", "closed, no matches, no current") {
+            val state = FindState()
+            !state.open && state.query.isEmpty() && state.matches.isEmpty() && state.current == -1
         },
     )
 }

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Redo
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Undo
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
@@ -34,6 +35,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.style.TextOverflow
@@ -60,6 +62,7 @@ import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
 import com.westly.neribovault.feature.coder.editor.smart.EditorSettingsSheet
+import com.westly.neribovault.feature.coder.editor.smart.FindReplaceBar
 import com.westly.neribovault.feature.coder.editor.smart.SuggestionStrip
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
@@ -108,6 +111,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val linkState by linkVm.linkState.collectAsStateWithLifecycle()
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
     val suggestions by vm.suggestions.collectAsStateWithLifecycle()
+    val issues by vm.issues.collectAsStateWithLifecycle()
+    val find by vm.find.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
@@ -127,6 +132,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     var aiSnapshot by remember { mutableStateOf<AiSelectionSnapshot?>(null) }
     var showLinkSheet by rememberSaveable { mutableStateOf(false) }
     var showEditorSettings by rememberSaveable { mutableStateOf(false) }
+    var findFieldFocused by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
         CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
@@ -174,6 +180,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val previewEntry = state.previewEntry
     // While the preview is showing it handles Back itself (page history first, then closing).
     BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.closeFile() }
+    // The find bar closes first; this is declared after the handler above so that it is asked before it.
+    BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen && find.open) { vm.closeFind() }
+    LaunchedEffect(find.open) { if (!find.open) findFieldFocused = false }
     val openAiHelp: () -> Unit = {
         aiSnapshot = aiSelectionSnapshotOf(vm.state.value.openPath, vm.editorValue.value)
         aiOpen = true
@@ -227,6 +236,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val existingPaths = remember(state.entries) { state.entries.map { it.path }.toSet() }
     val project = state.project
     val canBrowse = !state.isLoading && project != null
+    // On a narrow phone the top bar has no room for one more button, so Find moves into the menu.
+    val findInTopBar = LocalConfiguration.current.screenWidthDp >= FIND_IN_TOP_BAR_MIN_WIDTH_DP
 
     // Run shows the open file when it is a page, Markdown, SVG or JSON; otherwise the project's index.html.
     val runPreview: () -> Unit = {
@@ -260,7 +271,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             NeriboTopBar(
                 title = project?.name ?: "Coder",
                 subtitle = openPath,
-                onBack = { if (openPath != null) vm.closeFile() else onBack() },
+                onBack = {
+                    if (openPath != null && find.open) vm.closeFind() else if (openPath != null) vm.closeFile() else onBack()
+                },
                 actions = {
                     if (openPath != null) {
                         EditorActions(
@@ -271,9 +284,15 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                             onRedo = { vm.redo() },
                             onRetry = { scope.launch { vm.saveNow() } },
                         )
+                        if (findInTopBar) {
+                            FindAction(isOpen = find.open, onClick = { if (find.open) vm.closeFind() else vm.openFind() })
+                        }
                         AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
-                        OverflowMenu(actions = listOf(MenuAction("Editor settings", { showEditorSettings = true })))
+                        OverflowMenu(
+                            actions = (if (findInTopBar) emptyList() else listOf(MenuAction("Find", { vm.openFind() }))) +
+                                listOf(MenuAction("Editor settings", { showEditorSettings = true })),
+                        )
                     } else if (canBrowse) {
                         AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
@@ -321,6 +340,11 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             )
             openPath != null -> {
                 val language = remember(openPath) { CoderLanguage.fromPath(openPath) }
+                // The explanation of the underlined mistake the caret is on; it goes away when the caret moves off.
+                val caret = editorValue.selection
+                val issueMessage = remember(issues, caret) {
+                    if (!caret.collapsed) null else issues.firstOrNull { caret.start >= it.start && caret.start <= it.end }?.message
+                }
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -328,18 +352,41 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                         .consumeWindowInsets(padding)
                         .imePadding(),
                 ) {
+                    if (find.open) {
+                        FindReplaceBar(
+                            state = find,
+                            onQueryChange = { vm.setQuery(it) },
+                            onReplacementChange = { vm.setReplacement(it) },
+                            onToggleCase = { vm.toggleCase() },
+                            onToggleWholeWord = { vm.toggleWholeWord() },
+                            onPrevious = { vm.previous() },
+                            onNext = { vm.next() },
+                            onReplace = { vm.replaceCurrent() },
+                            onReplaceAll = { vm.replaceAllMatches() },
+                            onClose = { vm.closeFind() },
+                            onFieldFocusChange = { findFieldFocused = it },
+                        )
+                    }
                     CoderEditorPanel(
                         value = editorValue,
                         onValueChange = { vm.onEditorChange(it) },
                         language = language,
                         modifier = Modifier.weight(1f).fillMaxWidth(),
+                        matches = find.matches,
+                        currentMatch = find.current,
+                        issues = issues,
+                        revealTick = find.reveal,
                     )
-                    SuggestionStrip(
-                        suggestions = suggestions,
-                        issueMessage = null,
-                        onAccept = { vm.acceptSuggestion(it) },
-                    )
-                    ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
+                    // While a find box has the keyboard the strip and the extra keys are hidden: they would type
+                    // into the file, not into the box, and the editor needs the room.
+                    if (!findFieldFocused) {
+                        SuggestionStrip(
+                            suggestions = suggestions,
+                            issueMessage = issueMessage,
+                            onAccept = { vm.acceptSuggestion(it) },
+                        )
+                        ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
+                    }
                 }
             }
             else -> Column(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -488,6 +535,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
 }
 
 private const val RUN_INDEX = "index.html"
+private const val FIND_IN_TOP_BAR_MIN_WIDTH_DP = 400
 private const val MSG_NOTHING_TO_RUN = "Add an index.html file to preview this project."
 private val PREVIEWABLE_EXTENSIONS = setOf("html", "htm", "md", "markdown", "svg", "json")
 
@@ -559,6 +607,17 @@ private fun RunAction(onClick: () -> Unit) {
         contentDescription = "Run",
         onClick = onClick,
         tint = MaterialTheme.colorScheme.primary,
+    )
+}
+
+/** The Find button in the top bar; it shows in the accent color while the find bar is open. */
+@Composable
+private fun FindAction(isOpen: Boolean, onClick: () -> Unit) {
+    NeriboIconButton(
+        icon = Icons.Outlined.Search,
+        contentDescription = "Find",
+        onClick = onClick,
+        tint = if (isOpen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 
