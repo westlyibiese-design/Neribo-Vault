@@ -28,19 +28,40 @@ import com.westly.neribovault.core.design.NeriboTheme
 import kotlinx.coroutines.launch
 
 /**
- * A small first-time tip. It shows [text] until the person taps Got it, then never again (the choice is
- * kept by CoderPrefs under [id]). While the saved choice is still loading it draws nothing, so the screen
- * does not flicker or jump.
+ * A small tip card. With [onDismiss] it only draws [text] and a Got it button that calls [onDismiss]; the
+ * caller decides what dismissing means (the tip host in `feature/coder/guidance` does). Without [onDismiss] it
+ * manages itself as before: it shows [text] until the person taps Got it, then never again (the choice is
+ * kept by CoderPrefs under [id]), and while the saved choice is still loading it draws nothing.
  */
 @Composable
-fun CoderHintCard(id: String, text: String, modifier: Modifier = Modifier) {
+fun CoderHintCard(id: String, text: String, modifier: Modifier = Modifier, onDismiss: (() -> Unit)? = null) {
+    if (onDismiss != null) {
+        HintSurface(text = text, onGotIt = onDismiss, modifier = modifier)
+    } else {
+        SelfManagedHint(id = id, text = text, modifier = modifier)
+    }
+}
+
+@Composable
+private fun SelfManagedHint(id: String, text: String, modifier: Modifier) {
     val context = LocalContext.current
     val prefs = remember(context) { (context.applicationContext as NeriboApp).container.coderPrefs }
     val seen by remember(prefs, id) { prefs.hintSeen(id) }.collectAsStateWithLifecycle<Boolean?>(initialValue = null)
     var dismissed by remember(id) { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     if (seen != false || dismissed) return
+    HintSurface(
+        text = text,
+        onGotIt = {
+            dismissed = true
+            scope.launch { prefs.markHintSeen(id) }
+        },
+        modifier = modifier,
+    )
+}
 
+@Composable
+private fun HintSurface(text: String, onGotIt: () -> Unit, modifier: Modifier) {
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
     Surface(
@@ -65,10 +86,7 @@ fun CoderHintCard(id: String, text: String, modifier: Modifier = Modifier) {
                 modifier = Modifier.weight(1f).padding(horizontal = spacing.sm),
             )
             TextButton(
-                onClick = {
-                    dismissed = true
-                    scope.launch { prefs.markHintSeen(id) }
-                },
+                onClick = onGotIt,
                 modifier = Modifier.heightIn(min = 48.dp),
             ) {
                 Text(text = "Got it", style = MaterialTheme.typography.labelLarge, color = colors.primary)

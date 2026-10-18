@@ -9,6 +9,7 @@ import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
 import com.westly.neribovault.feature.coder.ai.CoderAiSettingsScreen
 import com.westly.neribovault.feature.coder.github.CoderGitHubScreen
+import com.westly.neribovault.feature.coder.guidance.CoderHelpScreen
 import com.westly.neribovault.feature.coder.home.CoderHomeScreen
 import com.westly.neribovault.feature.coder.trash.CoderTrashScreen
 import com.westly.neribovault.feature.coder.workspace.CoderWorkspaceScreen
@@ -25,6 +26,7 @@ object CoderRoutes {
     const val PROJECT = "coder/project/{projectId}"
     const val TRASH = "coder/trash"
     const val AI_SETTINGS = "coder/ai"
+    const val HELP = "coder/help"
     const val GITHUB = "coder/github/{projectId}"
     const val ARG_PROJECT_ID = "projectId"
 
@@ -47,6 +49,9 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
                 },
                 onOpenAiSettings = {
                     navController.navigate(CoderRoutes.AI_SETTINGS) { launchSingleTop = true }
+                },
+                onOpenHelp = {
+                    navController.navigate(CoderRoutes.HELP) { launchSingleTop = true }
                 },
             )
         }
@@ -86,6 +91,11 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
     composable(CoderRoutes.AI_SETTINGS) {
         VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
             CoderAiSettingsScreen(onBack = { navController.popBackStack() })
+        }
+    }
+    composable(CoderRoutes.HELP) {
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            CoderHelpScreen(onBack = { navController.popBackStack() })
         }
     }
 }

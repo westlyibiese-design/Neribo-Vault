@@ -61,6 +61,7 @@ import com.westly.neribovault.core.ui.components.NeriboSearchField
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.StatusBadge
+import com.westly.neribovault.feature.coder.guidance.WhatIsThis
 
 /** The most characters the key field accepts; a real key is far shorter, the rest allows for pasted spaces. */
 private const val MAX_TYPED_KEY = 2000
@@ -317,6 +318,7 @@ private fun KeySheet(
                 style = ButtonStyle.Secondary,
                 leadingIcon = Icons.Outlined.Link,
             )
+            WhatIsThis(termId = "api-key")
             NeriboTextField(
                 value = key,
                 onValueChange = { key = it.take(MAX_TYPED_KEY) },

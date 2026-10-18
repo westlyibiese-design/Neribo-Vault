@@ -99,6 +99,9 @@ private const val MAX_RECENT_SUGGESTIONS = 20
 private const val LINT_DELAY_MS = 600L
 private const val MAX_QUERY_CHARS = 200
 
+/** The most characters one change may add and still count as typing (a keyboard word completion); more is a paste. */
+private const val MAX_TYPED_CHUNK = 12
+
 /**
  * Gboard and other keyboards keep the word being typed as "composing text". When this is true, suggestions
  * still follow such typing (they never change the text). Auto-close never acts while text is composing.
@@ -167,6 +170,19 @@ class CoderWorkspaceViewModel(
 
     private var lintJob: Job? = null
     private var lintOn = true
+
+    /**
+     * When the open file last changed, on the `SystemClock.elapsedRealtime` clock; 0 until the first change.
+     * The tip host reads it to stay quiet while the person types. It is not screen state: nothing redraws when it changes.
+     */
+    @Volatile
+    var lastTypedAtMillis: Long = 0L
+        private set
+
+    /** How many characters were typed since this screen opened (keystrokes and short completions, never a paste). Read by the tip host. */
+    @Volatile
+    var typedCharCount: Int = 0
+        private set
 
     private val _find = MutableStateFlow(FindState())
 
@@ -492,6 +508,8 @@ class CoderWorkspaceViewModel(
             return
         }
         val change = describeChange(old.text, value.text)
+        val addedChars = change.newLength - change.oldLength
+        if (addedChars in 1..MAX_TYPED_CHUNK) typedCharCount += addedChars
         val newlineAt = newlineInsertionIndex(old.text, value) ?: if (change.isSingleNewline) change.start else -1
         val applied = when {
             smart != null -> smart
@@ -673,6 +691,7 @@ class CoderWorkspaceViewModel(
 
     /** Called after every change of the open file's text: keeps the underlines in place, checks again later and refreshes the find matches. */
     private fun onTextChanged(oldText: String, newText: String) {
+        lastTypedAtMillis = SystemClock.elapsedRealtime()
         val change = describeChange(oldText, newText)
         shiftIssues(change.start, change.oldLength, change.newLength)
         scheduleLint()

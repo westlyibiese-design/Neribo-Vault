@@ -21,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Archive
+import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
@@ -68,10 +69,16 @@ import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.util.formatRelative
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.feature.coder.CoderCheckResult
+import com.westly.neribovault.feature.coder.GuidanceMode
 import com.westly.neribovault.feature.coder.VAULT_ID
 import com.westly.neribovault.feature.coder.VAULT_NAME
 import com.westly.neribovault.feature.coder.files.CoderLimits
-import com.westly.neribovault.feature.coder.ui.CoderHintCard
+import com.westly.neribovault.feature.coder.guidance.CoderTipEngine
+import com.westly.neribovault.feature.coder.guidance.CoderTipHost
+import com.westly.neribovault.feature.coder.guidance.CoderWelcomeCard
+import com.westly.neribovault.feature.coder.guidance.GuidanceSheet
+import com.westly.neribovault.feature.coder.guidance.TipContext
+import com.westly.neribovault.feature.coder.guidance.TipScreen
 import com.westly.neribovault.feature.coder.workspace.NameEntryDialog
 import com.westly.neribovault.feature.coder.zip.CoderImportReport
 import com.westly.neribovault.feature.coder.zip.CoderImportResult
@@ -91,6 +98,7 @@ fun CoderHomeScreen(
     onOpenProject: (String) -> Unit,
     onOpenTrash: () -> Unit,
     onOpenAiSettings: () -> Unit,
+    onOpenHelp: () -> Unit,
 ) {
     val context = LocalContext.current
     val vm = neriboViewModel { c -> CoderHomeViewModel(c.coderProjectsRepository) }
@@ -101,7 +109,18 @@ fun CoderHomeScreen(
     var showNewDialog by rememberSaveable { mutableStateOf(false) }
     var renameId by rememberSaveable { mutableStateOf<String?>(null) }
     var showLockSheet by rememberSaveable { mutableStateOf(false) }
+    var showGuidanceSheet by rememberSaveable { mutableStateOf(false) }
+    var welcomeDismissed by rememberSaveable { mutableStateOf(false) }
     val prefsStore = remember(context) { (context.applicationContext as NeriboApp).container.coderPrefs }
+    val guidanceMode by prefsStore.guidanceMode.collectAsStateWithLifecycle<GuidanceMode?>(initialValue = null)
+    val welcomeSeen by prefsStore.welcomeSeen.collectAsStateWithLifecycle<Boolean?>(initialValue = null)
+    val currentMode = guidanceMode
+    val currentWelcomeSeen = welcomeSeen
+    // The welcome card shows once, for a Beginner with no project yet; nothing shows until the saved choices are read.
+    val welcomeVisible = !state.isLoading && !welcomeDismissed && currentMode != null && currentWelcomeSeen != null &&
+        CoderTipEngine.showWelcome(currentMode, currentWelcomeSeen, state.projects.size)
+    // "Show tips again" clears the saved flag; the card may then come back in this same visit.
+    LaunchedEffect(currentWelcomeSeen) { if (currentWelcomeSeen == false) welcomeDismissed = false }
 
     val importer = remember(context) {
         val container = (context.applicationContext as NeriboApp).container
@@ -154,7 +173,8 @@ fun CoderHomeScreen(
         add(MenuAction(label = "AI settings", onClick = onOpenAiSettings, icon = Icons.Outlined.Settings))
         add(MenuAction(label = "Recently deleted", onClick = onOpenTrash, icon = Icons.Outlined.History))
         add(MenuAction(label = "Vault lock", onClick = { showLockSheet = true }, icon = Icons.Outlined.Lock))
-        add(MenuAction(label = "Show tips again", onClick = { scope.launch { prefsStore.resetHints() } }, icon = Icons.Outlined.Info))
+        add(MenuAction(label = "Guidance", onClick = { showGuidanceSheet = true }, icon = Icons.Outlined.Info))
+        add(MenuAction(label = "Help", onClick = onOpenHelp, icon = Icons.Outlined.Book))
         if (BuildConfig.DEBUG) {
             add(MenuAction(label = "Run engine self-test", onClick = { vm.runSelfTest(context) }))
         }
@@ -174,11 +194,31 @@ fun CoderHomeScreen(
         snackbarHostState = snackbarHostState,
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            CoderHintCard(
-                id = "home",
-                text = "Start with a template. Tap New project, pick one, then tap Run to see it.",
+            CoderTipHost(
+                screen = TipScreen.Home,
+                context = TipContext(
+                    screen = TipScreen.Home,
+                    projectListShown = !state.isLoading && state.projects.isNotEmpty(),
+                    welcomeVisible = welcomeVisible,
+                    busy = showNewDialog || renameId != null || showLockSheet || showGuidanceSheet || importing ||
+                        importedId != null || importError != null || state.selfTest != null,
+                ),
                 modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
             )
+            if (welcomeVisible) {
+                CoderWelcomeCard(
+                    onNewProject = {
+                        welcomeDismissed = true
+                        scope.launch { prefsStore.markWelcomeSeen() }
+                        showNewDialog = true
+                    },
+                    onSkip = {
+                        welcomeDismissed = true
+                        scope.launch { prefsStore.markWelcomeSeen() }
+                    },
+                    modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
+                )
+            }
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 state.isLoading -> LoadingState()
@@ -258,6 +298,10 @@ fun CoderHomeScreen(
             vaultName = VAULT_NAME,
             onDismiss = { showLockSheet = false },
         )
+    }
+
+    if (showGuidanceSheet) {
+        GuidanceSheet(onDismiss = { showGuidanceSheet = false })
     }
 
     if (importing) {

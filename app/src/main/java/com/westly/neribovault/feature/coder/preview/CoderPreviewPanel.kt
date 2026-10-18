@@ -74,7 +74,9 @@ import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
-import com.westly.neribovault.feature.coder.ui.CoderHintCard
+import com.westly.neribovault.feature.coder.guidance.CoderTipHost
+import com.westly.neribovault.feature.coder.guidance.TipContext
+import com.westly.neribovault.feature.coder.guidance.TipScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -244,9 +246,13 @@ private fun PreviewContent(
                 .consumeWindowInsets(padding)
                 .imePadding(),
         ) {
-            CoderHintCard(
-                id = "preview",
-                text = "Something not working? Tap the console icon to see messages and errors.",
+            CoderTipHost(
+                screen = TipScreen.Preview,
+                context = TipContext(
+                    screen = TipScreen.Preview,
+                    previewLoaded = !loading,
+                    busy = loading || pendingDialog != null || pendingLink != null || showClearConfirm || showConsole,
+                ),
                 modifier = Modifier.padding(horizontal = NeriboTheme.spacing.md, vertical = NeriboTheme.spacing.xs),
             )
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {

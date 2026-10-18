@@ -15,6 +15,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
@@ -24,6 +25,7 @@ import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.ui.components.ButtonStyle
 import com.westly.neribovault.core.ui.components.NeriboBottomSheet
 import com.westly.neribovault.core.ui.components.NeriboButton
+import com.westly.neribovault.feature.coder.guidance.WhatIsThis
 
 private val CONSOLE_FONT_SIZE = 12.sp
 private val CONSOLE_LINE_HEIGHT = 17.sp
@@ -46,11 +48,15 @@ fun CoderConsolePanel(
         if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     NeriboBottomSheet(onDismiss = onClose) {
-        Text(
-            text = "Console",
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Console",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            WhatIsThis(termId = "console")
+        }
         Spacer(modifier = Modifier.height(spacing.sm))
         if (messages.isEmpty()) {
             Text(

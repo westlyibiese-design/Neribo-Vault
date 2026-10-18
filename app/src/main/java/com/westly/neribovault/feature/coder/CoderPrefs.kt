@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -17,8 +18,12 @@ import java.io.IOException
 /** The one place this DataStore name is declared. It is not the app's settings file and it is not backed up. */
 private val Context.coderPrefsDataStore: DataStore<Preferences> by preferencesDataStore(name = "neribo_coder_prefs")
 
+/** How much help Coder gives. [Beginner] (the default) shows quiet tips and explanations; [Pro] shows none. */
+enum class GuidanceMode { Beginner, Pro }
+
 /**
- * Small Coder settings kept on the phone: which first-time tips were already seen, for which Coder
+ * Small Coder settings kept on the phone: which first-time tips were already seen, whether the welcome card
+ * was seen, the Beginner or Pro choice and the tips switch, for which Coder
  * projects the person allowed the AI to use the notes of the linked Developer project, and the three editor
  * switches (suggestions, auto-close, mistake underlines; all on by default). Holds no secrets
  * and no file text. A failed read counts as "nothing saved yet"; a failed write is ignored, so the
@@ -31,6 +36,9 @@ class CoderPrefs(context: Context) {
     private val suggestionsKey = booleanPreferencesKey("editor_suggestions")
     private val autoCloseKey = booleanPreferencesKey("editor_auto_close")
     private val lintKey = booleanPreferencesKey("editor_lint")
+    private val modeKey = stringPreferencesKey("guidance_mode")
+    private val tipsKey = booleanPreferencesKey("tips_enabled")
+    private val welcomeKey = booleanPreferencesKey("welcome_seen")
 
     private val data: Flow<Preferences> = store.data.catch { e ->
         if (e is IOException) emit(emptyPreferences()) else throw e
@@ -49,13 +57,49 @@ class CoderPrefs(context: Context) {
         }
     }
 
-    /** Forgets every seen tip, so all of them are shown again. */
+    /** Every tip id that was seen so far. */
+    val hintsSeen: Flow<Set<String>> = data.map { prefs -> prefs[hintsKey] ?: emptySet() }.distinctUntilChanged()
+
+    /** Forgets every seen tip and the seen welcome card, so all of them are shown again. */
     suspend fun resetHints() {
         try {
-            store.edit { prefs -> prefs.remove(hintsKey) }
+            store.edit { prefs ->
+                prefs.remove(hintsKey)
+                prefs.remove(welcomeKey)
+            }
         } catch (e: IOException) {
             return
         }
+    }
+
+    /** Beginner (the default) or Pro. An unknown saved value counts as Beginner. */
+    val guidanceMode: Flow<GuidanceMode> = data.map { prefs ->
+        if (prefs[modeKey] == GuidanceMode.Pro.name) GuidanceMode.Pro else GuidanceMode.Beginner
+    }.distinctUntilChanged()
+
+    /** Chooses Beginner or Pro. */
+    suspend fun setGuidanceMode(mode: GuidanceMode) {
+        try {
+            store.edit { prefs -> prefs[modeKey] = mode.name }
+        } catch (e: IOException) {
+            return
+        }
+    }
+
+    /** True while tips may appear. On by default. */
+    val tipsEnabled: Flow<Boolean> = data.map { prefs -> prefs[tipsKey] ?: true }.distinctUntilChanged()
+
+    /** Turns tips on or off. */
+    suspend fun setTipsEnabled(enabled: Boolean) {
+        setFlag(tipsKey, enabled)
+    }
+
+    /** True once the welcome card was shown and dismissed or skipped. */
+    val welcomeSeen: Flow<Boolean> = data.map { prefs -> prefs[welcomeKey] ?: false }.distinctUntilChanged()
+
+    /** Remembers that the welcome card was dealt with, so it does not come back. */
+    suspend fun markWelcomeSeen() {
+        setFlag(welcomeKey, true)
     }
 
     /** True when the AI may use the notes of the Developer project linked to the Coder project [coderProjectId]. Off by default. */

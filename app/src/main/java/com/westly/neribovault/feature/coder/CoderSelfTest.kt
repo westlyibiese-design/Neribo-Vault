@@ -62,6 +62,14 @@ import com.westly.neribovault.feature.coder.github.CoderPushPlanner
 import com.westly.neribovault.feature.coder.github.CoderSecretScanner
 import com.westly.neribovault.feature.coder.github.LocalFile
 import com.westly.neribovault.feature.coder.github.RemoteEntry
+import com.westly.neribovault.feature.coder.guidance.CoderGlossary
+import com.westly.neribovault.feature.coder.guidance.CoderGuides
+import com.westly.neribovault.feature.coder.guidance.CoderTipEngine
+import com.westly.neribovault.feature.coder.guidance.CoderTips
+import com.westly.neribovault.feature.coder.guidance.TipContext
+import com.westly.neribovault.feature.coder.guidance.TipEnd
+import com.westly.neribovault.feature.coder.guidance.TipScreen
+import com.westly.neribovault.feature.coder.guidance.TipState
 import com.westly.neribovault.feature.coder.github.TreeEntryInput
 import com.westly.neribovault.feature.coder.github.cleanGitHubToken
 import com.westly.neribovault.feature.coder.github.isValidRepoName
@@ -184,6 +192,8 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(smartLintChecks())
         results.addAll(smartFindChecks())
         results.addAll(tabLogicChecks())
+        results.addAll(tipEngineChecks())
+        results.addAll(guidanceDataChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -2778,3 +2788,214 @@ private fun tabLogicChecks(): List<CoderCheckResult> {
         },
     )
 }
+
+// ---- Quiet beginner guidance (C12) -----------------------------------------------------------
+
+private const val TIP_NOW = 1_000_000L
+
+private fun tipState(
+    mode: GuidanceMode = GuidanceMode.Beginner,
+    enabled: Boolean = true,
+    seen: Set<String> = emptySet(),
+    visible: Boolean = false,
+    shown: Int = 0,
+    last: Long? = null,
+) = TipState(mode, enabled, seen, visible, shown, last)
+
+private fun tipId(context: TipContext, state: TipState = tipState()): String =
+    CoderTipEngine.next(context, state)?.id ?: "none"
+
+private fun tipCheck(name: String, expected: String, actual: () -> String): CoderCheckResult =
+    check(name, expected, { actual() }) { actual() == expected }
+
+private fun tipEngineChecks(): List<CoderCheckResult> {
+    val home = TipContext(screen = TipScreen.Home, nowMillis = TIP_NOW, projectListShown = true)
+    val editor = TipContext(screen = TipScreen.Editor, nowMillis = TIP_NOW, fileOpen = true, htmlFileOpen = true)
+    return listOf(
+        tipCheck("Tips: a fitting tip is shown to a Beginner", "home") { tipId(home) },
+        tipCheck("Tips: Pro mode shows nothing", "none") { tipId(home, tipState(mode = GuidanceMode.Pro)) },
+        tipCheck("Tips: the tips switch off shows nothing", "none") { tipId(home, tipState(enabled = false)) },
+        tipCheck("Tips: a tip that was seen is not shown again", "none") { tipId(home, tipState(seen = setOf("home"))) },
+        tipCheck("Tips: a tip is shown only on its own screen", "workspace") {
+            tipId(TipContext(screen = TipScreen.Files, nowMillis = TIP_NOW, fileListShown = true, projectListShown = true))
+        },
+        tipCheck("Tips: a tip whose trigger is false is not shown", "none") { tipId(home.copy(projectListShown = false)) },
+        tipCheck("Tips: nothing while another tip is visible", "none") { tipId(home, tipState(visible = true)) },
+        tipCheck("Tips: nothing while the welcome card is visible", "none") { tipId(home.copy(welcomeVisible = true)) },
+        tipCheck("Tips: nothing 1 second after typing", "none") { tipId(home.copy(lastTypedAtMillis = TIP_NOW - 1_000L)) },
+        tipCheck("Tips: nothing 2.999 seconds after typing", "none") { tipId(home.copy(lastTypedAtMillis = TIP_NOW - 2_999L)) },
+        tipCheck("Tips: allowed exactly 3 seconds after typing", "home") { tipId(home.copy(lastTypedAtMillis = TIP_NOW - 3_000L)) },
+        tipCheck("Tips: allowed when nothing was typed yet", "home") { tipId(home.copy(lastTypedAtMillis = 0L)) },
+        tipCheck("Tips: nothing while the keyboard is visible", "none") { tipId(home.copy(keyboardVisible = true)) },
+        tipCheck("Tips: nothing while the screen is busy", "none") { tipId(home.copy(busy = true)) },
+        tipCheck("Tips: the session limit of 3 stops a fourth tip", "none") { tipId(home, tipState(shown = 3, last = TIP_NOW - 500_000L)) },
+        tipCheck("Tips: a third tip is still allowed", "home") { tipId(home, tipState(shown = 2, last = TIP_NOW - 500_000L)) },
+        tipCheck("Tips: nothing 89.999 seconds after the last tip", "none") { tipId(home, tipState(shown = 1, last = TIP_NOW - 89_999L)) },
+        tipCheck("Tips: allowed 90 seconds after the last tip", "home") { tipId(home, tipState(shown = 1, last = TIP_NOW - 90_000L)) },
+        tipCheck("Tips: the first tip needs no cooldown", "home") { tipId(home, tipState(shown = 0, last = null)) },
+        tipCheck("Tips: the keys tip wins when several editor tips fit", "editor-keys") {
+            tipId(editor.copy(keyboardSeenInEditor = true, suggestionShownOnce = true, tabCount = 2))
+        },
+        tipCheck("Tips: then the suggestions tip", "editor-suggestions") {
+            tipId(editor.copy(suggestionShownOnce = true, tabCount = 2), tipState(seen = setOf("editor-keys")))
+        },
+        tipCheck("Tips: then the tabs tip", "editor-tabs") {
+            tipId(editor.copy(tabCount = 2), tipState(seen = setOf("editor-keys", "editor-suggestions")))
+        },
+        tipCheck("Tips: then the Run tip for an HTML file", "editor-run") { tipId(editor) },
+        tipCheck("Tips: no Run tip when the open file is not a page", "none") { tipId(editor.copy(htmlFileOpen = false)) },
+        tipCheck("Tips: the Find tip needs 200 typed characters", "none") {
+            tipId(editor.copy(htmlFileOpen = false, typedChars = 199))
+        },
+        tipCheck("Tips: the Find tip appears at 200 typed characters", "find") {
+            tipId(editor.copy(htmlFileOpen = false, typedChars = 200))
+        },
+        tipCheck("Tips: the Find tip comes last", "find") {
+            tipId(
+                editor.copy(typedChars = 500),
+                tipState(seen = setOf("editor-keys", "editor-suggestions", "editor-tabs", "editor-run")),
+            )
+        },
+        tipCheck("Tips: the four old hint ids that were seen stay seen", "none|none|none|none") {
+            val seen = setOf("home", "workspace", "preview", "ai")
+            listOf(
+                tipId(home, tipState(seen = seen)),
+                tipId(TipContext(screen = TipScreen.Files, nowMillis = TIP_NOW, fileListShown = true), tipState(seen = seen)),
+                tipId(TipContext(screen = TipScreen.Preview, nowMillis = TIP_NOW, previewLoaded = true), tipState(seen = seen)),
+                tipId(TipContext(screen = TipScreen.Ai, nowMillis = TIP_NOW, aiPanelIdle = true), tipState(seen = seen)),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: the preview tip needs a finished load", "none|preview") {
+            val base = TipContext(screen = TipScreen.Preview, nowMillis = TIP_NOW)
+            tipId(base) + "|" + tipId(base.copy(previewLoaded = true))
+        },
+        tipCheck("Tips: the AI tip needs an idle panel", "none|ai") {
+            val base = TipContext(screen = TipScreen.Ai, nowMillis = TIP_NOW)
+            tipId(base) + "|" + tipId(base.copy(aiPanelIdle = true))
+        },
+        tipCheck("Tips: the GitHub tip never shows", "none") {
+            tipId(
+                TipContext(
+                    screen = TipScreen.GitHub,
+                    nowMillis = TIP_NOW,
+                    projectListShown = true,
+                    fileListShown = true,
+                    fileOpen = true,
+                    previewLoaded = true,
+                    aiPanelIdle = true,
+                    tabCount = 5,
+                    typedChars = 999,
+                ),
+            )
+        },
+        tipCheck("Tips: allowedNow follows the global rules", "true|false|false") {
+            listOf(
+                CoderTipEngine.allowedNow(home, tipState()),
+                CoderTipEngine.allowedNow(home, tipState(mode = GuidanceMode.Pro)),
+                CoderTipEngine.allowedNow(home.copy(busy = true), tipState()),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: typing means a recent change or a visible keyboard", "true|true|false|false") {
+            listOf(
+                CoderTipEngine.isTyping(home.copy(keyboardVisible = true)),
+                CoderTipEngine.isTyping(home.copy(lastTypedAtMillis = TIP_NOW - 100L)),
+                CoderTipEngine.isTyping(home.copy(lastTypedAtMillis = TIP_NOW - 5_000L)),
+                CoderTipEngine.isTyping(home),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: hasPending is true only for Beginner with unseen tips", "true|false|false|false") {
+            listOf(
+                CoderTipEngine.hasPending(TipScreen.Home, tipState()),
+                CoderTipEngine.hasPending(TipScreen.Home, tipState(seen = setOf("home"))),
+                CoderTipEngine.hasPending(TipScreen.Home, tipState(mode = GuidanceMode.Pro)),
+                CoderTipEngine.hasPending(TipScreen.Home, tipState(enabled = false)),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: Got it and the timeout always mark a tip seen", "true|true") {
+            listOf(
+                CoderTipEngine.shouldMarkSeen(TipEnd.GotIt, 500L),
+                CoderTipEngine.shouldMarkSeen(TipEnd.TimedOut, CoderTipEngine.AUTO_HIDE_MS),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: leaving after under 3 seconds does not mark a tip seen", "false|true") {
+            listOf(
+                CoderTipEngine.shouldMarkSeen(TipEnd.Left, 2_999L),
+                CoderTipEngine.shouldMarkSeen(TipEnd.Left, 3_000L),
+            ).joinToString("|")
+        },
+        tipCheck("Tips: the numbers are the agreed ones", "12000|3000|3|90000|3000") {
+            listOf(
+                CoderTipEngine.AUTO_HIDE_MS,
+                CoderTipEngine.MIN_SEEN_MS,
+                CoderTipEngine.MAX_PER_SESSION.toLong(),
+                CoderTipEngine.COOLDOWN_MS,
+                CoderTipEngine.TYPING_QUIET_MS,
+            ).joinToString("|")
+        },
+        tipCheck("Welcome: shown to a Beginner with no project who has not seen it", "true") {
+            CoderTipEngine.showWelcome(GuidanceMode.Beginner, welcomeSeen = false, projectCount = 0).toString()
+        },
+        tipCheck("Welcome: never in Pro mode, once seen, or with a project", "false|false|false") {
+            listOf(
+                CoderTipEngine.showWelcome(GuidanceMode.Pro, welcomeSeen = false, projectCount = 0),
+                CoderTipEngine.showWelcome(GuidanceMode.Beginner, welcomeSeen = true, projectCount = 0),
+                CoderTipEngine.showWelcome(GuidanceMode.Beginner, welcomeSeen = false, projectCount = 1),
+            ).joinToString("|")
+        },
+    )
+}
+
+private fun guidanceDataChecks(): List<CoderCheckResult> = listOf(
+    tipCheck(
+        "Tips: the list holds exactly the ten agreed ids",
+        "home,workspace,editor-keys,editor-suggestions,editor-tabs,editor-run,preview,ai,find,github",
+    ) { CoderTips.all.joinToString(",") { it.id } },
+    check("Tips: every tip except the reserved one has text", "text on nine tips") {
+        CoderTips.all.filter { it.id != "github" }.all { it.text.isNotBlank() }
+    },
+    check("Tips: ids are unique", "no repeated id") { CoderTips.all.map { it.id }.toSet().size == CoderTips.all.size },
+    tipCheck("Tips: the four old hints keep their texts", "true") {
+        (
+            CoderTips.byId("home")?.text == "Start with a template. Tap New project, pick one, then tap Run to see it." &&
+                CoderTips.byId("preview")?.text == "Something not working? Tap the console icon to see messages and errors." &&
+                CoderTips.byId("ai")?.text ==
+                "Ask in plain words. Nothing changes in your files until you tap Insert or Replace, and you can always undo." &&
+                CoderTips.byId("workspace")?.text == "Tap a file to edit it. Tap Run to see your page."
+            ).toString()
+    },
+    check("Glossary: at least 16 terms", "16 or more") { CoderGlossary.terms.size >= 16 },
+    check("Glossary: ids are unique and no text is empty", "unique ids, filled texts") {
+        CoderGlossary.terms.map { it.id }.toSet().size == CoderGlossary.terms.size &&
+            CoderGlossary.terms.all { it.id.isNotBlank() && it.title.isNotBlank() && it.explanation.isNotBlank() }
+    },
+    check("Glossary: every required term is there", "all 16 required ids") {
+        listOf(
+            "html", "css", "javascript", "react", "zip", "repository", "commit", "push", "token", "api-key",
+            "console", "preview", "build", "environment-variable", "cors", "dist-folder",
+        ).all { CoderGlossary.find(it) != null }
+    },
+    check("Glossary: every What is this? term id exists", "token, api-key and console") {
+        listOf("token", "api-key", "console").all { CoderGlossary.find(it) != null }
+    },
+    check("Glossary: an unknown id gives nothing", "null") { CoderGlossary.find("nope") == null },
+    check("Guides: there are 8 with the agreed titles", "8 titles") {
+        CoderGuides.all.map { it.title } == listOf(
+            "Make your first page",
+            "Use suggestions while you type",
+            "Open several files",
+            "See your page (Run)",
+            "Ask the AI for help",
+            "Save to GitHub",
+            "Import or export a ZIP",
+            "Fix a mistake",
+        )
+    },
+    check("Guides: each has 4 to 6 steps", "4..6 steps each") { CoderGuides.all.all { it.steps.size in 4..6 } },
+    check("Guides: no title or step is empty and ids are unique", "filled, unique") {
+        CoderGuides.all.all { it.id.isNotBlank() && it.title.isNotBlank() && it.steps.all { step -> step.isNotBlank() } } &&
+            CoderGuides.all.map { it.id }.toSet().size == CoderGuides.all.size
+    },
+    check("Guidance: the two modes exist", "Beginner and Pro") {
+        GuidanceMode.values().map { it.name } == listOf("Beginner", "Pro")
+    },
+)

@@ -67,12 +67,15 @@ import com.westly.neribovault.feature.coder.editor.smart.FindReplaceBar
 import com.westly.neribovault.feature.coder.editor.smart.SuggestionStrip
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.guidance.CoderTipHost
+import com.westly.neribovault.feature.coder.guidance.TipContext
+import com.westly.neribovault.feature.coder.guidance.TipScreen
+import com.westly.neribovault.feature.coder.guidance.TipTyping
 import com.westly.neribovault.feature.coder.link.CoderLinkSheet
 import com.westly.neribovault.feature.coder.link.CoderLinkState
 import com.westly.neribovault.feature.coder.link.CoderLinkViewModel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
-import com.westly.neribovault.feature.coder.ui.CoderHintCard
 import com.westly.neribovault.feature.coder.zip.CoderExportResult
 import com.westly.neribovault.feature.coder.zip.CoderTrust
 import com.westly.neribovault.feature.coder.zip.CoderZipExporter
@@ -153,6 +156,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     var pendingClose by remember { mutableStateOf<PendingClose?>(null) }
     var findFieldFocused by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
+    // True once the suggestion strip has had something to show; the "suggestions" tip waits for it.
+    var suggestionShownOnce by remember { mutableStateOf(false) }
+    LaunchedEffect(suggestions) { if (suggestions.isNotEmpty()) suggestionShownOnce = true }
     val exporter = remember(context) {
         CoderZipExporter(context.applicationContext, (context.applicationContext as NeriboApp).container.coderFileStore)
     }
@@ -267,6 +273,9 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val existingPaths = remember(state.entries) { state.entries.map { it.path }.toSet() }
     val project = state.project
     val canBrowse = !state.isLoading && project != null
+    // A tip never appears while a dialog or sheet is open.
+    val tipsBlocked = dialog != WorkspaceDialog.None || showEditorSettings || showLinkSheet || showTrustDialog ||
+        pendingClose != null || exporting
     // On a narrow phone the top bar has no room for one more button, so Find moves into the menu.
     val findInTopBar = LocalConfiguration.current.screenWidthDp >= FIND_IN_TOP_BAR_MIN_WIDTH_DP
 
@@ -413,6 +422,19 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                         .consumeWindowInsets(padding),
                 ) {
                     Column(modifier = Modifier.fillMaxSize().imePadding()) {
+                        CoderTipHost(
+                            screen = TipScreen.Editor,
+                            context = TipContext(
+                                screen = TipScreen.Editor,
+                                fileOpen = true,
+                                suggestionShownOnce = suggestionShownOnce,
+                                tabCount = state.tabs.size,
+                                htmlFileOpen = isHtmlFile(openPath),
+                                busy = tipsBlocked || drawerOpen || find.open,
+                            ),
+                            modifier = Modifier.padding(horizontal = NeriboTheme.spacing.screen, vertical = NeriboTheme.spacing.xs),
+                            typing = { TipTyping(vm.lastTypedAtMillis, vm.typedCharCount) },
+                        )
                         TabStrip(
                             tabs = state.tabs,
                             activePath = openPath,
@@ -505,12 +527,26 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                 }
             }
             else -> Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-                LinkedLabel(state = linkState, onUnlink = { linkVm.unlink() })
-                CoderHintCard(
-                    id = "workspace",
-                    text = "Tap a file to edit it. Tap Run to see your page. The row above the keyboard has the symbols you need.",
+                CoderTipHost(
+                    screen = TipScreen.Files,
+                    context = TipContext(
+                        screen = TipScreen.Files,
+                        fileListShown = state.entries.isNotEmpty(),
+                        busy = tipsBlocked,
+                    ),
                     modifier = Modifier.padding(horizontal = NeriboTheme.spacing.screen, vertical = NeriboTheme.spacing.xs),
                 )
+                LinkedLabel(state = linkState, onUnlink = { linkVm.unlink() })
+                if (state.tabs.isEmpty() && state.entries.isNotEmpty()) {
+                    Text(
+                        text = "Tap a file to start editing.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = NeriboTheme.spacing.screen, vertical = NeriboTheme.spacing.xs),
+                    )
+                }
                 FileTreePanel(
                     entries = state.entries,
                     expandedFolders = expandedFolders,
@@ -683,6 +719,10 @@ private fun exportFileName(projectName: String): String {
         .trim()
     return (if (safe.isEmpty()) "project" else safe) + ".zip"
 }
+
+/** True for HTML pages, the files that Run shows directly. */
+private fun isHtmlFile(path: String): Boolean =
+    CoderPaths.nameOf(path).substringAfterLast('.', "").lowercase().let { it == "html" || it == "htm" }
 
 /** True for files the preview can show on their own. */
 private fun isPreviewableFile(path: String): Boolean =

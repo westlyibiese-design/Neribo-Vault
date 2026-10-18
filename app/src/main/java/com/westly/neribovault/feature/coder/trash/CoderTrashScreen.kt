@@ -84,7 +84,7 @@ fun CoderTrashScreen(onBack: () -> Unit) {
                     state.isEmpty -> EmptyState(
                         icon = Icons.Outlined.Delete,
                         title = "Nothing here",
-                        message = "Projects you delete wait here for 30 days before they are gone for good.",
+                        message = "Projects you delete wait here for 30 days before they are gone for good. You can bring any of them back with Restore.",
                         modifier = Modifier.fillMaxSize(),
                     )
                     else -> LazyColumn(

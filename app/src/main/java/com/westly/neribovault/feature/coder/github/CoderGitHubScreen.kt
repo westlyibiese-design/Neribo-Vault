@@ -67,6 +67,7 @@ import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.SectionHeader
 import com.westly.neribovault.core.util.formatDateTime
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
+import com.westly.neribovault.feature.coder.guidance.WhatIsThis
 
 private const val TOKEN_PAGE_URL = "https://github.com/settings/tokens/new?scopes=repo&description=Neribo%20Coder"
 
@@ -272,6 +273,7 @@ private fun AccountCard(
                     style = ButtonStyle.Secondary,
                     leadingIcon = Icons.Outlined.ContentCopy,
                 )
+                WhatIsThis(termId = "token")
                 NeriboTextField(
                     value = token,
                     onValueChange = {

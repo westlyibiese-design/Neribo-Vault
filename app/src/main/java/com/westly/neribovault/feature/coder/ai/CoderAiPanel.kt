@@ -58,7 +58,9 @@ import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderPaths
-import com.westly.neribovault.feature.coder.ui.CoderHintCard
+import com.westly.neribovault.feature.coder.guidance.CoderTipHost
+import com.westly.neribovault.feature.coder.guidance.TipContext
+import com.westly.neribovault.feature.coder.guidance.TipScreen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -219,6 +221,7 @@ fun CoderAiPanel(
                 hasSelection = selection != null,
                 linked = linked,
                 notesOn = notesOn,
+                dialogOpen = showPicker || replaceCode != null || openReplace != null || showNewChat,
                 apply = apply,
                 onInput = { viewModel.setInput(it) },
                 onToggleOpenFile = { viewModel.setIncludeOpenFile(!state.includeOpenFile) },
@@ -315,6 +318,7 @@ private fun ChatBody(
     hasSelection: Boolean,
     linked: Boolean,
     notesOn: Boolean,
+    dialogOpen: Boolean,
     apply: ApplyOptions,
     onInput: (String) -> Unit,
     onToggleOpenFile: () -> Unit,
@@ -330,9 +334,13 @@ private fun ChatBody(
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
     Column(modifier = modifier) {
-        CoderHintCard(
-            id = "ai",
-            text = "Ask in plain words. Nothing changes in your files until you tap Insert or Replace, and you can always undo.",
+        CoderTipHost(
+            screen = TipScreen.Ai,
+            context = TipContext(
+                screen = TipScreen.Ai,
+                aiPanelIdle = !state.isSending,
+                busy = state.isSending || dialogOpen,
+            ),
             modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
         )
         MessageList(
