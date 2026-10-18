@@ -110,6 +110,27 @@ import okhttp3.Request
 import okio.Buffer
 import org.json.JSONArray
 import org.json.JSONObject
+import com.westly.neribovault.feature.coder.files.CoderEntry
+import com.westly.neribovault.feature.coder.preview.CoderAccess
+import com.westly.neribovault.feature.coder.preview.CoderDevicePreset
+import com.westly.neribovault.feature.coder.preview.CoderHttpRequest
+import com.westly.neribovault.feature.coder.preview.CoderHttpResponse
+import com.westly.neribovault.feature.coder.preview.CoderLocalServer
+import com.westly.neribovault.feature.coder.preview.CoderParsedRequest
+import com.westly.neribovault.feature.coder.preview.CoderServedPaths
+import com.westly.neribovault.feature.coder.preview.CoderServerInfo
+import com.westly.neribovault.feature.coder.preview.CoderConsoleMessage
+import com.westly.neribovault.feature.coder.preview.ConsoleFilter
+import com.westly.neribovault.feature.coder.preview.MAX_PICKER_PAGES
+import com.westly.neribovault.feature.coder.preview.ParseResult
+import com.westly.neribovault.feature.coder.preview.browserUrlFor
+import com.westly.neribovault.feature.coder.preview.clampRatio
+import com.westly.neribovault.feature.coder.preview.consoleCopyText
+import com.westly.neribovault.feature.coder.preview.filterConsoleMessages
+import com.westly.neribovault.feature.coder.preview.htmlPagesOf
+import com.westly.neribovault.feature.coder.preview.presetWidthDp
+import com.westly.neribovault.feature.coder.preview.shouldAutoRefresh
+import java.net.Socket
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -194,6 +215,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(tabLogicChecks())
         results.addAll(tipEngineChecks())
         results.addAll(guidanceDataChecks())
+        results.addAll(previewUpgradeChecks(context, store))
     } finally {
         root.deleteRecursively()
     }
@@ -2999,3 +3021,338 @@ private fun guidanceDataChecks(): List<CoderCheckResult> = listOf(
         GuidanceMode.values().map { it.name } == listOf("Beginner", "Pro")
     },
 )
+
+// ---- Phase C13: preview upgrades ---------------------------------------------------------------
+
+private fun httpHead(vararg lines: String): ByteArray = (lines.joinToString("\r\n") + "\r\n\r\n").toByteArray(Charsets.ISO_8859_1)
+
+private fun parsedOf(bytes: ByteArray): CoderParsedRequest? = (CoderHttpRequest.parseRequest(bytes) as? ParseResult.Ok)?.request
+
+private fun badStatusOf(bytes: ByteArray): Int? = (CoderHttpRequest.parseRequest(bytes) as? ParseResult.Bad)?.status
+
+private fun headOfResponse(response: CoderHttpResponse): String = response.headText()
+
+private fun bodyOfResponse(response: CoderHttpResponse): String {
+    val out = ByteArrayOutputStream()
+    response.writeTo(out)
+    val text = out.toString("ISO-8859-1")
+    return text.substringAfter("\r\n\r\n", "")
+}
+
+private fun previewUpgradeChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> =
+    servedPathChecks() + splitAndPresetChecks() + httpParseChecks() + httpDecisionChecks() + httpResponseChecks() +
+        pickerAndConsoleChecks() + blockedResponderChecks(context, store) + localServerChecks(context, store)
+
+private fun servedPathChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    val blocked = listOf(
+        ".env", ".ENV", ".env.local", "a/.env.production", ".git/config", "a/.git/x", "node_modules/x/index.js",
+        ".coder-build/a.js", "x/.coder-backup/y", "key.pem", "a/site.KEY", "my.keystore",
+    )
+    for (path in blocked) out.add(check("Served paths: $path is blocked", "blocked") { CoderServedPaths.isBlocked(path) })
+    val allowed = listOf("index.html", "env.js", "src/app.js", ".gitignore", "environment.txt", "assets/keyboard.css", "a/.envrc")
+    for (path in allowed) out.add(check("Served paths: $path is served", "not blocked") { !CoderServedPaths.isBlocked(path) })
+    return out
+}
+
+private fun splitAndPresetChecks(): List<CoderCheckResult> = listOf(
+    check("Split: a share below 25% becomes 25%", "0.25") { clampRatio(0.1f) == 0.25f },
+    check("Split: a share above 75% becomes 75%", "0.75") { clampRatio(0.9f) == 0.75f },
+    check("Split: 50% stays 50%", "0.5") { clampRatio(0.5f) == 0.5f },
+    check("Split: the edges 25% and 75% stay", "0.25 and 0.75") { clampRatio(0.25f) == 0.25f && clampRatio(0.75f) == 0.75f },
+    check("Split: not a number gives 50%", "0.5") { clampRatio(Float.NaN) == 0.5f },
+    check("Split: negative gives 25%", "0.25") { clampRatio(-3f) == 0.25f },
+    check("Size: Full uses the pane width", "500") { presetWidthDp(CoderDevicePreset.Full, 500) == 500 },
+    check("Size: Phone is 360", "360") { presetWidthDp(CoderDevicePreset.Phone, 500) == 360 },
+    check("Size: Tablet is 768", "768") { presetWidthDp(CoderDevicePreset.Tablet, 500) == 768 },
+    check("Size: Desktop is 1200", "1200") { presetWidthDp(CoderDevicePreset.Desktop, 500) == 1200 },
+    check("Size: chip texts", "Full, Phone 360, Tablet 768, Desktop 1200") {
+        CoderDevicePreset.values().joinToString(", ") { it.chipText } == "Full, Phone 360, Tablet 768, Desktop 1200"
+    },
+    check("Size: an unknown saved name gives Full", "Full") {
+        CoderDevicePreset.fromName("Nope") == CoderDevicePreset.Full && CoderDevicePreset.fromName(null) == CoderDevicePreset.Full &&
+            CoderDevicePreset.fromName("Tablet") == CoderDevicePreset.Tablet
+    },
+    check("Auto-refresh: everything right reloads", "true") { shouldAutoRefresh(true, true, true, false, 1000L) },
+    check("Auto-refresh: switched off does not reload", "false") { !shouldAutoRefresh(false, true, true, false, 5000L) },
+    check("Auto-refresh: preview hidden does not reload", "false") { !shouldAutoRefresh(true, false, true, false, 5000L) },
+    check("Auto-refresh: no save does not reload", "false") { !shouldAutoRefresh(true, true, false, false, 5000L) },
+    check("Auto-refresh: a loading page is skipped", "false") { !shouldAutoRefresh(true, true, true, true, 5000L) },
+    check("Auto-refresh: 999 ms since the last reload is too soon", "false") { !shouldAutoRefresh(true, true, true, false, 999L) },
+    check("Auto-refresh: 1000 ms since the last reload is fine", "true") { shouldAutoRefresh(true, true, true, false, 1000L) },
+)
+
+private fun httpParseChecks(): List<CoderCheckResult> = listOf(
+    check("HTTP: a valid GET is read", "GET /a.html with its host") {
+        val r = parsedOf(httpHead("GET /a.html HTTP/1.1", "Host: 127.0.0.1:5000"))
+        r != null && r.method == "GET" && r.path == "/a.html" && r.headers["host"] == "127.0.0.1:5000"
+    },
+    check("HTTP: header names are lower case", "host and accept") {
+        val r = parsedOf(httpHead("GET / HTTP/1.1", "HOST: x", "Accept: */*"))
+        r != null && r.headers.keys.toList() == listOf("host", "accept")
+    },
+    check("HTTP: a valid HEAD is read", "HEAD") { parsedOf(httpHead("HEAD / HTTP/1.1", "Host: x"))?.method == "HEAD" },
+    check("HTTP: HTTP/1.0 is read", "GET") { parsedOf(httpHead("GET / HTTP/1.0", "Host: x"))?.method == "GET" },
+    check("HTTP: a request line with two parts is bad", "400") { badStatusOf(httpHead("GET /", "Host: x")) == 400 },
+    check("HTTP: an unknown version is bad", "400") { badStatusOf(httpHead("GET / HTTP/2", "Host: x")) == 400 },
+    check("HTTP: a lower case method is bad", "400") { badStatusOf(httpHead("get / HTTP/1.1", "Host: x")) == 400 },
+    check("HTTP: a full address as target is bad", "400") { badStatusOf(httpHead("GET http://evil/ HTTP/1.1", "Host: x")) == 400 },
+    check("HTTP: a target starting with // is bad", "400") { badStatusOf(httpHead("GET //evil.com/ HTTP/1.1", "Host: x")) == 400 },
+    check("HTTP: a request line over 8 KB is bad", "400") {
+        badStatusOf(httpHead("GET /" + "a".repeat(9000) + " HTTP/1.1", "Host: x")) == 400
+    },
+    check("HTTP: 101 headers are too many", "431") {
+        val lines = ArrayList<String>()
+        lines.add("GET / HTTP/1.1")
+        for (i in 1..101) lines.add("X-$i: 1")
+        badStatusOf(httpHead(*lines.toTypedArray())) == 431
+    },
+    check("HTTP: 100 headers are fine", "read") {
+        val lines = ArrayList<String>()
+        lines.add("GET / HTTP/1.1")
+        for (i in 1..100) lines.add("X-$i: 1")
+        parsedOf(httpHead(*lines.toTypedArray())) != null
+    },
+    check("HTTP: headers over 16 KB are too large", "431") {
+        badStatusOf(httpHead("GET / HTTP/1.1", "X-Big: " + "a".repeat(17000))) == 431
+    },
+    check("HTTP: a header without a colon is bad", "400") { badStatusOf(httpHead("GET / HTTP/1.1", "Nonsense")) == 400 },
+    check("HTTP: cookies are read in order", "a=1 and coderk=tok") {
+        val r = parsedOf(httpHead("GET / HTTP/1.1", "Host: x", "Cookie: a=1; coderk=tok"))
+        r != null && r.cookie("a") == "1" && r.cookie("coderk") == "tok"
+    },
+    check("HTTP: no cookie gives none", "null") { parsedOf(httpHead("GET / HTTP/1.1", "Host: x"))?.cookie("coderk") == null },
+    check("HTTP: the k value is read from the query", "abc") {
+        parsedOf(httpHead("GET /?k=abc HTTP/1.1", "Host: x"))?.queryToken == "abc"
+    },
+    check("HTTP: no k gives null and the query is cut from the path", "null and /p") {
+        val r = parsedOf(httpHead("GET /p?x=1 HTTP/1.1", "Host: x"))
+        r != null && r.queryToken == null && r.path == "/p" && r.rawPath == "/p"
+    },
+    check("HTTP: percent-encoded paths are decoded", "/a b/c.js") {
+        val r = parsedOf(httpHead("GET /a%20b/c.js HTTP/1.1", "Host: x"))
+        r != null && r.path == "/a b/c.js" && r.rawPath == "/a%20b/c.js"
+    },
+    check("HTTP: .. stays visible so the file rules refuse it", "path with ..") {
+        parsedOf(httpHead("GET /a/%2e%2e/b HTTP/1.1", "Host: x"))?.path == "/a/../b"
+    },
+    check("HTTP: an encoded control character is bad", "400") { badStatusOf(httpHead("GET /a%00b HTTP/1.1", "Host: x")) == 400 },
+)
+
+private fun httpDecisionChecks(): List<CoderCheckResult> {
+    fun decide(vararg lines: String, port: Int = 5000, token: String = "tok"): CoderAccess? {
+        val r = parsedOf(httpHead(*lines)) ?: return null
+        return CoderHttpRequest.decide(r, port, token)
+    }
+    return listOf(
+        check("Access: a missing host is refused", "Forbidden") { decide("GET /?k=tok HTTP/1.1") == CoderAccess.Forbidden },
+        check("Access: a wrong host is refused", "Forbidden") {
+            decide("GET /?k=tok HTTP/1.1", "Host: evil.com:5000") == CoderAccess.Forbidden
+        },
+        check("Access: the wrong port in the host is refused", "Forbidden") {
+            decide("GET /?k=tok HTTP/1.1", "Host: 127.0.0.1:5001") == CoderAccess.Forbidden
+        },
+        check("Access: the right k sets the cookie and redirects", "SetCookieAndRedirect") {
+            decide("GET /?k=tok HTTP/1.1", "Host: 127.0.0.1:5000") == CoderAccess.SetCookieAndRedirect
+        },
+        check("Access: localhost as host is allowed", "SetCookieAndRedirect") {
+            decide("GET /?k=tok HTTP/1.1", "Host: localhost:5000") == CoderAccess.SetCookieAndRedirect
+        },
+        check("Access: a wrong k is refused", "Forbidden") {
+            decide("GET /?k=nope HTTP/1.1", "Host: 127.0.0.1:5000") == CoderAccess.Forbidden
+        },
+        check("Access: no k and no cookie is refused", "Forbidden") {
+            decide("GET / HTTP/1.1", "Host: 127.0.0.1:5000") == CoderAccess.Forbidden
+        },
+        check("Access: the right cookie is served", "Serve") {
+            decide("GET /a.html HTTP/1.1", "Host: 127.0.0.1:5000", "Cookie: coderk=tok") == CoderAccess.Serve
+        },
+        check("Access: a wrong cookie is refused", "Forbidden") {
+            decide("GET /a.html HTTP/1.1", "Host: 127.0.0.1:5000", "Cookie: coderk=bad") == CoderAccess.Forbidden
+        },
+        check("Access: POST is not allowed", "MethodNotAllowed") {
+            decide("POST / HTTP/1.1", "Host: 127.0.0.1:5000", "Cookie: coderk=tok") == CoderAccess.MethodNotAllowed
+        },
+        check("Access: HEAD with the cookie is served", "Serve") {
+            decide("HEAD / HTTP/1.1", "Host: 127.0.0.1:5000", "Cookie: coderk=tok") == CoderAccess.Serve
+        },
+        check("Access: the cookie header text", "name, Path, HttpOnly, SameSite=Strict") {
+            CoderHttpRequest.cookieHeader("tok") == "coderk=tok; Path=/; HttpOnly; SameSite=Strict"
+        },
+    )
+}
+
+private fun httpResponseChecks(): List<CoderCheckResult> {
+    fun head(status: Int, reason: String, headers: Map<String, String> = emptyMap(), body: String? = null): String =
+        headOfResponse(CoderHttpRequest.buildResponse(status, reason, headers, body?.let { ByteArrayInputStream(it.toByteArray()) }))
+    return listOf(
+        check("Response: 200 starts with its status line", "HTTP/1.1 200 OK") { head(200, "OK").startsWith("HTTP/1.1 200 OK\r\n") },
+        check("Response: always closes, no sniffing, no cache", "three headers") {
+            val h = head(200, "OK")
+            h.contains("Connection: close\r\n") && h.contains("X-Content-Type-Options: nosniff\r\n") && h.contains("Cache-Control: no-store\r\n")
+        },
+        check("Response: the head ends with an empty line", "CRLF CRLF") { head(200, "OK").endsWith("\r\n\r\n") },
+        check("Response: 302 carries the location and the cookie", "Location and Set-Cookie") {
+            val h = head(302, "Found", mapOf("Location" to "/", "Set-Cookie" to CoderHttpRequest.cookieHeader("tok")))
+            h.startsWith("HTTP/1.1 302 Found\r\n") && h.contains("Location: /\r\n") && h.contains("Set-Cookie: coderk=tok; Path=/; HttpOnly; SameSite=Strict\r\n")
+        },
+        check("Response: 403 line", "HTTP/1.1 403 Forbidden") { head(403, "Forbidden").startsWith("HTTP/1.1 403 Forbidden\r\n") },
+        check("Response: 404 line", "HTTP/1.1 404 Not Found") { head(404, "Not Found").startsWith("HTTP/1.1 404 Not Found\r\n") },
+        check("Response: 405 line with Allow", "405 and Allow") {
+            val h = headOfResponse(CoderHttpRequest.textResponse(405, "Method Not Allowed", "no", mapOf("Allow" to "GET, HEAD")))
+            h.startsWith("HTTP/1.1 405 Method Not Allowed\r\n") && h.contains("Allow: GET, HEAD\r\n")
+        },
+        check("Response: line breaks in a header value are removed", "no injected header") {
+            !head(200, "OK", mapOf("X-A" to "one\r\nEvil: yes")).contains("\r\nEvil:")
+        },
+        check("Response: length and connection headers from the caller are ignored", "one Connection: close") {
+            val h = head(200, "OK", mapOf("Content-Length" to "5", "Connection" to "keep-alive"))
+            !h.contains("Content-Length") && h.contains("Connection: close") && !h.contains("keep-alive")
+        },
+        check("Response: the body follows the head", "hello") {
+            bodyOfResponse(CoderHttpRequest.buildResponse(200, "OK", emptyMap(), ByteArrayInputStream("hello".toByteArray()))) == "hello"
+        },
+        check("Response: a HEAD answer has no body", "empty") {
+            bodyOfResponse(CoderHttpRequest.textResponse(200, "OK", "hello", head = true)).isEmpty()
+        },
+        check("Token: 32 hex characters", "32 characters of 0-9a-f") {
+            val t = CoderLocalServer.generateToken()
+            t.length == 32 && t.all { it in '0'..'9' || it in 'a'..'f' }
+        },
+        check("Token: two tokens differ", "different") { CoderLocalServer.generateToken() != CoderLocalServer.generateToken() },
+    )
+}
+
+private fun pickerAndConsoleChecks(): List<CoderCheckResult> {
+    fun file(path: String) = CoderEntry(path, false, 1L, 0L)
+    val entries = listOf(
+        CoderEntry("sub", true, 0L, 0L), file("zeta.html"), file("about.HTML"), file("index.html"), file("sub/page.htm"),
+        file("node_modules/x/y.html"), file(".coder-build/z.html"), file("notes.txt"), file("dist/index.html"), file("dist/a.html"),
+    )
+    fun msg(id: Long, level: ConsoleLevel, text: String, file: String? = null, line: Int? = null) =
+        CoderConsoleMessage(id, level, text, file, line)
+    val messages = listOf(
+        msg(1, ConsoleLevel.Log, "hi"),
+        msg(2, ConsoleLevel.Error, "boom\nsecond line", "script.js", 3),
+        msg(3, ConsoleLevel.Warn, "careful", "a.js"),
+    )
+    return listOf(
+        check("Pages: index.html first, then by name", "index.html, about.HTML, dist/a.html, dist/index.html, sub/page.htm, zeta.html") {
+            htmlPagesOf(entries, "") == listOf("index.html", "about.HTML", "dist/a.html", "dist/index.html", "sub/page.htm", "zeta.html")
+        },
+        check("Pages: nothing hidden or blocked is listed", "no node_modules, no .coder") {
+            htmlPagesOf(entries, "").none { it.contains("node_modules") || it.contains(".coder") }
+        },
+        check("Pages: a root folder lists only its pages, without the folder", "index.html, a.html") {
+            htmlPagesOf(entries, "dist") == listOf("index.html", "a.html")
+        },
+        check("Pages: at most 50", "50") {
+            val many = (1..80).map { file("p$it.html") }
+            htmlPagesOf(many, "").size == MAX_PICKER_PAGES
+        },
+        check("Console: All keeps every message", "3") { filterConsoleMessages(messages, ConsoleFilter.All).size == 3 },
+        check("Console: Errors keeps only errors", "id 2") { filterConsoleMessages(messages, ConsoleFilter.Errors).map { it.id } == listOf(2L) },
+        check("Console: Warnings keeps only warnings", "id 3") { filterConsoleMessages(messages, ConsoleFilter.Warnings).map { it.id } == listOf(3L) },
+        check("Console: copy text has one line each", "LEVEL file:line message") {
+            consoleCopyText(messages) == "LOG hi\nERROR script.js:3 boom second line\nWARN a.js careful"
+        },
+        check("Console: copy text of nothing is empty", "empty") { consoleCopyText(emptyList()).isEmpty() },
+        check("Browser address: a page is encoded and carries the token", "http://127.0.0.1:99/a%20b.html?k=t") {
+            browserUrlFor(CoderServerInfo(99, "t", "x"), "a b.html") == "http://127.0.0.1:99/a%20b.html?k=t"
+        },
+        check("Browser address: Markdown goes through the app's page", "__coder/md/") {
+            browserUrlFor(CoderServerInfo(99, "t", "x"), "README.md") == "http://127.0.0.1:99/__coder/md/README.md?k=t"
+        },
+    )
+}
+
+private fun blockedResponderChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> {
+    val id = newId()
+    val host = CoderPreviewHost.hostFor(id)
+    store.write(id, "index.html", "<p>home</p>")
+    store.write(id, ".env", "SECRET=1")
+    store.write(id, ".git/config", "[core]")
+    store.write(id, "a/.coder-x/y.js", "1")
+    store.write(id, "secret.pem", "KEY")
+    store.write(id, "node_modules/m/i.js", "1")
+    store.write(id, "dist/index.html", "<p>dist</p>")
+    store.write(id, "dist/.env.local", "SECRET=2")
+    val responder = CoderPreviewResponder(context, store, id, "")
+    val distResponder = CoderPreviewResponder(context, store, id, "dist")
+    fun get(r: CoderPreviewResponder, path: String): WebResourceResponse? = r.respondTo(Uri.parse("https://$host$path"), "GET")
+    fun text(r: WebResourceResponse?): String = r?.data?.readBytes()?.toString(Charsets.UTF_8) ?: ""
+    val out = ArrayList<CoderCheckResult>()
+    for (path in listOf("/.env", "/.git/config", "/a/.coder-x/y.js", "/secret.pem", "/node_modules/m/i.js", "/dist/.env.local", "/%2eenv", "/.ENV")) {
+        out.add(check("Preview answers 404 for $path", "404 without the secret") {
+            val r = get(responder, path)
+            r?.statusCode == 404 && !text(r).contains("SECRET") && text(r).contains("File not found")
+        })
+    }
+    out.add(check("Preview with a root folder answers 404 for its .env.local", "404") { get(distResponder, "/.env.local")?.statusCode == 404 })
+    out.add(check("Preview still answers a normal page", "200") { get(responder, "/")?.statusCode == 200 })
+    out.add(check("Preview HEAD of a blocked file is 404", "404") {
+        responder.respondTo(Uri.parse("https://$host/.env"), "HEAD")?.statusCode == 404
+    })
+    return out
+}
+
+private fun rawLoopbackGet(port: Int, path: String, cookie: String?, hostHeader: String = "127.0.0.1:$port"): String =
+    Socket("127.0.0.1", port).use { socket ->
+        socket.soTimeout = 5000
+        val request = StringBuilder("GET $path HTTP/1.1\r\nHost: $hostHeader\r\n")
+        if (cookie != null) request.append("Cookie: ").append(cookie).append("\r\n")
+        request.append("Connection: close\r\n\r\n")
+        socket.getOutputStream().write(request.toString().toByteArray(Charsets.ISO_8859_1))
+        socket.getOutputStream().flush()
+        String(socket.getInputStream().readBytes(), Charsets.ISO_8859_1)
+    }
+
+private fun localServerChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> {
+    val id = newId()
+    store.write(id, "index.html", "<p>served</p>")
+    store.write(id, ".env", "SECRET=1")
+    val server = CoderLocalServer(context, store)
+    val info = server.start(id, "") ?: return listOf(CoderCheckResult("Local server starts on a free port", false, "no port could be opened"))
+    val out = ArrayList<CoderCheckResult>()
+    val cookie = "coderk=${info.token}"
+    try {
+        out.add(check("Local server: the address names loopback and carries the token", "http://127.0.0.1:port/?k=token") {
+            info.url == "http://127.0.0.1:${info.port}/?k=${info.token}" && info.token.length == 32
+        })
+        out.add(check("Local server: it reports the project it serves", "the project id") { server.serving.value?.projectId == id })
+        out.add(check("Local server: no token gives 403", "403") { rawLoopbackGet(info.port, "/", null).startsWith("HTTP/1.1 403") })
+        out.add(check("Local server: a wrong host gives 403", "403") {
+            rawLoopbackGet(info.port, "/?k=${info.token}", null, "evil.com:${info.port}").startsWith("HTTP/1.1 403")
+        })
+        out.add(check("Local server: the token gives 302 and the cookie", "302, Location /, Set-Cookie") {
+            val answer = rawLoopbackGet(info.port, "/?k=${info.token}", null)
+            answer.startsWith("HTTP/1.1 302") && answer.contains("Location: /\r\n") &&
+                answer.contains("Set-Cookie: coderk=${info.token}; Path=/; HttpOnly; SameSite=Strict")
+        })
+        out.add(check("Local server: the cookie gives the page", "200 and the body") {
+            val answer = rawLoopbackGet(info.port, "/", cookie)
+            answer.startsWith("HTTP/1.1 200") && answer.endsWith("<p>served</p>") && answer.contains("Content-Type: text/html")
+        })
+        out.add(check("Local server: .env gives 404 and never the secret", "404 without SECRET") {
+            val answer = rawLoopbackGet(info.port, "/.env", cookie)
+            answer.startsWith("HTTP/1.1 404") && !answer.contains("SECRET=1")
+        })
+        out.add(check("Local server: a missing file gives 404", "404") { rawLoopbackGet(info.port, "/nothing.js", cookie).startsWith("HTTP/1.1 404") })
+        out.add(check("Local server: .. cannot leave the project", "404 or 400, never 200") {
+            val answer = rawLoopbackGet(info.port, "/%2e%2e/%2e%2e/etc/passwd", cookie)
+            !answer.startsWith("HTTP/1.1 200")
+        })
+    } finally {
+        server.stop()
+    }
+    out.add(check("Local server: stop closes the port", "connection refused") {
+        try {
+            Socket("127.0.0.1", info.port).close()
+            false
+        } catch (e: ConnectException) {
+            true
+        }
+    })
+    out.add(check("Local server: after stop nothing is served", "null") { server.serving.value == null })
+    return out
+}

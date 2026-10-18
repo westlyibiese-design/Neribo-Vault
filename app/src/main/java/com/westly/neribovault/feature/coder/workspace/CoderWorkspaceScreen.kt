@@ -1,16 +1,22 @@
 package com.westly.neribovault.feature.coder.workspace
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -20,15 +26,18 @@ import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Undo
+import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
@@ -38,7 +47,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.NeriboApp
@@ -74,8 +85,13 @@ import com.westly.neribovault.feature.coder.guidance.TipTyping
 import com.westly.neribovault.feature.coder.link.CoderLinkSheet
 import com.westly.neribovault.feature.coder.link.CoderLinkState
 import com.westly.neribovault.feature.coder.link.CoderLinkViewModel
+import com.westly.neribovault.feature.coder.preview.CoderConsoleMessage
+import com.westly.neribovault.feature.coder.preview.CoderLocalServer
 import com.westly.neribovault.feature.coder.preview.CoderPreviewPanel
+import com.westly.neribovault.feature.coder.preview.CoderPreviewSession
 import com.westly.neribovault.feature.coder.preview.CoderPreviewRoot
+import com.westly.neribovault.feature.coder.preview.SPLIT_DEFAULT_RATIO
+import com.westly.neribovault.feature.coder.preview.SplitLayout
 import com.westly.neribovault.feature.coder.zip.CoderExportResult
 import com.westly.neribovault.feature.coder.zip.CoderTrust
 import com.westly.neribovault.feature.coder.zip.CoderZipExporter
@@ -210,6 +226,39 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     // The editor is on screen only in Editor mode. With the file list showing, the tabs stay open but openPath is null here.
     val openPath = if (state.editorVisible) state.openPath else null
     val previewEntry = state.previewEntry
+
+    // Live preview next to the editor: the switch, the editor's share, the chosen size and page, and a counter
+    // that goes up each time a save finishes (the preview reloads from it).
+    val prefs = remember(context) { (context.applicationContext as NeriboApp).container.coderPrefs }
+    val splitOn by prefs.splitEnabled.collectAsStateWithLifecycle(initialValue = false)
+    var splitRatio by rememberSaveable { mutableStateOf(SPLIT_DEFAULT_RATIO) }
+    val previewSession = rememberSaveable(saver = CoderPreviewSession.Saver) { CoderPreviewSession() }
+    var saveTick by rememberSaveable { mutableStateOf(0) }
+    var lastSaveStatus by remember { mutableStateOf(state.saveStatus) }
+    LaunchedEffect(state.saveStatus) {
+        if (lastSaveStatus == CoderSaveStatus.Saving && state.saveStatus == CoderSaveStatus.Saved) saveTick += 1
+        lastSaveStatus = state.saveStatus
+    }
+    // The pane follows the last page, Markdown or JSON file that was open; with none it shows index.html when there is one.
+    var followedPage by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(openPath) {
+        if (openPath != null && isPreviewableFile(openPath)) followedPage = openPath
+    }
+    val splitHasRoot by produceState(initialValue = false, projectId, state.entries) {
+        value = hasRunnableRoot(context, projectId)
+    }
+    val paneEntry = followedPage ?: if (splitHasRoot) RUN_INDEX else null
+    // The page served to the phone's browser stops when the person leaves the project (a rotation is not leaving)
+    // or when the project is gone.
+    val hostActivity = remember(context) { context.findHostActivity() }
+    DisposableEffect(Unit) {
+        onDispose {
+            if (hostActivity?.isChangingConfigurations != true) CoderLocalServer.shared(context).stop()
+        }
+    }
+    LaunchedEffect(state.isLoading, state.project == null) {
+        if (!state.isLoading && state.project == null) CoderLocalServer.shared(context).stop()
+    }
     // While the preview is showing it handles Back itself (page history first, then closing).
     BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.showFiles() }
     // The drawer closes before Back returns to the file list; declared after the handler above so that it is asked first.
@@ -227,6 +276,12 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val closeAiHelp: () -> Unit = {
         aiOpen = false
         aiSnapshot = null
+    }
+    val askAiFromPreview: (CoderConsoleMessage) -> Unit = { message ->
+        vm.stopPreview()
+        aiVm.prepareFromError(message)
+        aiSnapshot = null
+        aiOpen = true
     }
     // The AI help screen takes Back first and then returns to where the person was.
     BackHandler(enabled = aiOpen) { closeAiHelp() }
@@ -260,12 +315,11 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             projectId = projectId,
             entryPath = previewEntry,
             onClose = { vm.stopPreview() },
-            onAskAi = { message ->
-                vm.stopPreview()
-                aiVm.prepareFromError(message)
-                aiSnapshot = null
-                aiOpen = true
-            },
+            onAskAi = askAiFromPreview,
+            saveTick = saveTick,
+            entries = state.entries,
+            session = previewSession,
+            snackbarHostState = snackbarHostState,
         )
         return
     }
@@ -359,7 +413,14 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                         RunAction(onClick = onRun)
                         OverflowMenu(
                             actions = (if (findInTopBar) emptyList() else listOf(MenuAction("Find", { vm.openFind() }))) +
-                                listOf(MenuAction("Editor settings", { showEditorSettings = true })),
+                                listOf(
+                                    MenuAction(
+                                        label = if (splitOn) "Live preview: on" else "Live preview: off",
+                                        onClick = { scope.launch { prefs.setSplitEnabled(!splitOn) } },
+                                        icon = Icons.Outlined.Visibility,
+                                    ),
+                                    MenuAction("Editor settings", { showEditorSettings = true }),
+                                ),
                         )
                     } else if (canBrowse) {
                         AiHelpAction(onClick = openAiHelp)
@@ -415,13 +476,15 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                 }
                 // Where the file was scrolled to the last time it was shown; read again whenever the active file changes.
                 val (scrollX, scrollY) = remember(openPath) { vm.scrollOf(openPath) }
+                // With the keyboard open on a narrow screen the preview gives all its room to the editor.
+                val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding)
                         .consumeWindowInsets(padding),
                 ) {
-                    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+                    val editorBody: @Composable ColumnScope.() -> Unit = {
                         CoderTipHost(
                             screen = TipScreen.Editor,
                             context = TipContext(
@@ -492,6 +555,44 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                             )
                             ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
                         }
+                    }
+                    if (splitOn) {
+                        SplitLayout(
+                            ratio = splitRatio,
+                            onRatioChange = { splitRatio = it },
+                            modifier = Modifier.fillMaxSize().imePadding(),
+                            collapseSecondWhenNarrow = imeVisible,
+                            first = { Column(modifier = Modifier.fillMaxSize()) { editorBody() } },
+                            second = {
+                                if (paneEntry == null) {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().padding(NeriboTheme.spacing.lg),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text(
+                                            text = MSG_NOTHING_TO_RUN,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center,
+                                        )
+                                    }
+                                } else {
+                                    CoderPreviewPanel(
+                                        projectId = projectId,
+                                        entryPath = paneEntry,
+                                        onClose = { scope.launch { prefs.setSplitEnabled(false) } },
+                                        onAskAi = askAiFromPreview,
+                                        embedded = true,
+                                        saveTick = saveTick,
+                                        entries = state.entries,
+                                        session = previewSession,
+                                        snackbarHostState = snackbarHostState,
+                                    )
+                                }
+                            },
+                        )
+                    } else {
+                        Column(modifier = Modifier.fillMaxSize().imePadding()) { editorBody() }
                     }
                     FileDrawer(
                         open = drawerOpen,
@@ -774,6 +875,13 @@ private fun LinkedLabel(state: CoderLinkState, onUnlink: () -> Unit) {
             }
         }
     }
+}
+
+/** The Activity behind [this] context, or null when there is none. Used to tell a rotation from leaving the screen. */
+private fun Context.findHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }
 
 /** The Run button in the top bar. */

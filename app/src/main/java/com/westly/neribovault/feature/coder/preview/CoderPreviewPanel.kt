@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.SystemClock
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
@@ -24,65 +25,115 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.ViewList
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.westly.neribovault.BuildConfig
 import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.LoadingState
-import com.westly.neribovault.core.ui.components.MenuAction
+import com.westly.neribovault.core.ui.components.NeriboChip
 import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
-import com.westly.neribovault.core.ui.components.OverflowMenu
+import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.guidance.CoderTipHost
 import com.westly.neribovault.feature.coder.guidance.TipContext
 import com.westly.neribovault.feature.coder.guidance.TipScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** How long after a save finishes the preview reloads by itself. A new save inside this time starts the wait again. */
+const val AUTO_REFRESH_DELAY_MS = 1_000L
+
+/** The shortest time between two reloads that the preview starts by itself. */
+const val AUTO_REFRESH_MIN_GAP_MS = 1_000L
+
+private const val MSG_COPIED = "Copied"
+private const val MSG_NO_BROWSER = "No browser app found."
+private const val MSG_SERVER_FAILED = "Couldn't start the page on this phone. Try again."
+
+/**
+ * Whether the preview should reload by itself now: the switch is on, the preview is on screen, a save just
+ * finished, the page is not still loading and the last reload was at least a second ago. Pure, so the
+ * self-test checks every combination.
+ */
+fun shouldAutoRefresh(
+    enabled: Boolean,
+    previewVisible: Boolean,
+    saveJustFinished: Boolean,
+    loading: Boolean,
+    millisSinceLastReload: Long,
+): Boolean = enabled && previewVisible && saveJustFinished && !loading && millisSinceLastReload >= AUTO_REFRESH_MIN_GAP_MS
 
 /** Holds the browser view so back presses and the lifecycle can reach it. It is not state: nothing redraws when it changes. */
 private class PreviewHolder {
     var webView: WebView? = null
+
+    /** The address the browser view was last told to open, so a change of page loads once and a redraw does not. */
+    var loadedUrl: String? = null
+
+    /** When the page was last reloaded by a button or by auto-refresh, on the `SystemClock.elapsedRealtime` clock. */
+    var lastReloadAt: Long = 0L
 
     /** Stops the page and destroys the view. Safe to call twice. */
     fun release() {
@@ -131,6 +182,12 @@ private class PageDialogState(
  * [onClose]. The browser is destroyed when this leaves the screen. A rotation loads the page again;
  * nothing the page saved in its own storage is lost. When [onAskAi] is set, each error in the console
  * gets a Fix with AI button that hands the message to it.
+ *
+ * With [embedded] set the panel has no top bar and no Back handling of its own: it is the preview pane next to
+ * the editor, with a thin toolbar (reload, page picker, size, console, menu), and [onClose] turns the pane off.
+ * [saveTick] goes up each time a save finishes, which reloads the page after a second when auto-refresh is on.
+ * [entries] is the project's file list, for the page picker; [session] keeps the chosen size and page while the
+ * screen is open; messages such as "Copied" are shown on [snackbarHostState].
  */
 @Composable
 fun CoderPreviewPanel(
@@ -138,10 +195,16 @@ fun CoderPreviewPanel(
     entryPath: String,
     onClose: () -> Unit,
     onAskAi: ((CoderConsoleMessage) -> Unit)? = null,
+    embedded: Boolean = false,
+    saveTick: Int = 0,
+    entries: List<CoderEntry> = emptyList(),
+    session: CoderPreviewSession? = null,
+    snackbarHostState: SnackbarHostState? = null,
 ) {
     val context = LocalContext.current
     val store = remember(context) { (context.applicationContext as NeriboApp).container.coderFileStore }
     val holder = remember { PreviewHolder() }
+    val snackbar = snackbarHostState ?: remember { SnackbarHostState() }
     val plan by produceState<PreviewPlan?>(initialValue = null, projectId, store) {
         value = withContext(Dispatchers.IO) {
             PreviewPlan(
@@ -150,14 +213,18 @@ fun CoderPreviewPanel(
             )
         }
     }
-    BackHandler {
+    BackHandler(enabled = !embedded) {
         val view = holder.webView
         if (view != null && view.canGoBack()) view.goBack() else onClose()
     }
     val current = plan
     if (current == null) {
-        NeriboScaffold(topBar = { NeriboTopBar(title = "Preview", onBack = onClose) }) { padding ->
-            Box(modifier = Modifier.fillMaxSize().padding(padding)) { LoadingState() }
+        if (embedded) {
+            Box(modifier = Modifier.fillMaxSize()) { LoadingState() }
+        } else {
+            NeriboScaffold(topBar = { NeriboTopBar(title = "Preview", onBack = onClose) }) { padding ->
+                Box(modifier = Modifier.fillMaxSize().padding(padding)) { LoadingState() }
+            }
         }
     } else if (current.build is CoderBuildCheck.NeedsBuild) {
         NeedsBuildNotice(
@@ -166,7 +233,20 @@ fun CoderPreviewPanel(
             onBack = onClose,
         )
     } else {
-        PreviewContent(projectId, entryPath, current.rootPrefix, store, holder, onClose, onAskAi)
+        PreviewContent(
+            projectId = projectId,
+            entryPath = entryPath,
+            rootPrefix = current.rootPrefix,
+            store = store,
+            holder = holder,
+            embedded = embedded,
+            saveTick = saveTick,
+            entries = entries,
+            session = session,
+            snackbar = snackbar,
+            onClose = onClose,
+            onAskAi = onAskAi,
+        )
     }
 }
 
@@ -187,22 +267,93 @@ private fun PreviewContent(
     rootPrefix: String,
     store: CoderFileStore,
     holder: PreviewHolder,
+    embedded: Boolean,
+    saveTick: Int,
+    entries: List<CoderEntry>,
+    session: CoderPreviewSession?,
+    snackbar: SnackbarHostState,
     onClose: () -> Unit,
     onAskAi: ((CoderConsoleMessage) -> Unit)?,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val host = remember(projectId) { CoderPreviewHost.hostFor(projectId) }
     val responder = remember(projectId, rootPrefix) {
         CoderPreviewResponder(context.applicationContext, store, projectId, rootPrefix)
     }
     val console = remember(projectId, rootPrefix) { CoderConsole(host, rootPrefix) }
-    val startUrl = remember(projectId, rootPrefix, entryPath) { previewEntryUrl(projectId, rootPrefix, entryPath) }
+    val view = session ?: remember { CoderPreviewSession() }
+    // In the pane the page choice lives in the session; in the full screen it only lasts while this screen is open.
+    var localPage by rememberSaveable { mutableStateOf<String?>(null) }
+    val shownEntry = (if (embedded) view.page else localPage) ?: entryPath
+    val pages = remember(entries, rootPrefix) { htmlPagesOf(entries, rootPrefix) }
+    val startUrl = remember(projectId, rootPrefix, shownEntry) { previewEntryUrl(projectId, rootPrefix, shownEntry) }
     var loading by remember { mutableStateOf(true) }
     var showConsole by rememberSaveable { mutableStateOf(false) }
     var showClearConfirm by remember { mutableStateOf(false) }
     var pendingDialog by remember { mutableStateOf<PageDialogState?>(null) }
     var pendingLink by remember { mutableStateOf<String?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val prefs = remember(context) { (context.applicationContext as NeriboApp).container.coderPrefs }
+    val autoRefresh by prefs.autoRefresh.collectAsStateWithLifecycle(initialValue = true)
+    val autoRefreshNow by rememberUpdatedState(autoRefresh)
+    val server = remember(context) { CoderLocalServer.shared(context) }
+    val serving by server.serving.collectAsStateWithLifecycle()
+    val servingHere = serving?.projectId == projectId
+
+    val say: (String) -> Unit = { text ->
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(text)
+        }
+    }
+    val reload: () -> Unit = {
+        holder.lastReloadAt = SystemClock.elapsedRealtime()
+        holder.webView?.reload()
+    }
+    val pickPage: (String) -> Unit = { page ->
+        if (embedded) {
+            view.page = page
+        } else {
+            localPage = page
+        }
+    }
+    val openInPhoneBrowser: () -> Unit = {
+        scope.launch {
+            val info = withContext(Dispatchers.IO) { server.start(projectId, rootPrefix) }
+            if (info == null) {
+                say(MSG_SERVER_FAILED)
+            } else {
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(browserUrlFor(info, shownEntry))))
+                } catch (e: ActivityNotFoundException) {
+                    server.stop()
+                    say(MSG_NO_BROWSER)
+                }
+            }
+        }
+    }
+
+    // A finished save reloads the page one second later; a newer save starts that wait again. A page that is
+    // still loading is waited for, so the reload never cuts a load short.
+    val firstSaveTick = remember { saveTick }
+    LaunchedEffect(saveTick) {
+        if (saveTick == firstSaveTick) return@LaunchedEffect
+        delay(AUTO_REFRESH_DELAY_MS)
+        snapshotFlow { loading }.first { !it }
+        val now = SystemClock.elapsedRealtime()
+        val ready = shouldAutoRefresh(
+            enabled = autoRefreshNow,
+            previewVisible = true,
+            saveJustFinished = true,
+            loading = loading,
+            millisSinceLastReload = now - holder.lastReloadAt,
+        )
+        if (ready) {
+            holder.lastReloadAt = now
+            holder.webView?.reload()
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -220,69 +371,94 @@ private fun PreviewContent(
         }
     }
 
-    NeriboScaffold(
-        topBar = {
-            NeriboTopBar(
-                title = "Preview",
-                onBack = onClose,
-                actions = {
-                    NeriboIconButton(
-                        icon = Icons.Outlined.Refresh,
-                        contentDescription = "Reload",
-                        onClick = { holder.webView?.reload() },
-                    )
-                    ConsoleAction(errorCount = console.errorCount, onClick = { showConsole = true })
-                    OverflowMenu(
-                        actions = listOf(MenuAction("Clear preview data", { showClearConfirm = true })),
-                    )
-                },
-            )
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .consumeWindowInsets(padding)
-                .imePadding(),
-        ) {
-            CoderTipHost(
-                screen = TipScreen.Preview,
-                context = TipContext(
-                    screen = TipScreen.Preview,
-                    previewLoaded = !loading,
-                    busy = loading || pendingDialog != null || pendingLink != null || showClearConfirm || showConsole,
-                ),
-                modifier = Modifier.padding(horizontal = NeriboTheme.spacing.md, vertical = NeriboTheme.spacing.xs),
-            )
-            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { viewContext ->
-                    val view = buildPreviewWebView(
-                        context = viewContext,
-                        responder = responder,
-                        console = console,
-                        host = host,
-                        onLoading = { loading = it },
-                        onDialog = { state ->
-                            pendingDialog?.cancel()
-                            pendingDialog = state
-                        },
-                        onExternalLink = { pendingLink = it },
-                    )
-                    holder.webView = view
-                    view.loadUrl(startUrl)
-                    view
-                },
-            )
-            if (loading) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
+    val viewport: @Composable (Modifier) -> Unit = { modifier ->
+        PreviewViewport(
+            preset = view.preset,
+            startUrl = startUrl,
+            holder = holder,
+            responder = responder,
+            console = console,
+            host = host,
+            loading = loading,
+            onLoading = { loading = it },
+            onDialog = { state ->
+                pendingDialog?.cancel()
+                pendingDialog = state
+            },
+            onExternalLink = { pendingLink = it },
+            modifier = modifier,
+        )
+    }
+    val menu: @Composable () -> Unit = {
+        PreviewMenu(
+            autoRefresh = autoRefresh,
+            onAutoRefreshChange = { scope.launch { prefs.setAutoRefresh(it) } },
+            onOpenInBrowser = openInPhoneBrowser,
+            onClearData = { showClearConfirm = true },
+        )
+    }
+
+    if (embedded) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = NeriboTheme.spacing.xs),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NeriboIconButton(icon = Icons.Outlined.Refresh, contentDescription = "Reload", onClick = reload)
+                PagePicker(pages = pages, current = shownEntry, onPick = pickPage)
+                SizeChip(preset = view.preset, onPick = { view.preset = it })
+                ConsoleAction(errorCount = console.errorCount, onClick = { showConsole = true })
+                menu()
             }
+            if (servingHere) ServingRow(onStop = { server.stop() })
+            viewport(Modifier.weight(1f))
+        }
+    } else {
+        NeriboScaffold(
+            topBar = {
+                NeriboTopBar(
+                    title = "Preview",
+                    onBack = onClose,
+                    actions = {
+                        NeriboIconButton(icon = Icons.Outlined.Refresh, contentDescription = "Reload", onClick = reload)
+                        ConsoleAction(errorCount = console.errorCount, onClick = { showConsole = true })
+                        menu()
+                    },
+                )
+            },
+            snackbarHostState = snackbar,
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .consumeWindowInsets(padding)
+                    .imePadding(),
+            ) {
+                CoderTipHost(
+                    screen = TipScreen.Preview,
+                    context = TipContext(
+                        screen = TipScreen.Preview,
+                        previewLoaded = !loading,
+                        busy = loading || pendingDialog != null || pendingLink != null || showClearConfirm || showConsole,
+                    ),
+                    modifier = Modifier.padding(horizontal = NeriboTheme.spacing.md, vertical = NeriboTheme.spacing.xs),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = NeriboTheme.spacing.xs),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    PagePicker(pages = pages, current = shownEntry, onPick = pickPage)
+                    SizeChip(preset = view.preset, onPick = { view.preset = it })
+                }
+                if (servingHere) ServingRow(onStop = { server.stop() })
+                viewport(Modifier.weight(1f))
             }
         }
     }
@@ -312,7 +488,7 @@ private fun PreviewContent(
             onConfirm = {
                 showClearConfirm = false
                 clearPreviewData()
-                holder.webView?.reload()
+                reload()
             },
             onDismiss = { showClearConfirm = false },
             destructive = true,
@@ -331,7 +507,174 @@ private fun PreviewContent(
             onClear = { console.clear() },
             onClose = { showConsole = false },
             onAskAi = askAi,
+            onCopied = { say(MSG_COPIED) },
         )
+    }
+}
+
+/**
+ * The page itself: the browser view laid out at exactly the width of the chosen [preset] (the whole area for Full),
+ * centered with a hairline border when the area is wider and scrolling sideways when it is narrower. The page is
+ * never scaled or zoomed. Changing [startUrl] opens that page in the same browser view.
+ */
+@Composable
+private fun PreviewViewport(
+    preset: CoderDevicePreset,
+    startUrl: String,
+    holder: PreviewHolder,
+    responder: CoderPreviewResponder,
+    console: CoderConsole,
+    host: String,
+    loading: Boolean,
+    onLoading: (Boolean) -> Unit,
+    onDialog: (PageDialogState) -> Unit,
+    onExternalLink: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = MaterialTheme.colorScheme
+    val scrollState = rememberScrollState()
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val paneWidth = maxWidth
+        val pageWidth: Dp = if (preset.widthDp == null) paneWidth else presetWidthDp(preset, paneWidth.value.toInt()).dp
+        val framed = preset.widthDp != null && pageWidth < paneWidth
+        Box(modifier = Modifier.fillMaxSize().horizontalScroll(scrollState)) {
+            Box(
+                modifier = Modifier.width(maxOf(pageWidth, paneWidth)).fillMaxHeight(),
+                contentAlignment = Alignment.TopCenter,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(pageWidth)
+                        .fillMaxHeight()
+                        .then(if (framed) Modifier.border(Dp.Hairline, colors.outlineVariant) else Modifier),
+                ) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { viewContext ->
+                            val browser = buildPreviewWebView(
+                                context = viewContext,
+                                responder = responder,
+                                console = console,
+                                host = host,
+                                onLoading = onLoading,
+                                onDialog = onDialog,
+                                onExternalLink = onExternalLink,
+                            )
+                            holder.webView = browser
+                            holder.loadedUrl = startUrl
+                            browser.loadUrl(startUrl)
+                            browser
+                        },
+                        update = { browser ->
+                            if (holder.loadedUrl != startUrl) {
+                                holder.loadedUrl = startUrl
+                                browser.loadUrl(startUrl)
+                            }
+                        },
+                    )
+                }
+            }
+        }
+        if (loading) {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                color = colors.primary,
+                trackColor = colors.surfaceVariant,
+            )
+        }
+    }
+}
+
+/** The size chip: it shows the chosen width ("Phone 360") and opens a small menu of the four sizes. */
+@Composable
+private fun SizeChip(preset: CoderDevicePreset, onPick: (CoderDevicePreset) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    Box {
+        NeriboChip(label = preset.chipText, selected = false, onClick = { expanded = true })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            for (option in CoderDevicePreset.values()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = if (option.widthDp == null) "Full width" else option.chipText,
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = if (option == preset) colors.primary else colors.onSurface,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onPick(option)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** The preview's three-dot menu: the auto-refresh switch, Open in browser and Clear preview data. */
+@Composable
+private fun PreviewMenu(
+    autoRefresh: Boolean,
+    onAutoRefreshChange: (Boolean) -> Unit,
+    onOpenInBrowser: () -> Unit,
+    onClearData: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    Box {
+        NeriboIconButton(icon = Icons.Outlined.MoreVert, contentDescription = "More options", onClick = { expanded = true })
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text(text = "Auto-refresh", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) },
+                onClick = { onAutoRefreshChange(!autoRefresh) },
+                trailingIcon = { Switch(checked = autoRefresh, onCheckedChange = null) },
+            )
+            DropdownMenuItem(
+                text = { Text(text = "Open in browser", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) },
+                onClick = {
+                    expanded = false
+                    onOpenInBrowser()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(text = "Clear preview data", style = MaterialTheme.typography.bodyLarge, color = colors.onSurface) },
+                onClick = {
+                    expanded = false
+                    onClearData()
+                },
+            )
+        }
+    }
+}
+
+/** Shown while the page is served to the phone's browser: a muted label, a reminder and a Stop button. */
+@Composable
+private fun ServingRow(onStop: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = NeriboTheme.spacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(NeriboTheme.spacing.sm),
+    ) {
+        Text(
+            text = "Serving on this phone",
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier
+                .clip(MaterialTheme.shapes.small)
+                .background(colors.surfaceVariant)
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+        )
+        Text(
+            text = "Keep Coder open while you view it",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onStop, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(text = "Stop", style = MaterialTheme.typography.labelLarge, color = colors.primary)
+        }
     }
 }
 
@@ -550,6 +893,23 @@ private fun previewEntryUrl(projectId: String, rootPrefix: String, entryPath: St
         "json" -> CoderPreviewHost.urlFor(projectId, "$virtual/json/$entryPath")
         else -> CoderPreviewHost.urlFor(projectId, CoderPreviewRoot.join(rootPrefix, entryPath))
     }
+}
+
+/**
+ * The address of [entryPath] on the local server, with the secret in the query so the first request is accepted.
+ * The server adds the site's top folder itself, so only the page's own path is used; Markdown and JSON files go
+ * through the app's own pages, like in [previewEntryUrl].
+ */
+internal fun browserUrlFor(info: CoderServerInfo, entryPath: String): String {
+    val extension = CoderPaths.nameOf(entryPath).substringAfterLast('.', "").lowercase()
+    val virtual = CoderPreviewHost.VIRTUAL_PREFIX
+    val path = when (extension) {
+        "md", "markdown" -> "$virtual/md/$entryPath"
+        "json" -> "$virtual/json/$entryPath"
+        else -> entryPath
+    }
+    val encoded = path.split('/').joinToString("/") { Uri.encode(it) }
+    return "http://127.0.0.1:${info.port}/$encoded?k=${info.token}"
 }
 
 /** Removes everything pages saved. Safe because Coder owns the only browser view in the app. */

@@ -21,7 +21,8 @@ import java.io.InputStream
  * Answers every request a previewed page makes to its own fake address, straight from the project
  * folder. Files are only ever found through [CoderFileStore.resolve], so a request can never reach
  * anything outside the project. Secure (https) requests to other hosts are left alone so the page can
- * use the internet; every other kind of address is refused. [rootPrefix] is "" or a folder name
+ * use the internet; every other kind of address is refused. Paths that [CoderServedPaths] blocks (such as
+ * `.env` files and the `.git` folder) answer 404 like a missing file. [rootPrefix] is "" or a folder name
  * (without a trailing slash) that acts as the top of the site. [context] gives access to the app's
  * bundled React and Babel files, which answer the well-known CDN addresses offline (see [CoderCdnShim]).
  */
@@ -84,6 +85,8 @@ class CoderPreviewResponder(
         }
         val head = method == "HEAD"
         val path = Uri.decode(url.encodedPath.orEmpty()).removePrefix("/")
+        // Secrets and tool folders are answered like a missing file, whichever way the path reaches them.
+        if (CoderServedPaths.isBlocked(path)) return notFound(path, head)
         val virtual = CoderPreviewHost.VIRTUAL_PREFIX
         if (path == virtual || path.startsWith("$virtual/")) return serveVirtual(path, head)
         return serveFile(path, head)
@@ -91,6 +94,7 @@ class CoderPreviewResponder(
 
     private fun serveFile(requested: String, head: Boolean): WebResourceResponse {
         val path = if (requested.isEmpty() || requested.endsWith("/")) requested + "index.html" else requested
+        if (CoderServedPaths.isBlocked(CoderPreviewRoot.join(rootPrefix, path))) return notFound(requested, head)
         var target = store.resolve(projectId, CoderPreviewRoot.join(rootPrefix, path))
         if (target != null && target.isDirectory) {
             target = store.resolve(projectId, CoderPreviewRoot.join(rootPrefix, "$path/index.html"))

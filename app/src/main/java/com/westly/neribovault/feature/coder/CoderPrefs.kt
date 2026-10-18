@@ -24,8 +24,9 @@ enum class GuidanceMode { Beginner, Pro }
 /**
  * Small Coder settings kept on the phone: which first-time tips were already seen, whether the welcome card
  * was seen, the Beginner or Pro choice and the tips switch, for which Coder
- * projects the person allowed the AI to use the notes of the linked Developer project, and the three editor
- * switches (suggestions, auto-close, mistake underlines; all on by default). Holds no secrets
+ * projects the person allowed the AI to use the notes of the linked Developer project, the three editor
+ * switches (suggestions, auto-close, mistake underlines; all on by default) and the two preview switches (live
+ * preview next to the editor, off by default; auto-refresh on save, on by default). Holds no secrets
  * and no file text. A failed read counts as "nothing saved yet"; a failed write is ignored, so the
  * worst case is a tip shown again or a switch that stays off.
  */
@@ -39,6 +40,8 @@ class CoderPrefs(context: Context) {
     private val modeKey = stringPreferencesKey("guidance_mode")
     private val tipsKey = booleanPreferencesKey("tips_enabled")
     private val welcomeKey = booleanPreferencesKey("welcome_seen")
+    private val splitKey = booleanPreferencesKey("preview_split")
+    private val autoRefreshKey = booleanPreferencesKey("preview_auto_refresh")
 
     private val data: Flow<Preferences> = store.data.catch { e ->
         if (e is IOException) emit(emptyPreferences()) else throw e
@@ -140,6 +143,22 @@ class CoderPrefs(context: Context) {
     /** Turns mistake underlines on or off. */
     suspend fun setLintEnabled(enabled: Boolean) {
         setFlag(lintKey, enabled)
+    }
+
+    /** True when the preview is shown next to the editor. Off by default. */
+    val splitEnabled: Flow<Boolean> = data.map { prefs -> prefs[splitKey] ?: false }.distinctUntilChanged()
+
+    /** Turns the live preview next to the editor on or off. */
+    suspend fun setSplitEnabled(enabled: Boolean) {
+        setFlag(splitKey, enabled)
+    }
+
+    /** True when the preview reloads by itself after a file is saved. On by default. */
+    val autoRefresh: Flow<Boolean> = data.map { prefs -> prefs[autoRefreshKey] ?: true }.distinctUntilChanged()
+
+    /** Turns reloading the preview after a save on or off. */
+    suspend fun setAutoRefresh(enabled: Boolean) {
+        setFlag(autoRefreshKey, enabled)
     }
 
     private suspend fun setFlag(key: Preferences.Key<Boolean>, enabled: Boolean) {
