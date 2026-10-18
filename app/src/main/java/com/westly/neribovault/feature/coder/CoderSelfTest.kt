@@ -82,6 +82,13 @@ import com.westly.neribovault.feature.coder.preview.CoderVendorAsset
 import com.westly.neribovault.feature.coder.preview.ConsoleLevel
 import com.westly.neribovault.feature.coder.templates.CoderTemplates
 import com.westly.neribovault.feature.coder.ui.CoderSyntaxColors
+import com.westly.neribovault.feature.coder.workspace.CODER_MAX_TABS
+import com.westly.neribovault.feature.coder.workspace.CODER_TABS_FULL_REASON
+import com.westly.neribovault.feature.coder.workspace.CoderSaveStatus
+import com.westly.neribovault.feature.coder.workspace.CoderTabLogic
+import com.westly.neribovault.feature.coder.workspace.CoderTabs
+import com.westly.neribovault.feature.coder.workspace.OpenOutcome
+import com.westly.neribovault.feature.coder.workspace.aggregateSaveStatus
 import com.westly.neribovault.feature.coder.zip.CoderExportResult
 import com.westly.neribovault.feature.coder.zip.CoderImportReport
 import com.westly.neribovault.feature.coder.zip.CoderImportResult
@@ -176,6 +183,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(smartDictionaryChecks())
         results.addAll(smartLintChecks())
         results.addAll(smartFindChecks())
+        results.addAll(tabLogicChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -2576,6 +2584,197 @@ private fun smartFindChecks(): List<CoderCheckResult> {
         check("Find: a new search state is closed and empty", "closed, no matches, no current") {
             val state = FindState()
             !state.open && state.query.isEmpty() && state.matches.isEmpty() && state.current == -1
+        },
+    )
+}
+
+private fun tabCheck(name: String, expected: String, actual: () -> String): CoderCheckResult =
+    check(name, expected, actual = actual) { actual() == expected }
+
+private fun tabsOf(vararg paths: String, active: String? = paths.lastOrNull(), max: Int = CODER_MAX_TABS, recent: List<String> = emptyList()): CoderTabs =
+    CoderTabs(paths.toList(), active, max, recent)
+
+private fun describeTabs(tabs: CoderTabs): String = tabs.paths.joinToString(",") + "|" + (tabs.active ?: "-")
+
+private fun describeOutcome(outcome: OpenOutcome): String = when (outcome) {
+    is OpenOutcome.Opened -> "Opened " + describeTabs(outcome.tabs) + " closed=" + (outcome.closedPath ?: "-")
+    is OpenOutcome.Activated -> "Activated " + describeTabs(outcome.tabs)
+    is OpenOutcome.Refused -> "Refused " + outcome.reason
+}
+
+private fun tabLabels(paths: List<String>): String = CoderTabLogic.labels(paths).values.joinToString("; ")
+
+private fun tabLogicChecks(): List<CoderCheckResult> {
+    val twelve = (1..12).map { "t$it" }
+    val full = CoderTabs(twelve, "t12", 12)
+    val clean: (String) -> Boolean = { false }
+    val allDirty: (String) -> Boolean = { true }
+    return listOf(
+        tabCheck("Tabs: opening a new file adds it and makes it active", "Opened a,b,c|c closed=-") {
+            describeOutcome(CoderTabLogic.open(tabsOf("a", "b"), "c", clean))
+        },
+        tabCheck("Tabs: opening an open file only activates it", "Activated a,b|a") {
+            describeOutcome(CoderTabLogic.open(tabsOf("a", "b"), "a", clean))
+        },
+        tabCheck("Tabs: opening the first file", "Opened c|c closed=-") {
+            describeOutcome(CoderTabLogic.open(CoderTabs(emptyList(), null), "c", clean))
+        },
+        tabCheck("Tabs: the limit is 12", "12") { CODER_MAX_TABS.toString() },
+        tabCheck("Tabs: a new list allows 12 tabs", "12") { CoderTabs(emptyList(), null).maxTabs.toString() },
+        tabCheck("Tabs: at the limit the oldest clean tab closes", (twelve.drop(1) + "new").joinToString(",") + "|new closed=t1") {
+            describeOutcome(CoderTabLogic.open(full, "new", clean))
+        },
+        tabCheck("Tabs: the least recently used clean tab is the one that closes", "closed=t2") {
+            val recent = twelve.drop(1) + "t1"
+            val outcome = CoderTabLogic.open(CoderTabs(twelve, "t1", 12, recent), "new", clean)
+            "closed=" + ((outcome as? OpenOutcome.Opened)?.closedPath ?: "-")
+        },
+        tabCheck("Tabs: a tab that was just activated is not the one to close", "closed=t2") {
+            val outcome = CoderTabLogic.open(CoderTabLogic.activate(full, "t1"), "new", clean)
+            "closed=" + ((outcome as? OpenOutcome.Opened)?.closedPath ?: "-")
+        },
+        tabCheck("Tabs: a tab with unsaved text is skipped when making room", "closed=t2") {
+            val outcome = CoderTabLogic.open(full, "new") { it == "t1" }
+            "closed=" + ((outcome as? OpenOutcome.Opened)?.closedPath ?: "-")
+        },
+        tabCheck("Tabs: when every tab has unsaved text the open is refused", "Refused Close a tab first") {
+            describeOutcome(CoderTabLogic.open(full, "new", allDirty))
+        },
+        tabCheck("Tabs: the refusal text is the one on the screen", "Close a tab first") { CODER_TABS_FULL_REASON },
+        tabCheck("Tabs: opening an open file at the limit closes nothing", twelve.joinToString(",") + "|t5") {
+            describeOutcome(CoderTabLogic.open(full, "t5", allDirty)).removePrefix("Activated ")
+        },
+        tabCheck("Tabs: the limit can be changed", "Opened b,c|c closed=a") {
+            describeOutcome(CoderTabLogic.open(tabsOf("a", "b", max = 2), "c", clean))
+        },
+        tabCheck("Tabs: the active tab may be the one that closes when the others have unsaved text", "Opened a,c|c closed=b") {
+            val tabs = CoderTabs(listOf("a", "b"), "b", 2, listOf("a", "b"))
+            describeOutcome(CoderTabLogic.open(tabs, "c") { it == "a" })
+        },
+        tabCheck("Tabs: thirteen opens keep twelve tabs and drop the first", "12 tabs, f1 gone, active f13") {
+            var tabs = CoderTabs(emptyList(), null)
+            for (i in 1..13) {
+                val outcome = CoderTabLogic.open(tabs, "f$i", clean)
+                tabs = (outcome as OpenOutcome.Opened).tabs
+            }
+            "${tabs.paths.size} tabs, " + (if ("f1" in tabs.paths) "f1 kept" else "f1 gone") + ", active " + tabs.active
+        },
+        tabCheck("Tabs: activating a path that is not open changes nothing", "a,b|b") {
+            describeTabs(CoderTabLogic.activate(tabsOf("a", "b"), "zzz"))
+        },
+        tabCheck("Tabs: activating moves the tab to the most recent place", "b,c,a") {
+            CoderTabLogic.activate(tabsOf("a", "b", "c"), "a").recent.joinToString(",")
+        },
+        tabCheck("Tabs: closing the active tab in the middle activates the right one", "a,c|c") {
+            describeTabs(CoderTabLogic.close(tabsOf("a", "b", "c", active = "b"), "b"))
+        },
+        tabCheck("Tabs: closing the active last tab activates the left one", "a,b|b") {
+            describeTabs(CoderTabLogic.close(tabsOf("a", "b", "c"), "c"))
+        },
+        tabCheck("Tabs: closing the active first tab activates the right one", "b,c|b") {
+            describeTabs(CoderTabLogic.close(tabsOf("a", "b", "c", active = "a"), "a"))
+        },
+        tabCheck("Tabs: closing the only tab leaves none active", "|-") {
+            describeTabs(CoderTabLogic.close(tabsOf("a"), "a"))
+        },
+        tabCheck("Tabs: closing another tab keeps the active one", "a,b|a") {
+            describeTabs(CoderTabLogic.close(tabsOf("a", "b", "c", active = "a"), "c"))
+        },
+        tabCheck("Tabs: closing a tab that is not open changes nothing", "a,b,c|c") {
+            describeTabs(CoderTabLogic.close(tabsOf("a", "b", "c"), "zzz"))
+        },
+        tabCheck("Tabs: the tab that becomes active is the most recent", "c") {
+            CoderTabLogic.close(tabsOf("a", "b", "c", active = "b"), "b").recent.last()
+        },
+        tabCheck("Tabs: Close others keeps one tab and makes it active", "b|b") {
+            describeTabs(CoderTabLogic.closeOthers(tabsOf("a", "b", "c", active = "a"), "b"))
+        },
+        tabCheck("Tabs: Close others for a tab that is not open changes nothing", "a,b,c|c") {
+            describeTabs(CoderTabLogic.closeOthers(tabsOf("a", "b", "c"), "zzz"))
+        },
+        tabCheck("Tabs: Close all leaves nothing open", "|-") {
+            describeTabs(CoderTabLogic.closeAll(tabsOf("a", "b", "c")))
+        },
+        tabCheck("Tabs: Close all on an empty list", "|-") {
+            describeTabs(CoderTabLogic.closeAll(CoderTabs(emptyList(), null)))
+        },
+        tabCheck("Tabs: renaming a file renames its tab", "x,b|b") {
+            describeTabs(CoderTabLogic.rename(tabsOf("a", "b"), "a", "x"))
+        },
+        tabCheck("Tabs: renaming the active file keeps it active", "x,b|x") {
+            describeTabs(CoderTabLogic.rename(tabsOf("a", "b", active = "a"), "a", "x"))
+        },
+        tabCheck("Tabs: renaming a folder renames every tab inside it", "lib/a.js,lib/b.js,readme.md|lib/b.js") {
+            describeTabs(CoderTabLogic.rename(tabsOf("src/a.js", "src/b.js", "readme.md", active = "src/b.js"), "src", "lib"))
+        },
+        tabCheck("Tabs: renaming a folder leaves a folder with a similar name alone", "lib/a.js,src2/a.js|src2/a.js") {
+            describeTabs(CoderTabLogic.rename(tabsOf("src/a.js", "src2/a.js"), "src", "lib"))
+        },
+        tabCheck("Tabs: renaming a nested folder", "a/z/c.js|a/z/c.js") {
+            describeTabs(CoderTabLogic.rename(tabsOf("a/b/c.js"), "a/b", "a/z"))
+        },
+        tabCheck("Tabs: renaming something that is not open changes nothing", "a,b|b") {
+            describeTabs(CoderTabLogic.rename(tabsOf("a", "b"), "zz", "y"))
+        },
+        tabCheck("Tabs: renaming keeps the recent order", "b,x") {
+            CoderTabLogic.rename(tabsOf("a", "b", active = "a", recent = listOf("b", "a")), "a", "x").recent.joinToString(",")
+        },
+        tabCheck("Tabs: a deleted file closes its tab", "a,c|c") {
+            describeTabs(CoderTabLogic.removed(tabsOf("a", "b", "c", active = "b"), "b"))
+        },
+        tabCheck("Tabs: a deleted folder closes every tab inside it", "x|x") {
+            describeTabs(CoderTabLogic.removed(tabsOf("src/a", "src/b", "x", active = "src/a"), "src"))
+        },
+        tabCheck("Tabs: a deleted folder leaves a folder with a similar name alone", "src2/a|src2/a") {
+            describeTabs(CoderTabLogic.removed(tabsOf("src/a", "src2/a", active = "src/a"), "src"))
+        },
+        tabCheck("Tabs: deleting something that is not open changes nothing", "a,b|b") {
+            describeTabs(CoderTabLogic.removed(tabsOf("a", "b"), "zz"))
+        },
+        tabCheck("Tabs: deleting a folder that holds every tab leaves none", "|-") {
+            describeTabs(CoderTabLogic.removed(tabsOf("d/a", "d/b"), "d"))
+        },
+        tabCheck("Tabs: deleting an inactive file keeps the active tab", "a,b|a") {
+            describeTabs(CoderTabLogic.removed(tabsOf("a", "b", "c", active = "a"), "c"))
+        },
+        tabCheck("Tabs: a renamed path is mapped exactly", "x") { CoderTabLogic.mapPath("a", "a", "x") },
+        tabCheck("Tabs: a path inside a renamed folder is mapped", "lib/a/b.js") { CoderTabLogic.mapPath("src/a/b.js", "src", "lib") },
+        tabCheck("Tabs: a path with a similar folder name is not mapped", "src2/a.js") { CoderTabLogic.mapPath("src2/a.js", "src", "lib") },
+        tabCheck("Tabs: a path is inside itself and inside its folder, not inside a lookalike", "true,true,false") {
+            listOf(
+                CoderTabLogic.isInside("src", "src"),
+                CoderTabLogic.isInside("src/a.js", "src"),
+                CoderTabLogic.isInside("src2/a.js", "src"),
+            ).joinToString(",")
+        },
+        tabCheck("Labels: different names show the file name", "a.js; b.css") { tabLabels(listOf("a.js", "b.css")) },
+        tabCheck("Labels: a path in a folder shows only the file name", "main.js") { tabLabels(listOf("src/main.js")) },
+        tabCheck("Labels: two files with one name show the folder", "index.js (src); index.js (lib)") {
+            tabLabels(listOf("src/index.js", "lib/index.js"))
+        },
+        tabCheck("Labels: a top-level duplicate shows root", "index.html (root); index.html (docs)") {
+            tabLabels(listOf("index.html", "docs/index.html"))
+        },
+        tabCheck("Labels: three files with one name", "x.js (a); x.js (b); x.js (c)") {
+            tabLabels(listOf("a/x.js", "b/x.js", "c/x.js"))
+        },
+        tabCheck("Labels: folders that share a name fall back to the full path", "a/s/x.js; b/s/x.js; x.js (c)") {
+            tabLabels(listOf("a/s/x.js", "b/s/x.js", "c/x.js"))
+        },
+        tabCheck("Labels: only the duplicates change", "a.js (root); a.js (src); b.js") {
+            tabLabels(listOf("a.js", "src/a.js", "b.js"))
+        },
+        tabCheck("Labels: an empty list gives no labels", "") { tabLabels(emptyList()) },
+        tabCheck("Labels: each path has its own label", "x.js (a)") { CoderTabLogic.labels(listOf("a/x.js", "b/x.js"))["a/x.js"] ?: "missing" },
+        tabCheck("Save status: a write in any tab shows Saving", "Saving") { aggregateSaveStatus(true, true, true).name },
+        tabCheck("Save status: a failed active tab shows Failed", "Failed") { aggregateSaveStatus(false, true, true).name },
+        tabCheck("Save status: waiting for autosave shows Saving", "Saving") { aggregateSaveStatus(false, false, true).name },
+        tabCheck("Save status: nothing to save shows Saved", "Saved") { aggregateSaveStatus(false, false, false).name },
+        tabCheck("Save status: a write shows Saving even when nothing else is pending", "Saving") {
+            aggregateSaveStatus(true, false, false).name
+        },
+        check("Save status: the three states exist", "Saved, Saving and Failed") {
+            CoderSaveStatus.values().map { it.name }.toSet() == setOf("Saved", "Saving", "Failed")
         },
     )
 }

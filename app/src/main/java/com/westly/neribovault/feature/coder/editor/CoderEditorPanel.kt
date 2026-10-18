@@ -70,7 +70,9 @@ private const val CURRENT_MATCH_TINT_ALPHA = 0.5f
  * font. Colors are added by a transformation that never changes the text, so offsets stay the same.
  * [issues] are underlined as mistakes and [matches] (inclusive ranges, [currentMatch] the one in use) are tinted
  * as find results; both only change how the text looks. Each time [revealTick] goes up the editor scrolls to the
- * current match, even when the text box does not have the keyboard.
+ * current match, even when the text box does not have the keyboard. The panel starts scrolled to
+ * ([initialScrollX], [initialScrollY]) and reports every scroll through [onScrollChanged]; the caller keys the
+ * panel by the open file so scroll and focus never leak from one file to another.
  */
 @Composable
 fun CoderEditorPanel(
@@ -82,12 +84,15 @@ fun CoderEditorPanel(
     currentMatch: Int = -1,
     issues: List<CoderIssue> = emptyList(),
     revealTick: Int = 0,
+    initialScrollX: Int = 0,
+    initialScrollY: Int = 0,
+    onScrollChanged: (x: Int, y: Int) -> Unit = { _, _ -> },
 ) {
     val colors = MaterialTheme.colorScheme
     val syntax = rememberCoderSyntaxColors()
     val density = LocalDensity.current
-    val vScroll = rememberScrollState()
-    val hScroll = rememberScrollState()
+    val vScroll = rememberScrollState(initialScrollY)
+    val hScroll = rememberScrollState(initialScrollX)
     val errorTint = colors.error.copy(alpha = ISSUE_TINT_ALPHA)
     val warningTint = NeriboTheme.extraColors.warning.copy(alpha = ISSUE_TINT_ALPHA)
     val matchTint = colors.primary.copy(alpha = MATCH_TINT_ALPHA)
@@ -171,6 +176,12 @@ fun CoderEditorPanel(
                 hScroll.animateScrollTo(horizontalTarget.toInt().coerceAtLeast(0), tween(durationMillis = 120))
             }
         }
+    }
+
+    // Tells the caller where the text is scrolled to, so a tab can come back to the same place.
+    val latestOnScroll by rememberUpdatedState(onScrollChanged)
+    LaunchedEffect(vScroll, hScroll) {
+        snapshotFlow { Pair(hScroll.value, vScroll.value) }.collectLatest { (x, y) -> latestOnScroll(x, y) }
     }
 
     // Scrolls to the find match the person just stepped to. The text box may not have the keyboard then

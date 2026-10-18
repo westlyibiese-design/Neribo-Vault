@@ -27,6 +27,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -78,14 +79,23 @@ import com.westly.neribovault.feature.coder.zip.CoderZipExporter
 import com.westly.neribovault.feature.coder.zip.CoderZipRules
 import com.westly.neribovault.feature.coder.zip.ZipProgressDialog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, Delete, RenameProject }
 
+/** A tab close that waits for the person to confirm, because a file in it could not be saved. */
+private sealed class PendingClose {
+    class One(val path: String) : PendingClose()
+    class Others(val keep: String) : PendingClose()
+    object All : PendingClose()
+}
+
 /**
- * One project. With no file open it shows the file tree (Files mode); with a file open it shows the
- * code editor (Editor mode). Back saves and returns from the editor first, then leaves the project.
+ * One project. In Files mode it shows the file tree; in Editor mode it shows a strip of open files (tabs), a
+ * side drawer with the file tree and the code editor of the active tab. Back closes the find bar, then the
+ * drawer, then saves and returns to the file list (the tabs stay open) and then leaves the project.
  */
 @Composable
 fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit, onOpenGitHub: () -> Unit) {
@@ -118,9 +128,16 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
 
-    var savedOpenPath by rememberSaveable { mutableStateOf<String?>(null) }
-    val restoredPath = remember { savedOpenPath }
-    var restoreHandled by remember { mutableStateOf(restoredPath == null) }
+    // The open tabs, kept as plain paths so they can be reopened after the process was killed.
+    var savedTabPaths by rememberSaveable(
+        stateSaver = listSaver<List<String>, String>(save = { it }, restore = { it }),
+    ) { mutableStateOf(emptyList<String>()) }
+    var savedActivePath by rememberSaveable { mutableStateOf<String?>(null) }
+    var savedEditorVisible by rememberSaveable { mutableStateOf(false) }
+    val restoredPaths = remember { savedTabPaths }
+    val restoredActive = remember { savedActivePath }
+    val restoredVisible = remember { savedEditorVisible }
+    var restoreHandled by remember { mutableStateOf(restoredPaths.isEmpty()) }
     var expandedFolders by rememberSaveable(
         stateSaver = listSaver<List<String>, String>(save = { it }, restore = { it }),
     ) { mutableStateOf(emptyList<String>()) }
@@ -132,6 +149,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     var aiSnapshot by remember { mutableStateOf<AiSelectionSnapshot?>(null) }
     var showLinkSheet by rememberSaveable { mutableStateOf(false) }
     var showEditorSettings by rememberSaveable { mutableStateOf(false) }
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var pendingClose by remember { mutableStateOf<PendingClose?>(null) }
     var findFieldFocused by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     val exporter = remember(context) {
@@ -160,14 +179,20 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
 
     LifecycleSaveEffect(onSave = { vm.flush() })
 
-    // After the process was killed, open the file that was open before.
+    // After the process was killed, open the files that were open before. It finishes even when the screen turns meanwhile.
     LaunchedEffect(Unit) {
-        val path = restoredPath
-        if (path != null && vm.state.value.openPath == null) vm.openFile(path)
+        if (restoredPaths.isNotEmpty() && vm.state.value.tabs.isEmpty()) {
+            withContext(NonCancellable) { vm.restoreTabs(restoredPaths, restoredActive, restoredVisible) }
+        }
         restoreHandled = true
     }
-    LaunchedEffect(state.openPath, restoreHandled) {
-        if (restoreHandled || state.openPath != null) savedOpenPath = state.openPath
+    val tabPaths = remember(state.tabs) { state.tabs.map { it.path } }
+    LaunchedEffect(tabPaths, state.openPath, state.editorVisible, restoreHandled) {
+        if (restoreHandled) {
+            savedTabPaths = tabPaths
+            savedActivePath = state.openPath
+            savedEditorVisible = state.editorVisible
+        }
     }
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
@@ -176,15 +201,21 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
         vm.consumeMessage()
     }
 
-    val openPath = state.openPath
+    // The editor is on screen only in Editor mode. With the file list showing, the tabs stay open but openPath is null here.
+    val openPath = if (state.editorVisible) state.openPath else null
     val previewEntry = state.previewEntry
     // While the preview is showing it handles Back itself (page history first, then closing).
-    BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.closeFile() }
-    // The find bar closes first; this is declared after the handler above so that it is asked before it.
+    BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen) { vm.showFiles() }
+    // The drawer closes before Back returns to the file list; declared after the handler above so that it is asked first.
+    BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen && drawerOpen) { drawerOpen = false }
+    // The find bar closes first of all; this is declared last, so it is asked before the two above.
     BackHandler(enabled = openPath != null && previewEntry == null && !aiOpen && find.open) { vm.closeFind() }
     LaunchedEffect(find.open) { if (!find.open) findFieldFocused = false }
+    LaunchedEffect(openPath) { if (openPath == null) drawerOpen = false }
     val openAiHelp: () -> Unit = {
-        aiSnapshot = aiSelectionSnapshotOf(vm.state.value.openPath, vm.editorValue.value)
+        val shown = vm.state.value
+        aiSnapshot = aiSelectionSnapshotOf(if (shown.editorVisible) shown.openPath else null, vm.editorValue.value)
+        drawerOpen = false
         aiOpen = true
     }
     val closeAiHelp: () -> Unit = {
@@ -242,8 +273,10 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     // Run shows the open file when it is a page, Markdown, SVG or JSON; otherwise the project's index.html.
     val runPreview: () -> Unit = {
         focusManager.clearFocus()
+        drawerOpen = false
         scope.launch {
-            val open = vm.state.value.openPath
+            val shown = vm.state.value
+            val open = if (shown.editorVisible) shown.openPath else null
             val entry = when {
                 open != null && isPreviewableFile(open) -> open
                 hasRunnableRoot(context, projectId) -> RUN_INDEX
@@ -256,6 +289,24 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                 snackbarHostState.showSnackbar(MSG_NOTHING_TO_RUN)
             }
         }
+    }
+    // A tab whose file could not be saved asks before it closes; every other tab closes at once (after saving).
+    val requestCloseTab: (String) -> Unit = { path ->
+        if (state.tabs.firstOrNull { it.path == path }?.saveFailed == true) {
+            pendingClose = PendingClose.One(path)
+        } else {
+            vm.closeTab(path)
+        }
+    }
+    val requestCloseOthers: (String) -> Unit = { keep ->
+        if (state.tabs.any { it.path != keep && it.saveFailed }) {
+            pendingClose = PendingClose.Others(keep)
+        } else {
+            vm.closeOtherTabs(keep)
+        }
+    }
+    val requestCloseAll: () -> Unit = {
+        if (state.tabs.any { it.saveFailed }) pendingClose = PendingClose.All else vm.closeAllTabs()
     }
     // A project that came from a ZIP asks once per app session before its code runs.
     val onRun: () -> Unit = {
@@ -272,7 +323,15 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                 title = project?.name ?: "Coder",
                 subtitle = openPath,
                 onBack = {
-                    if (openPath != null && find.open) vm.closeFind() else if (openPath != null) vm.closeFile() else onBack()
+                    if (openPath != null && find.open) {
+                        vm.closeFind()
+                    } else if (openPath != null && drawerOpen) {
+                        drawerOpen = false
+                    } else if (openPath != null) {
+                        vm.showFiles()
+                    } else {
+                        onBack()
+                    }
                 },
                 actions = {
                     if (openPath != null) {
@@ -345,48 +404,104 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                 val issueMessage = remember(issues, caret) {
                     if (!caret.collapsed) null else issues.firstOrNull { caret.start >= it.start && caret.start <= it.end }?.message
                 }
-                Column(
+                // Where the file was scrolled to the last time it was shown; read again whenever the active file changes.
+                val (scrollX, scrollY) = remember(openPath) { vm.scrollOf(openPath) }
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(padding)
-                        .consumeWindowInsets(padding)
-                        .imePadding(),
+                        .consumeWindowInsets(padding),
                 ) {
-                    if (find.open) {
-                        FindReplaceBar(
-                            state = find,
-                            onQueryChange = { vm.setQuery(it) },
-                            onReplacementChange = { vm.setReplacement(it) },
-                            onToggleCase = { vm.toggleCase() },
-                            onToggleWholeWord = { vm.toggleWholeWord() },
-                            onPrevious = { vm.previous() },
-                            onNext = { vm.next() },
-                            onReplace = { vm.replaceCurrent() },
-                            onReplaceAll = { vm.replaceAllMatches() },
-                            onClose = { vm.closeFind() },
-                            onFieldFocusChange = { findFieldFocused = it },
+                    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+                        TabStrip(
+                            tabs = state.tabs,
+                            activePath = openPath,
+                            onActivate = { vm.activateTab(it) },
+                            onClose = requestCloseTab,
+                            onCloseOthers = requestCloseOthers,
+                            onCloseAll = requestCloseAll,
+                            onToggleFiles = {
+                                if (drawerOpen) {
+                                    drawerOpen = false
+                                } else {
+                                    focusManager.clearFocus()
+                                    drawerOpen = true
+                                }
+                            },
                         )
+                        if (find.open) {
+                            FindReplaceBar(
+                                state = find,
+                                onQueryChange = { vm.setQuery(it) },
+                                onReplacementChange = { vm.setReplacement(it) },
+                                onToggleCase = { vm.toggleCase() },
+                                onToggleWholeWord = { vm.toggleWholeWord() },
+                                onPrevious = { vm.previous() },
+                                onNext = { vm.next() },
+                                onReplace = { vm.replaceCurrent() },
+                                onReplaceAll = { vm.replaceAllMatches() },
+                                onClose = { vm.closeFind() },
+                                onFieldFocusChange = { findFieldFocused = it },
+                            )
+                        }
+                        // Keyed by the file so that scroll position and focus never carry over from another tab.
+                        key(openPath) {
+                            CoderEditorPanel(
+                                value = editorValue,
+                                onValueChange = { vm.onEditorChange(it) },
+                                language = language,
+                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                matches = find.matches,
+                                currentMatch = find.current,
+                                issues = issues,
+                                revealTick = find.reveal,
+                                initialScrollX = scrollX,
+                                initialScrollY = scrollY,
+                                onScrollChanged = { x, y -> vm.updateScroll(openPath, x, y) },
+                            )
+                        }
+                        // While a find box has the keyboard the strip and the extra keys are hidden: they would type
+                        // into the file, not into the box, and the editor needs the room.
+                        if (!findFieldFocused) {
+                            SuggestionStrip(
+                                suggestions = suggestions,
+                                issueMessage = issueMessage,
+                                onAccept = { vm.acceptSuggestion(it) },
+                            )
+                            ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
+                        }
                     }
-                    CoderEditorPanel(
-                        value = editorValue,
-                        onValueChange = { vm.onEditorChange(it) },
-                        language = language,
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        matches = find.matches,
-                        currentMatch = find.current,
-                        issues = issues,
-                        revealTick = find.reveal,
+                    FileDrawer(
+                        open = drawerOpen,
+                        projectName = project?.name.orEmpty(),
+                        entries = state.entries,
+                        expandedFolders = expandedFolders,
+                        activePath = openPath,
+                        onToggleFolder = { path ->
+                            expandedFolders = if (path in expandedFolders) expandedFolders - path else expandedFolders + path
+                        },
+                        onOpenFile = {
+                            vm.openFile(it)
+                            drawerOpen = false
+                        },
+                        onRename = {
+                            dialogPath = it.path
+                            dialog = WorkspaceDialog.Rename
+                        },
+                        onDelete = {
+                            dialogPath = it.path
+                            dialog = WorkspaceDialog.Delete
+                        },
+                        onNewFileIn = {
+                            dialogPath = it
+                            dialog = WorkspaceDialog.NewFile
+                        },
+                        onNewFolderIn = {
+                            dialogPath = it
+                            dialog = WorkspaceDialog.NewFolder
+                        },
+                        onClose = { drawerOpen = false },
                     )
-                    // While a find box has the keyboard the strip and the extra keys are hidden: they would type
-                    // into the file, not into the box, and the editor needs the room.
-                    if (!findFieldFocused) {
-                        SuggestionStrip(
-                            suggestions = suggestions,
-                            issueMessage = issueMessage,
-                            onAccept = { vm.acceptSuggestion(it) },
-                        )
-                        ExtraKeysBar(onInsert = { vm.insertAtCursor(it) })
-                    }
                 }
             }
             else -> Column(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -509,6 +624,28 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
         )
     }
 
+    pendingClose?.let { request ->
+        ConfirmDialog(
+            title = "Close without saving?",
+            message = if (request is PendingClose.One) {
+                "This file couldn't be saved. Close it anyway?"
+            } else {
+                "Some files couldn't be saved. Close them anyway?"
+            },
+            confirmLabel = "Close anyway",
+            onConfirm = {
+                pendingClose = null
+                when (request) {
+                    is PendingClose.One -> vm.closeTab(request.path, discard = true)
+                    is PendingClose.Others -> vm.closeOtherTabs(request.keep, discard = true)
+                    PendingClose.All -> vm.closeAllTabs(discard = true)
+                }
+            },
+            onDismiss = { pendingClose = null },
+            destructive = true,
+            dismissLabel = "Keep open",
+        )
+    }
     if (showEditorSettings) {
         EditorSettingsSheet(onDismiss = { showEditorSettings = false })
     }

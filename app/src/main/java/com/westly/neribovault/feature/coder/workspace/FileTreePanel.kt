@@ -1,5 +1,6 @@
 package com.westly.neribovault.feature.coder.workspace
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,8 +29,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.westly.neribovault.core.design.NeriboTheme
@@ -50,7 +53,8 @@ private val NON_TEXT_EXTENSIONS = setOf(
 
 /**
  * The project's files as a tree. Folders open and close when tapped; [expandedFolders] is kept by
- * the caller so it survives rotation. Tapping a file calls [onOpenFile].
+ * the caller so it survives rotation. Tapping a file calls [onOpenFile]. The file at [activePath], when given,
+ * is highlighted (the side drawer passes the active tab; the Files screen passes nothing).
  */
 @Composable
 fun FileTreePanel(
@@ -63,6 +67,7 @@ fun FileTreePanel(
     onNewFileIn: (String) -> Unit,
     onNewFolderIn: (String) -> Unit,
     modifier: Modifier = Modifier,
+    activePath: String? = null,
 ) {
     if (entries.isEmpty()) {
         EmptyState(
@@ -87,6 +92,7 @@ fun FileTreePanel(
             TreeRow(
                 entry = entry,
                 expanded = entry.path in expandedFolders,
+                isActive = !entry.isDirectory && entry.path == activePath,
                 onClick = { if (entry.isDirectory) onToggleFolder(entry.path) else onOpenFile(entry.path) },
                 onRename = { onRename(entry) },
                 onDelete = { onDelete(entry) },
@@ -117,6 +123,7 @@ private fun looksNonEditable(entry: CoderEntry): Boolean {
 private fun TreeRow(
     entry: CoderEntry,
     expanded: Boolean,
+    isActive: Boolean,
     onClick: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -145,6 +152,8 @@ private fun TreeRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
+            .background(if (isActive) colors.secondaryContainer else Color.Transparent)
+            .semantics { if (isActive) stateDescription = "Current file" }
             .clickable(onClick = onClick)
             .padding(start = spacing.screen + INDENT_PER_LEVEL * depth, end = spacing.xs),
         verticalAlignment = Alignment.CenterVertically,

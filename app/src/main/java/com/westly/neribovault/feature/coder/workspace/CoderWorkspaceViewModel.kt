@@ -41,7 +41,11 @@ import kotlinx.coroutines.withContext
 /** Whether the text in the editor has reached the disk. */
 enum class CoderSaveStatus { Saved, Saving, Failed }
 
-/** Everything the workspace screen shows. [openPath] is null in Files mode and set in Editor mode. */
+/**
+ * Everything the workspace screen shows. [openPath] is the active tab's path, or null when no file is open.
+ * [editorVisible] says whether the editor (true) or the file list (false) is on screen; the tabs stay open
+ * while the file list shows.
+ */
 data class CoderWorkspaceUiState(
     val project: CoderProjectEntity? = null,
     val entries: List<CoderEntry> = emptyList(),
@@ -53,12 +57,39 @@ data class CoderWorkspaceUiState(
     val message: String? = null,
     /** The file the preview is showing, or null when the preview is closed. */
     val previewEntry: String? = null,
+    /** The open files in the order they were opened. */
+    val tabs: List<TabInfo> = emptyList(),
+    /** True while the editor is on screen; false while the file list shows (open tabs are kept). */
+    val editorVisible: Boolean = false,
+)
+
+/** One tab: its [path], the text shown on it, whether it has [dirty] (unsaved) text and whether its last save failed. */
+data class TabInfo(
+    val path: String,
+    val label: String,
+    val dirty: Boolean,
+    val saveFailed: Boolean = false,
 )
 
 private enum class ChangeKind { None, Typing, Deleting }
 
 /** Where two texts differ: [start] is the first changed index, followed by how much was removed and added. */
 private class TextChange(val start: Int, val oldLength: Int, val newLength: Int, val isSingleNewline: Boolean)
+
+/** Everything one open file keeps while it is a tab: its text and cursor, its own undo history and its save state. */
+private class TabState(var path: String, var value: TextFieldValue, var lastSavedText: String, var usesCrlf: Boolean) {
+    val undo = CoderUndoStack()
+    var lastPushAt = 0L
+    var lastKind = ChangeKind.None
+    var scrollX = 0
+    var scrollY = 0
+    var saveFailed = false
+    var writing = false
+    var autosaveJob: Job? = null
+
+    /** True while the text differs from what is on the disk. */
+    val dirty: Boolean get() = value.text != lastSavedText
+}
 
 private const val AUTOSAVE_DELAY_MS = 800L
 private const val UNDO_PAUSE_MS = 800L
@@ -87,12 +118,13 @@ private const val MSG_PREVIEW_NOT_STARTED = "Couldn't save, so the preview was n
 private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer than 60 characters."
 private const val MSG_TOO_MANY_MATCHES = "There are too many matches to replace at once. Search for something longer."
 private const val MSG_NOTHING_TO_REPLACE = "Nothing changed. The replacement is the same as the text."
+private const val MSG_FILE_GONE = "This file is no longer there."
 
 /**
- * State and actions of one project's workspace: the file list, the open file's text, undo and redo,
- * autosave, the file operations and the smart editor (suggestions, auto-close, mistake underlines and
- * find and replace). The editor text is only ever changed here, and everything that
- * touches the disk runs on `Dispatchers.IO`.
+ * State and actions of one project's workspace: the file list, the open files (one tab each, with its own
+ * text, undo history and save state), autosave, the file operations and the smart editor (suggestions,
+ * auto-close, mistake underlines and find and replace, all for the active tab). The editor text is only ever
+ * changed here, and everything that touches the disk runs on `Dispatchers.IO`.
  */
 class CoderWorkspaceViewModel(
     private val projectId: String,
@@ -106,16 +138,13 @@ class CoderWorkspaceViewModel(
 
     private val _editorValue = MutableStateFlow(TextFieldValue(""))
 
-    /** The open file's text and selection. */
+    /** The active tab's text and selection. */
     val editorValue: StateFlow<TextFieldValue> = _editorValue.asStateFlow()
 
-    private val undoStack = CoderUndoStack()
+    private val tabStates = LinkedHashMap<String, TabState>()
+    private var tabs = CoderTabs(emptyList(), null)
+    private var active: TabState? = null
     private val saveMutex = Mutex()
-    private var lastSavedText = ""
-    private var usesCrlf = false
-    private var lastPushAt = 0L
-    private var lastKind = ChangeKind.None
-    private var autosaveJob: Job? = null
     private var refreshJob: Job? = null
     private var entriesLoaded = false
     private var projectLoaded = false
@@ -178,7 +207,26 @@ class CoderWorkspaceViewModel(
             val list = withContext(Dispatchers.IO) { files.listAll(projectId) }
             entriesLoaded = true
             _state.update { it.copy(entries = list, isLoading = !projectLoaded) }
+            closeVanishedTabs(list)
         }
+    }
+
+    /**
+     * Closes the tabs whose file was removed outside the app. A tab with unsaved text stays open, because its
+     * next save writes the file again; only the disk itself decides, not the list, which may be one change old.
+     */
+    private suspend fun closeVanishedTabs(list: List<CoderEntry>) {
+        if (tabStates.isEmpty()) return
+        val present = list.mapTo(HashSet<String>()) { it.path }
+        val missing = tabs.paths.filter { it !in present && tabStates[it]?.dirty == false }
+        if (missing.isEmpty()) return
+        val gone = withContext(Dispatchers.IO) { missing.filter { files.resolve(projectId, it)?.exists() != true } }
+        val closing = gone.filter { tabStates[it]?.dirty == false }
+        if (closing.isEmpty()) return
+        var updated = tabs
+        for (path in closing) updated = CoderTabLogic.close(updated, path)
+        commitTabs(updated, closing)
+        postMessage(MSG_FILE_GONE)
     }
 
     fun consumeMessage() {
@@ -204,61 +252,219 @@ class CoderWorkspaceViewModel(
         _state.update { it.copy(previewEntry = null) }
     }
 
-    // ---- Open and close --------------------------------------------------------------------
+    // ---- Tabs ------------------------------------------------------------------------------
 
-    /** Opens [path] in the editor, or explains why it can't be opened. */
+    /**
+     * Opens [path] in a tab and shows the editor, or explains why it can't be opened. A file that is already
+     * open only becomes the active tab; it is not read from the disk again.
+     */
     fun openFile(path: String) {
+        viewModelScope.launch { openTab(path, loud = true, show = true) }
+    }
+
+    /** Saves the active tab and closes it. The tab stays open when saving fails, so no text is lost. With no tab left the screen shows the file list. */
+    fun closeFile() {
+        val tab = active ?: return
+        closeTab(tab.path)
+    }
+
+    /** Makes [path] the active tab. Its text, cursor and undo history are already in memory. */
+    fun activateTab(path: String) {
+        val tab = tabStates[path] ?: return
+        makeActive(tab, show = true)
+    }
+
+    /** Saves and closes the tab [path]. With [discard] it closes even when the save fails; the screen only asks for that after confirming. */
+    fun closeTab(path: String, discard: Boolean = false) {
         viewModelScope.launch {
-            val current = _state.value.openPath
-            if (current != null && current != path && !saveNow()) return@launch
-            when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
-                is CoderReadResult.Text -> showFile(path, result)
-                CoderReadResult.TooLarge -> postMessage(MSG_TOO_BIG_TO_OPEN)
-                CoderReadResult.Binary -> postMessage(MSG_NOT_TEXT)
-                CoderReadResult.Missing, CoderReadResult.Failed -> postMessage(MSG_CANNOT_OPEN)
+            val tab = tabStates[path] ?: return@launch
+            if (!saveBeforeClosing(listOf(tab), discard)) return@launch
+            commitTabs(CoderTabLogic.close(tabs, path), listOf(path))
+        }
+    }
+
+    /** Saves and closes every tab except [path]. */
+    fun closeOtherTabs(path: String, discard: Boolean = false) {
+        viewModelScope.launch {
+            if (path !in tabStates) return@launch
+            val others = tabs.paths.filter { it != path }.mapNotNull { tabStates[it] }
+            if (!saveBeforeClosing(others, discard)) return@launch
+            commitTabs(CoderTabLogic.closeOthers(tabs, path), tabs.paths.filter { it != path })
+        }
+    }
+
+    /** Saves and closes every tab; the screen then shows the file list. */
+    fun closeAllTabs(discard: Boolean = false) {
+        viewModelScope.launch {
+            val all = tabs.paths.mapNotNull { tabStates[it] }
+            if (!saveBeforeClosing(all, discard)) return@launch
+            commitTabs(CoderTabLogic.closeAll(tabs), tabs.paths.toList())
+        }
+    }
+
+    /** Remembers where the tab [path] is scrolled to, so the editor can come back to the same place. Changes no state. */
+    fun updateScroll(path: String, x: Int, y: Int) {
+        val tab = tabStates[path] ?: return
+        tab.scrollX = x
+        tab.scrollY = y
+    }
+
+    /** Where the tab [path] was last scrolled to, as (x, y) in pixels; (0, 0) for an unknown tab. */
+    fun scrollOf(path: String): Pair<Int, Int> {
+        val tab = tabStates[path] ?: return Pair(0, 0)
+        return Pair(tab.scrollX, tab.scrollY)
+    }
+
+    /** Saves every tab and shows the file list. The tabs stay open. When a save fails the editor stays, so no text is lost. */
+    fun showFiles() {
+        viewModelScope.launch {
+            if (saveNow()) _state.update { it.copy(editorVisible = false) }
+        }
+    }
+
+    /**
+     * Opens the tabs that were open before the app was stopped, in their old order, and makes [activePath]
+     * active. A file that is missing or can't be opened is skipped without a message. Does nothing when tabs are open.
+     */
+    suspend fun restoreTabs(paths: List<String>, activePath: String?, show: Boolean) {
+        if (tabs.paths.isNotEmpty()) return
+        for (path in paths.take(CODER_MAX_TABS)) openTab(path, loud = false, show = false)
+        val target = activePath?.let { tabStates[it] }
+        if (target != null) makeActive(target, show = false)
+        _state.update { it.copy(editorVisible = show && tabs.paths.isNotEmpty()) }
+    }
+
+    /** Opens [path] as a tab, or activates it when it is already open. False when it could not be opened. */
+    private suspend fun openTab(path: String, loud: Boolean, show: Boolean): Boolean {
+        val existing = tabStates[path]
+        if (existing != null) {
+            makeActive(existing, show)
+            return true
+        }
+        if (!CoderPaths.isValidPath(path)) {
+            if (loud) postMessage(MSG_CANNOT_OPEN)
+            return false
+        }
+        val message = when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
+            is CoderReadResult.Text -> return addTab(path, result, loud, show)
+            CoderReadResult.TooLarge -> MSG_TOO_BIG_TO_OPEN
+            CoderReadResult.Binary -> MSG_NOT_TEXT
+            CoderReadResult.Missing, CoderReadResult.Failed -> MSG_CANNOT_OPEN
+        }
+        if (loud) postMessage(message)
+        return false
+    }
+
+    /** Adds a tab for a file that was just read. When 12 tabs are open the least recently used clean one makes room. */
+    private fun addTab(path: String, result: CoderReadResult.Text, loud: Boolean, show: Boolean): Boolean {
+        val existing = tabStates[path]
+        if (existing != null) {
+            makeActive(existing, show)
+            return true
+        }
+        return when (val outcome = CoderTabLogic.open(tabs, path) { p -> tabStates[p]?.dirty == true }) {
+            is OpenOutcome.Refused -> {
+                if (loud) postMessage(outcome.reason)
+                false
+            }
+            is OpenOutcome.Activated -> {
+                tabStates[path]?.let { makeActive(it, show) }
+                true
+            }
+            is OpenOutcome.Opened -> {
+                outcome.closedPath?.let { dropTab(it) }
+                val tab = TabState(path, TextFieldValue(result.text, TextRange(0)), result.text, result.usesCrlf)
+                tabStates[path] = tab
+                tabs = outcome.tabs
+                makeActive(tab, show)
+                true
             }
         }
     }
 
-    /** Saves the open file and returns to the file list. The editor stays open when saving fails, so no text is lost. */
-    fun closeFile() {
-        viewModelScope.launch {
-            if (_state.value.openPath == null) return@launch
-            if (saveNow()) resetEditor()
+    /**
+     * Saves [list] before its tabs close. False when a save failed (a message says so) and the tabs must stay.
+     * With [discard] every save is still tried, quietly, but a failure no longer keeps a tab open.
+     */
+    private suspend fun saveBeforeClosing(list: List<TabState>, discard: Boolean): Boolean {
+        for (tab in list) {
+            tab.autosaveJob?.cancel()
+            val saved = performSave(tab, loud = !discard)
+            if (!discard && (!saved || tab.dirty)) return false
         }
+        return true
     }
 
-    private fun showFile(path: String, result: CoderReadResult.Text) {
-        autosaveJob?.cancel()
+    private fun dropTab(path: String) {
+        tabStates.remove(path)?.autosaveJob?.cancel()
+    }
+
+    /** Makes [tab] the active one; with [show] the editor is shown. Suggestions, underlines and find are worked out again for it. */
+    private fun makeActive(tab: TabState, show: Boolean) {
+        tabs = CoderTabLogic.activate(tabs, tab.path)
+        val changed = switchTo(tab)
+        if (show) _state.update { it.copy(editorVisible = true) }
+        publishTabs()
+        if (changed) afterSwitch()
+    }
+
+    /** Puts the tab list in [newTabs] after [removed] were closed, and moves to the tab that is active in it. */
+    private fun commitTabs(newTabs: CoderTabs, removed: Collection<String>) {
+        for (path in removed) dropTab(path)
+        tabs = newTabs
+        val next = newTabs.active?.let { tabStates[it] }
+        val changed = switchTo(next)
+        if (next != null) tabs = CoderTabLogic.activate(tabs, next.path)
+        publishTabs()
+        if (changed) afterSwitch()
+    }
+
+    /** Points the editor at [tab] (or at nothing). The text comes from memory; the disk is not read. True when the active tab changed. */
+    private fun switchTo(tab: TabState?): Boolean {
+        if (active === tab) return false
         clearSuggestions()
-        clearFind()
         clearIssues()
-        lastSavedText = result.text
-        usesCrlf = result.usesCrlf
-        undoStack.clear()
-        lastPushAt = 0L
-        lastKind = ChangeKind.None
-        _editorValue.value = TextFieldValue(result.text, TextRange(0))
-        _state.update {
-            it.copy(openPath = path, saveStatus = CoderSaveStatus.Saved, canUndo = false, canRedo = false)
-        }
+        active = tab
+        _editorValue.value = tab?.value ?: TextFieldValue("")
+        _find.update { if (tab == null) FindState() else it.copy(matches = emptyList(), current = -1) }
+        return true
+    }
+
+    private fun afterSwitch() {
+        if (active == null) return
+        if (_find.value.open) recomputeMatches(select = false)
         scheduleLint()
     }
 
-    private fun resetEditor() {
-        autosaveJob?.cancel()
-        clearSuggestions()
-        clearFind()
-        clearIssues()
-        undoStack.clear()
-        lastSavedText = ""
-        usesCrlf = false
-        lastPushAt = 0L
-        lastKind = ChangeKind.None
-        _editorValue.value = TextFieldValue("")
-        _state.update {
-            it.copy(openPath = null, saveStatus = CoderSaveStatus.Saved, canUndo = false, canRedo = false)
+    /** Copies the tab list, the dots, the save status and the undo buttons into the screen state. */
+    private fun publishTabs() {
+        val labels = CoderTabLogic.labels(tabs.paths)
+        val infos = tabs.paths.map { path ->
+            val tab = tabStates[path]
+            TabInfo(path, labels[path] ?: CoderPaths.nameOf(path), tab?.dirty == true, tab?.saveFailed == true)
         }
+        val current = active
+        val status = aggregateSaveStatus(
+            anyWriting = tabStates.values.any { it.writing },
+            activeFailed = current?.saveFailed == true,
+            activePending = current?.dirty == true,
+        )
+        _state.update {
+            it.copy(
+                tabs = infos,
+                openPath = tabs.active,
+                saveStatus = status,
+                canUndo = current?.undo?.canUndo == true,
+                canRedo = current?.undo?.canRedo == true,
+                editorVisible = it.editorVisible && infos.isNotEmpty(),
+            )
+        }
+    }
+
+    /** Sets the active tab's text and selection, in memory and for the screen. */
+    private fun setActiveValue(value: TextFieldValue) {
+        active?.value = value
+        _editorValue.value = value
     }
 
     // ---- Typing ----------------------------------------------------------------------------
@@ -268,10 +474,11 @@ class CoderWorkspaceViewModel(
      * Enter and decides whether this starts a new undo step. Also refreshes the suggestions.
      */
     fun onEditorChange(value: TextFieldValue) {
-        val path = _state.value.openPath ?: return
+        val tab = active ?: return
+        val path = tab.path
         val old = _editorValue.value
         if (value.text == old.text) {
-            _editorValue.value = value
+            setActiveValue(value)
             dropSuggestionsWhenCaretMoved(value)
             return
         }
@@ -280,7 +487,7 @@ class CoderWorkspaceViewModel(
         val smart = if (autoCloseOn && edit != SingleEdit.None) CoderAutoClose.apply(old, value, language) else null
         if (smart != null && smart.text == old.text) {
             // Typing a closing bracket or quote that is already there only moves the caret.
-            _editorValue.value = smart
+            setActiveValue(smart)
             clearSuggestions()
             return
         }
@@ -294,17 +501,17 @@ class CoderWorkspaceViewModel(
         val kind = if (value.text.length < old.text.length) ChangeKind.Deleting else ChangeKind.Typing
         val now = SystemClock.elapsedRealtime()
         val large = change.oldLength >= BIG_CHANGE_CHARS || change.newLength >= BIG_CHANGE_CHARS
-        val startsStep = lastPushAt == 0L ||
-            now - lastPushAt > UNDO_PAUSE_MS ||
-            kind != lastKind ||
+        val startsStep = tab.lastPushAt == 0L ||
+            now - tab.lastPushAt > UNDO_PAUSE_MS ||
+            kind != tab.lastKind ||
             large ||
             newlineAt >= 0
         if (startsStep) {
-            undoStack.push(snapshot(old))
-            lastPushAt = now
+            tab.undo.push(snapshot(old))
+            tab.lastPushAt = now
         }
-        lastKind = kind
-        _editorValue.value = applied
+        tab.lastKind = kind
+        setActiveValue(applied)
         afterEdit()
         onTextChanged(old.text, applied.text)
         refreshSuggestions(edit, value, applied, language)
@@ -398,71 +605,59 @@ class CoderWorkspaceViewModel(
     }
 
     /**
-     * Saves the open file, opens [path] and replaces all of its text with [text] as one undo step. False when
-     * the file could not be saved or opened; a calm message says why and nothing is replaced.
+     * Opens [path] (or activates its tab) and replaces all of its text with [text] as one undo step. False when
+     * the file could not be opened; a calm message says why and nothing is replaced.
      */
     suspend fun openAndReplaceAll(path: String, text: String): Boolean {
         if (!CoderPaths.isValidPath(path)) {
             postMessage(MSG_CANNOT_OPEN)
             return false
         }
-        val current = _state.value.openPath
-        if (current != path) {
-            if (current != null && !saveNow()) return false
-            when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
-                is CoderReadResult.Text -> showFile(path, result)
-                CoderReadResult.TooLarge -> {
-                    postMessage(MSG_TOO_BIG_TO_OPEN)
-                    return false
-                }
-                CoderReadResult.Binary -> {
-                    postMessage(MSG_NOT_TEXT)
-                    return false
-                }
-                CoderReadResult.Missing, CoderReadResult.Failed -> {
-                    postMessage(MSG_CANNOT_OPEN)
-                    return false
-                }
-            }
+        if (active?.path != path || !_state.value.editorVisible) {
+            if (!openTab(path, loud = true, show = true)) return false
         }
         replaceAll(text)
         return true
     }
 
     fun undo() {
-        val previous = undoStack.undo(snapshot(_editorValue.value)) ?: return
+        val tab = active ?: return
+        val previous = tab.undo.undo(snapshot(_editorValue.value)) ?: return
         applyHistory(previous)
     }
 
     fun redo() {
-        val next = undoStack.redo(snapshot(_editorValue.value)) ?: return
+        val tab = active ?: return
+        val next = tab.undo.redo(snapshot(_editorValue.value)) ?: return
         applyHistory(next)
     }
 
     private fun openEditorValue(): TextFieldValue? =
-        if (_state.value.openPath == null) null else _editorValue.value
+        if (active == null) null else _editorValue.value
 
     private fun applyStep(newText: String, selection: TextRange) {
+        val tab = active ?: return
         clearSuggestions()
         val old = _editorValue.value
         if (newText == old.text) {
-            _editorValue.value = TextFieldValue(newText, selection)
+            setActiveValue(TextFieldValue(newText, selection))
             return
         }
-        undoStack.push(snapshot(old))
-        lastPushAt = SystemClock.elapsedRealtime()
-        lastKind = ChangeKind.None
-        _editorValue.value = TextFieldValue(newText, selection)
+        tab.undo.push(snapshot(old))
+        tab.lastPushAt = SystemClock.elapsedRealtime()
+        tab.lastKind = ChangeKind.None
+        setActiveValue(TextFieldValue(newText, selection))
         afterEdit()
         onTextChanged(old.text, newText)
     }
 
     private fun applyHistory(value: TextFieldValue) {
+        val tab = active ?: return
         clearSuggestions()
         val oldText = _editorValue.value.text
-        lastPushAt = 0L
-        lastKind = ChangeKind.None
-        _editorValue.value = value
+        tab.lastPushAt = 0L
+        tab.lastKind = ChangeKind.None
+        setActiveValue(value)
         afterEdit()
         if (oldText != value.text) onTextChanged(oldText, value.text)
     }
@@ -470,14 +665,8 @@ class CoderWorkspaceViewModel(
     private fun snapshot(value: TextFieldValue): TextFieldValue = TextFieldValue(value.text, value.selection)
 
     private fun afterEdit() {
-        _state.update {
-            it.copy(
-                canUndo = undoStack.canUndo,
-                canRedo = undoStack.canRedo,
-                saveStatus = if (it.saveStatus == CoderSaveStatus.Saved) CoderSaveStatus.Saving else it.saveStatus,
-            )
-        }
-        scheduleAutosave()
+        publishTabs()
+        active?.let { scheduleAutosave(it) }
     }
 
     // ---- Mistake underlines ----------------------------------------------------------------
@@ -510,7 +699,7 @@ class CoderWorkspaceViewModel(
     /** Checks the open file once the person has paused for 600 ms. Does nothing (and clears) when underlines are off or the file is too long. */
     private fun scheduleLint() {
         lintJob?.cancel()
-        val path = _state.value.openPath
+        val path = active?.path
         val text = _editorValue.value.text
         if (!lintOn || path == null || text.length > CoderLinter.MAX_CHARS) {
             clearIssues()
@@ -520,7 +709,7 @@ class CoderWorkspaceViewModel(
         lintJob = viewModelScope.launch {
             delay(LINT_DELAY_MS)
             val found = withContext(Dispatchers.Default) { CoderLinter.lint(text, language) }
-            if (_state.value.openPath == path && _editorValue.value.text == text) _issues.value = found
+            if (active?.path == path && _editorValue.value.text == text) _issues.value = found
         }
     }
 
@@ -533,7 +722,7 @@ class CoderWorkspaceViewModel(
 
     /** Opens the find bar. A search typed earlier in this file is still there. */
     fun openFind() {
-        if (_state.value.openPath == null) return
+        if (active == null) return
         _find.update { it.copy(open = true) }
         recomputeMatches(select = false)
     }
@@ -653,7 +842,7 @@ class CoderWorkspaceViewModel(
         val end = range.last + 1
         if (range.first < 0 || end > value.text.length) return
         clearSuggestions()
-        _editorValue.value = TextFieldValue(value.text, TextRange(range.first, end))
+        setActiveValue(TextFieldValue(value.text, TextRange(range.first, end)))
         _find.update { it.copy(reveal = it.reveal + 1) }
     }
 
@@ -663,46 +852,65 @@ class CoderWorkspaceViewModel(
 
     // ---- Saving ----------------------------------------------------------------------------
 
-    /** Writes the open file now. True when nothing needed saving or the write succeeded. */
+    /** Writes every tab with unsaved text now. True when nothing needed saving or every write succeeded. */
     suspend fun saveNow(): Boolean {
-        autosaveJob?.cancel()
-        return performSave(loud = true)
+        var allSaved = true
+        for (tab in tabStates.values.toList()) {
+            tab.autosaveJob?.cancel()
+            if (!performSave(tab, loud = true)) allSaved = false
+        }
+        return allSaved
     }
 
-    /** Saves in the background without blocking the caller; used when the screen stops or closes. */
+    /** Saves every tab in the background without blocking the caller; used when the screen stops or closes. */
     fun flush() {
-        autosaveJob?.cancel()
-        viewModelScope.launch { performSave(loud = false) }
-    }
-
-    private fun scheduleAutosave() {
-        autosaveJob?.cancel()
-        autosaveJob = viewModelScope.launch {
-            delay(AUTOSAVE_DELAY_MS)
-            // The write runs in its own job so that the next keystroke cannot cancel it half way.
-            viewModelScope.launch { performSave(loud = false) }
+        for (tab in tabStates.values.toList()) {
+            tab.autosaveJob?.cancel()
+            viewModelScope.launch { performSave(tab, loud = false) }
         }
     }
 
-    private suspend fun performSave(loud: Boolean): Boolean {
+    private fun scheduleAutosave(tab: TabState) {
+        tab.autosaveJob?.cancel()
+        tab.autosaveJob = viewModelScope.launch {
+            delay(AUTOSAVE_DELAY_MS)
+            // The write runs in its own job so that the next keystroke cannot cancel it half way.
+            viewModelScope.launch { performSave(tab, loud = false) }
+        }
+    }
+
+    /**
+     * Writes [tab] when its text changed. Writes are one at a time, and a tab that was closed or deleted in the
+     * meantime is skipped, so a deleted file is never written back.
+     */
+    private suspend fun performSave(tab: TabState, loud: Boolean): Boolean {
         return saveMutex.withLock {
-            val path = _state.value.openPath ?: return@withLock true
-            val text = _editorValue.value.text
-            if (text == lastSavedText) {
-                setSaveStatus(CoderSaveStatus.Saved)
+            if (tabStates[tab.path] !== tab) return@withLock true
+            val path = tab.path
+            val text = tab.value.text
+            if (text == tab.lastSavedText) {
+                tab.saveFailed = false
+                publishTabs()
                 return@withLock true
             }
-            val wasFailed = _state.value.saveStatus == CoderSaveStatus.Failed
-            setSaveStatus(CoderSaveStatus.Saving)
-            val crlf = usesCrlf
-            val result = withContext(NonCancellable + Dispatchers.IO) { files.write(projectId, path, text, crlf) }
+            val wasFailed = tab.saveFailed
+            val crlf = tab.usesCrlf
+            tab.writing = true
+            publishTabs()
+            val result = try {
+                withContext(NonCancellable + Dispatchers.IO) { files.write(projectId, path, text, crlf) }
+            } finally {
+                tab.writing = false
+            }
             if (result == CoderWriteResult.Saved) {
-                lastSavedText = text
-                setSaveStatus(if (_editorValue.value.text == text) CoderSaveStatus.Saved else CoderSaveStatus.Saving)
+                tab.lastSavedText = text
+                tab.saveFailed = false
+                publishTabs()
                 touchProject()
                 true
             } else {
-                setSaveStatus(CoderSaveStatus.Failed)
+                tab.saveFailed = true
+                publishTabs()
                 if (loud || !wasFailed) postMessage(saveFailureMessage(result))
                 false
             }
@@ -717,10 +925,6 @@ class CoderWorkspaceViewModel(
         } catch (e: Exception) {
             // The list order is cosmetic; a failed touch must never turn a good save into a failure.
         }
-    }
-
-    private fun setSaveStatus(status: CoderSaveStatus) {
-        _state.update { if (it.saveStatus == status) it else it.copy(saveStatus = status) }
     }
 
     private fun saveFailureMessage(result: CoderWriteResult): String = when (result) {
@@ -747,24 +951,54 @@ class CoderWorkspaceViewModel(
         }
     }
 
-    /** Renames a file or folder. When it holds the open file, that file is saved and the editor closes first. */
+    /**
+     * Renames a file or folder. Open tabs under it are saved first; then they follow the new name and keep their
+     * text, undo history and place. The rename runs while no save can write, so nothing lands under the old name.
+     */
     fun renameEntry(from: String, to: String) {
         viewModelScope.launch {
-            if (!closeEditorIfInside(from, mustSave = true)) return@launch
-            val result = withContext(Dispatchers.IO) { files.rename(projectId, from, to) }
+            val affected = tabs.paths.filter { CoderTabLogic.isInside(it, from) }.mapNotNull { tabStates[it] }
+            for (tab in affected) {
+                tab.autosaveJob?.cancel()
+                if (!performSave(tab, loud = true)) return@launch
+            }
+            val result = saveMutex.withLock {
+                val outcome = withContext(Dispatchers.IO) { files.rename(projectId, from, to) }
+                if (outcome == CoderWriteResult.Saved) renameTabs(from, to)
+                outcome
+            }
             postMessage(resultMessage(result, "Renamed"))
             refreshEntries()
         }
     }
 
-    /** Deletes a file or folder. When it holds the open file, the editor closes first. */
+    /** Deletes a file or folder. Open tabs under it close without another save. */
     fun deleteEntry(path: String) {
         viewModelScope.launch {
-            closeEditorIfInside(path, mustSave = false)
-            val deleted = withContext(Dispatchers.IO) { files.delete(projectId, path) }
+            val deleted = saveMutex.withLock {
+                val victims = tabs.paths.filter { CoderTabLogic.isInside(it, path) }
+                if (victims.isNotEmpty()) commitTabs(CoderTabLogic.removed(tabs, path), victims)
+                withContext(Dispatchers.IO) { files.delete(projectId, path) }
+            }
             postMessage(if (deleted) "Deleted" else MSG_FAILED)
             refreshEntries()
         }
+    }
+
+    /** Gives the tabs under [from] their new paths. Called while the save lock is held. */
+    private fun renameTabs(from: String, to: String) {
+        val moved = ArrayList<TabState>()
+        for (tab in tabStates.values.toList()) {
+            val newPath = CoderTabLogic.mapPath(tab.path, from, to)
+            if (newPath == tab.path) continue
+            tabStates.remove(tab.path)
+            tab.path = newPath
+            moved.add(tab)
+        }
+        for (tab in moved) tabStates[tab.path] = tab
+        tabs = CoderTabLogic.rename(tabs, from, to)
+        publishTabs()
+        if (moved.any { it === active }) scheduleLint()
     }
 
     fun renameProject(name: String) {
@@ -777,20 +1011,6 @@ class CoderWorkspaceViewModel(
             projects.rename(projectId, trimmed)
             postMessage("Renamed")
         }
-    }
-
-    /**
-     * Saves and closes the editor when [path] is the open file or a folder that contains it.
-     * Returns false only when [mustSave] is set and the text could not be saved (the editor stays open).
-     */
-    private suspend fun closeEditorIfInside(path: String, mustSave: Boolean): Boolean {
-        val open = _state.value.openPath ?: return true
-        if (open != path && !open.startsWith("$path/")) return true
-        autosaveJob?.cancel()
-        val saved = performSave(loud = mustSave)
-        if (mustSave && !saved) return false
-        resetEditor()
-        return true
     }
 
     private fun resultMessage(result: CoderWriteResult, success: String): String = when (result) {
@@ -806,10 +1026,11 @@ class CoderWorkspaceViewModel(
     }
 
     override fun onCleared() {
-        val path = _state.value.openPath
-        val text = _editorValue.value.text
-        if (path != null && text != lastSavedText) {
-            val crlf = usesCrlf
+        for (tab in tabStates.values) {
+            if (!tab.dirty) continue
+            val path = tab.path
+            val text = tab.value.text
+            val crlf = tab.usesCrlf
             // Last chance to keep unsaved text: finish the write outside the scope that is being cleared.
             CoroutineScope(Dispatchers.IO).launch { files.write(projectId, path, text, crlf) }
         }
