@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import com.westly.neribovault.feature.coder.env.CoderEnvCache
+import com.westly.neribovault.feature.coder.env.CoderEnvRules
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
@@ -94,7 +96,8 @@ class CoderPreviewResponder(
 
     private fun serveFile(requested: String, head: Boolean): WebResourceResponse {
         val path = if (requested.isEmpty() || requested.endsWith("/")) requested + "index.html" else requested
-        if (CoderServedPaths.isBlocked(CoderPreviewRoot.join(rootPrefix, path))) return notFound(requested, head)
+        // The block list applies to the path below the site's top folder, so the hidden folder holding a GitHub build can be the top itself.
+        if (CoderServedPaths.isBlocked(path)) return notFound(requested, head)
         var target = store.resolve(projectId, CoderPreviewRoot.join(rootPrefix, path))
         if (target != null && target.isDirectory) {
             target = store.resolve(projectId, CoderPreviewRoot.join(rootPrefix, "$path/index.html"))
@@ -124,10 +127,24 @@ class CoderPreviewResponder(
         val md = CoderPreviewHost.VIRTUAL_PREFIX + "/md/"
         val json = CoderPreviewHost.VIRTUAL_PREFIX + "/json/"
         return when {
+            path == CoderPreviewHost.VIRTUAL_PREFIX + "/env.js" -> envPage(javascript = true, head = head)
+            path == CoderPreviewHost.VIRTUAL_PREFIX + "/env.json" -> envPage(javascript = false, head = head)
             path.startsWith(md) -> textPage(path.removePrefix(md), markdown = true, head = head)
             path.startsWith(json) -> textPage(path.removePrefix(json), markdown = false, head = head)
             else -> notFound(path, head)
         }
+    }
+
+    /**
+     * The project's environment variables as `env.js` or `env.json`, from the in-memory cache (the preview loads it
+     * before it starts). It is never cached by the browser and carries no cross-origin permission.
+     */
+    private fun envPage(javascript: Boolean, head: Boolean): WebResourceResponse {
+        val vars = CoderEnvCache.get(projectId)
+        val text = if (javascript) CoderEnvRules.generateEnvJs(vars) else CoderEnvRules.generateEnvJson(vars)
+        val mime = if (javascript) "text/javascript" else "application/json"
+        val body = if (head) ByteArray(0) else text.toByteArray(Charsets.UTF_8)
+        return WebResourceResponse(mime, "utf-8", 200, "OK", mapOf("Cache-Control" to "no-store"), ByteArrayInputStream(body))
     }
 
     /** Reads the project file at [filePath] and shows it as a formatted page. The path is checked by the file store. */

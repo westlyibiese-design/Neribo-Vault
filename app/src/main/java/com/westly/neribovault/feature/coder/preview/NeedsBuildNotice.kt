@@ -37,10 +37,11 @@ import com.westly.neribovault.core.ui.components.NeriboTopBar
 /**
  * A calm full-panel message shown instead of the preview when a project must be built on a computer
  * first. [reason] says why in plain English. [builtFolderHint] is "dist" or "build" when that folder
- * exists but has no index.html, which adds one extra explanation button. [onBack] returns to the code.
+ * exists but has no index.html, which adds one extra explanation button. [onBack] returns to the code. When
+ * [onBuild] is set, a primary "Build with GitHub" button opens the build wizard.
  */
 @Composable
-fun NeedsBuildNotice(reason: String, builtFolderHint: String?, onBack: () -> Unit) {
+fun NeedsBuildNotice(reason: String, builtFolderHint: String?, onBack: () -> Unit, onBuild: (() -> Unit)? = null) {
     val spacing = NeriboTheme.spacing
     val colors = MaterialTheme.colorScheme
     var showWhy by rememberSaveable { mutableStateOf(false) }
@@ -91,10 +92,19 @@ fun NeedsBuildNotice(reason: String, builtFolderHint: String?, onBack: () -> Uni
             Bullet("You can still edit this project and use AI help")
             Bullet("React projects written with script tags run here without any build")
             Spacer(modifier = Modifier.height(spacing.xl))
+            if (onBuild != null) {
+                NeriboButton(
+                    text = "Build with GitHub",
+                    onClick = onBuild,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(modifier = Modifier.height(spacing.sm))
+            }
             NeriboButton(
                 text = "Back to code",
                 onClick = onBack,
                 modifier = Modifier.fillMaxWidth(),
+                style = if (onBuild != null) ButtonStyle.Secondary else ButtonStyle.Primary,
             )
             if (builtFolderHint != null) {
                 Spacer(modifier = Modifier.height(spacing.sm))

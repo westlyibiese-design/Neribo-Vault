@@ -8,6 +8,15 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.util.UUID
 
+/**
+ * True when [path] belongs to the app: its first part starts with `.coder` (for example `.coder-build/index.html`).
+ * Such folders are hidden from the file tree, never exported, pushed or sent to an AI, and do not count toward the limits.
+ */
+fun isCoderHiddenPath(path: String): Boolean = path.substringBefore('/').startsWith(CODER_HIDDEN_PREFIX)
+
+/** The start of the name of every folder or file the app keeps for itself inside a project. */
+const val CODER_HIDDEN_PREFIX = ".coder"
+
 /** One file that a new project starts with. [path] must pass [CoderPaths.isValidPath]. */
 data class CoderStarterFile(val path: String, val content: String)
 
@@ -63,12 +72,16 @@ class CoderFileStore(private val rootDir: File) {
         }
     }
 
-    /** Every file and folder of the project, each folder followed by its content; folders first, then files, by name ignoring case. */
-    fun listAll(projectId: String): List<CoderEntry> {
+    /**
+     * Every file and folder of the project, each folder followed by its content; folders first, then files, by name
+     * ignoring case. Entries whose first part starts with `.coder` belong to the app and are left out unless
+     * [includeHidden] is true.
+     */
+    fun listAll(projectId: String, includeHidden: Boolean = false): List<CoderEntry> {
         val dir = resolve(projectId, "") ?: return emptyList()
         if (!dir.isDirectory) return emptyList()
         val out = ArrayList<CoderEntry>()
-        collect(dir, "", 0, out, CoderLimits.MAX_FILES_PER_PROJECT + 500)
+        collect(dir, "", 0, out, CoderLimits.MAX_FILES_PER_PROJECT + 500, includeHidden)
         return out
     }
 
@@ -118,7 +131,7 @@ class CoderFileStore(private val rootDir: File) {
 
     /** Creates a new file; [CoderWriteResult.AlreadyExists] when anything is already at [path]. */
     fun createFile(projectId: String, path: String, text: String = ""): CoderWriteResult {
-        if (path.isEmpty()) return CoderWriteResult.InvalidPath
+        if (path.isEmpty() || isCoderHiddenPath(path)) return CoderWriteResult.InvalidPath
         val target = resolve(projectId, path) ?: return CoderWriteResult.InvalidPath
         if (target.exists()) return CoderWriteResult.AlreadyExists
         return write(projectId, path, text)
@@ -126,7 +139,7 @@ class CoderFileStore(private val rootDir: File) {
 
     /** Creates a new folder (and any missing parents). */
     fun createFolder(projectId: String, path: String): CoderWriteResult {
-        if (path.isEmpty()) return CoderWriteResult.InvalidPath
+        if (path.isEmpty() || isCoderHiddenPath(path)) return CoderWriteResult.InvalidPath
         val target = resolve(projectId, path) ?: return CoderWriteResult.InvalidPath
         if (target.exists()) return CoderWriteResult.AlreadyExists
         return try {
@@ -138,7 +151,7 @@ class CoderFileStore(private val rootDir: File) {
 
     /** Renames or moves a file or folder. A folder cannot be moved into itself. */
     fun rename(projectId: String, fromPath: String, toPath: String): CoderWriteResult {
-        if (fromPath.isEmpty() || toPath.isEmpty()) return CoderWriteResult.InvalidPath
+        if (fromPath.isEmpty() || toPath.isEmpty() || isCoderHiddenPath(toPath)) return CoderWriteResult.InvalidPath
         val source = resolve(projectId, fromPath) ?: return CoderWriteResult.InvalidPath
         val target = resolve(projectId, toPath) ?: return CoderWriteResult.InvalidPath
         if (!source.exists()) return CoderWriteResult.Failed
@@ -178,30 +191,42 @@ class CoderFileStore(private val rootDir: File) {
         }
     }
 
-    /** The total size of the project's files, in bytes. */
+    /** The total size of the project's files, in bytes. Files in the app's own `.coder` folders do not count. */
     fun projectSizeBytes(projectId: String): Long {
         val dir = resolve(projectId, "") ?: return 0L
-        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        return visibleFiles(dir).sumOf { it.length() }
     }
 
-    /** How many regular files the project has. */
+    /** How many regular files the project has. Files in the app's own `.coder` folders do not count. */
     fun fileCount(projectId: String): Int {
         val dir = resolve(projectId, "") ?: return 0
-        return dir.walkTopDown().count { it.isFile }
+        return visibleFiles(dir).size
     }
 
-    private fun collect(dir: File, prefix: String, depth: Int, out: MutableList<CoderEntry>, limit: Int) {
+    /** The regular files under [dir], leaving out every top-level entry whose name starts with `.coder`. */
+    private fun visibleFiles(dir: File): List<File> {
+        val out = ArrayList<File>()
+        val children = dir.listFiles() ?: return out
+        for (child in children) {
+            if (child.name.startsWith(CODER_HIDDEN_PREFIX)) continue
+            if (child.isFile) out.add(child) else out.addAll(child.walkTopDown().filter { it.isFile })
+        }
+        return out
+    }
+
+    private fun collect(dir: File, prefix: String, depth: Int, out: MutableList<CoderEntry>, limit: Int, includeHidden: Boolean) {
         if (depth > CoderLimits.MAX_FOLDER_DEPTH) return
         val children = dir.listFiles() ?: return
         val sorted = children
             .filter { !isTempName(it.name) }
+            .filter { includeHidden || prefix.isNotEmpty() || !it.name.startsWith(CODER_HIDDEN_PREFIX) }
             .sortedWith(compareBy<File>({ !it.isDirectory }, { it.name.lowercase() }, { it.name }))
         for (child in sorted) {
             if (out.size >= limit) return
             val path = if (prefix.isEmpty()) child.name else prefix + "/" + child.name
             if (child.isDirectory) {
                 out.add(CoderEntry(path, true, 0L, child.lastModified()))
-                collect(child, path, depth + 1, out, limit)
+                collect(child, path, depth + 1, out, limit, includeHidden)
             } else {
                 out.add(CoderEntry(path, false, child.length(), child.lastModified()))
             }

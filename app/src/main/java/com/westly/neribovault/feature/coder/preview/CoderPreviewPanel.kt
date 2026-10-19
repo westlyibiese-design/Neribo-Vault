@@ -90,6 +90,10 @@ import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
+import com.westly.neribovault.core.util.formatDateTime
+import com.westly.neribovault.feature.coder.build.CoderBuildFiles
+import com.westly.neribovault.feature.coder.env.CoderEnvCache
+import com.westly.neribovault.feature.coder.env.CoderEnvStore
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
@@ -187,7 +191,8 @@ private class PageDialogState(
  * the editor, with a thin toolbar (reload, page picker, size, console, menu), and [onClose] turns the pane off.
  * [saveTick] goes up each time a save finishes, which reloads the page after a second when auto-refresh is on.
  * [entries] is the project's file list, for the page picker; [session] keeps the chosen size and page while the
- * screen is open; messages such as "Copied" are shown on [snackbarHostState].
+ * screen is open; messages such as "Copied" are shown on [snackbarHostState]. When a site built on GitHub is shown,
+ * a line says when it was built and, if [onOpenBuild] is set, a Rebuild button opens the build wizard.
  */
 @Composable
 fun CoderPreviewPanel(
@@ -200,16 +205,22 @@ fun CoderPreviewPanel(
     entries: List<CoderEntry> = emptyList(),
     session: CoderPreviewSession? = null,
     snackbarHostState: SnackbarHostState? = null,
+    onOpenBuild: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val store = remember(context) { (context.applicationContext as NeriboApp).container.coderFileStore }
     val holder = remember { PreviewHolder() }
     val snackbar = snackbarHostState ?: remember { SnackbarHostState() }
     val plan by produceState<PreviewPlan?>(initialValue = null, projectId, store) {
+        // The page may ask for /__coder/env.js, which is answered from memory, so the variables are loaded first.
+        CoderEnvStore.shared(context)
+        CoderEnvCache.ensureLoaded(projectId)
         value = withContext(Dispatchers.IO) {
+            val root = CoderPreviewRoot.find(store, projectId) ?: ""
             PreviewPlan(
-                rootPrefix = CoderPreviewRoot.find(store, projectId) ?: "",
+                rootPrefix = root,
                 build = CoderBuildDetector.check(store, projectId),
+                builtAt = if (root == CoderPreviewRoot.BUILT_FOLDER) builtTimeOf(store, projectId) else null,
             )
         }
     }
@@ -231,12 +242,15 @@ fun CoderPreviewPanel(
             reason = current.build.reason,
             builtFolderHint = current.build.builtFolderHint,
             onBack = onClose,
+            onBuild = onOpenBuild,
         )
     } else {
         PreviewContent(
             projectId = projectId,
             entryPath = entryPath,
             rootPrefix = current.rootPrefix,
+            builtAt = current.builtAt,
+            onOpenBuild = onOpenBuild,
             store = store,
             holder = holder,
             embedded = embedded,
@@ -251,7 +265,40 @@ fun CoderPreviewPanel(
 }
 
 /** What the preview found out about the project before showing it: the site's top folder and whether it needs a build. */
-private class PreviewPlan(val rootPrefix: String, val build: CoderBuildCheck)
+private class PreviewPlan(val rootPrefix: String, val build: CoderBuildCheck, val builtAt: Long?)
+
+/** When the shown GitHub build was made: from its meta file, else from the folder's own time, else 0. */
+private fun builtTimeOf(store: CoderFileStore, projectId: String): Long =
+    CoderBuildFiles.readMeta(store, projectId)?.builtAtMillis
+        ?: store.resolve(projectId, CoderPreviewRoot.BUILT_FOLDER)?.lastModified()
+        ?: 0L
+
+/** One quiet line above a site built on GitHub: when it was built, and a Rebuild button when the wizard can be opened. */
+@Composable
+private fun BuiltBanner(builtAt: Long?, onRebuild: (() -> Unit)?) {
+    val spacing = NeriboTheme.spacing
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = spacing.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val text = if (builtAt != null && builtAt > 0L) {
+            "Showing the build from ${formatDateTime(builtAt)}."
+        } else {
+            "Showing the build from GitHub."
+        }
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+        if (onRebuild != null) {
+            TextButton(onClick = onRebuild) { Text(text = "Rebuild", style = MaterialTheme.typography.labelLarge) }
+        }
+    }
+}
 
 /** Adds a plain-English line to errors and warnings that have a known explanation. */
 private fun withFriendlyText(message: CoderConsoleMessage): CoderConsoleMessage {
@@ -265,6 +312,8 @@ private fun PreviewContent(
     projectId: String,
     entryPath: String,
     rootPrefix: String,
+    builtAt: Long?,
+    onOpenBuild: (() -> Unit)?,
     store: CoderFileStore,
     holder: PreviewHolder,
     embedded: Boolean,
@@ -414,6 +463,7 @@ private fun PreviewContent(
                 menu()
             }
             if (servingHere) ServingRow(onStop = { server.stop() })
+            if (rootPrefix == CoderPreviewRoot.BUILT_FOLDER) BuiltBanner(builtAt, onOpenBuild)
             viewport(Modifier.weight(1f))
         }
     } else {
@@ -458,6 +508,7 @@ private fun PreviewContent(
                     SizeChip(preset = view.preset, onPick = { view.preset = it })
                 }
                 if (servingHere) ServingRow(onStop = { server.stop() })
+                if (rootPrefix == CoderPreviewRoot.BUILT_FOLDER) BuiltBanner(builtAt, onOpenBuild)
                 viewport(Modifier.weight(1f))
             }
         }

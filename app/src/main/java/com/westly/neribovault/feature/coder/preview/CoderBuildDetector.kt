@@ -46,7 +46,16 @@ object CoderBuildDetector {
         }
     }
 
+    /** True when the project's top-level `index.html` loads source files (the Vite / React layout) and so cannot run as it is. */
+    internal fun sourceIndexNeedsBuild(store: CoderFileStore, projectId: String): Boolean {
+        val index = readText(store, projectId, "index.html") ?: return false
+        return loadsSourceFiles(index)
+    }
+
     private fun checkProject(store: CoderFileStore, projectId: String): CoderBuildCheck {
+        // Rule 0: a site built on GitHub is ready to show.
+        val built = store.resolve(projectId, CoderPreviewRoot.join(CoderPreviewRoot.BUILT_FOLDER, "index.html"))
+        if (built != null && built.isFile) return CoderBuildCheck.Ready
         val root = CoderPreviewRoot.find(store, projectId)
         // Rule 1: a finished site in dist, build, out or docs, with no index.html at the top.
         if (root != null && root in BUILT_FOLDERS) return CoderBuildCheck.Ready

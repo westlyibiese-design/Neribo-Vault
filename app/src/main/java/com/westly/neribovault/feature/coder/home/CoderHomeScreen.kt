@@ -58,6 +58,7 @@ import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.di.neriboViewModel
 import com.westly.neribovault.core.lock.VaultLockSettingsSheet
+import com.westly.neribovault.feature.coder.env.CoderEnvStore
 import com.westly.neribovault.core.ui.components.EmptyState
 import com.westly.neribovault.core.ui.components.LoadingState
 import com.westly.neribovault.core.ui.components.MenuAction
@@ -88,6 +89,7 @@ import com.westly.neribovault.feature.coder.zip.ZipMessageDialog
 import com.westly.neribovault.feature.coder.zip.ZipProgressDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -121,6 +123,14 @@ fun CoderHomeScreen(
         CoderTipEngine.showWelcome(currentMode, currentWelcomeSeen, state.projects.size)
     // "Show tips again" clears the saved flag; the card may then come back in this same visit.
     LaunchedEffect(currentWelcomeSeen) { if (currentWelcomeSeen == false) welcomeDismissed = false }
+
+    // Variables of projects that no longer exist (not even in the trash) are removed once the real lists have loaded.
+    LaunchedEffect(Unit) {
+        val projectsRepo = (context.applicationContext as NeriboApp).container.coderProjectsRepository
+        val live = projectsRepo.observeAll().first()
+        val trashed = projectsRepo.observeTrashed().first()
+        CoderEnvStore.shared(context).purgeOrphans((live + trashed).map { it.id }.toSet())
+    }
 
     val importer = remember(context) {
         val container = (context.applicationContext as NeriboApp).container

@@ -8,6 +8,8 @@ import androidx.navigation.navArgument
 import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
 import com.westly.neribovault.feature.coder.ai.CoderAiSettingsScreen
+import com.westly.neribovault.feature.coder.build.BuildWizardScreen
+import com.westly.neribovault.feature.coder.env.EnvironmentScreen
 import com.westly.neribovault.feature.coder.github.CoderGitHubScreen
 import com.westly.neribovault.feature.coder.guidance.CoderHelpScreen
 import com.westly.neribovault.feature.coder.home.CoderHomeScreen
@@ -28,11 +30,17 @@ object CoderRoutes {
     const val AI_SETTINGS = "coder/ai"
     const val HELP = "coder/help"
     const val GITHUB = "coder/github/{projectId}"
+    const val ENV = "coder/env/{projectId}"
+    const val BUILD = "coder/build/{projectId}"
     const val ARG_PROJECT_ID = "projectId"
 
     fun project(id: String) = "coder/project/$id"
 
     fun github(id: String) = "coder/github/$id"
+
+    fun env(id: String) = "coder/env/$id"
+
+    fun build(id: String) = "coder/build/$id"
 }
 
 /** Registers every Coder destination, each behind the vault lock. */
@@ -71,6 +79,40 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
                 onOpenGitHub = {
                     navController.navigate(CoderRoutes.github(projectId)) { launchSingleTop = true }
                 },
+                onOpenEnvironment = {
+                    navController.navigate(CoderRoutes.env(projectId)) { launchSingleTop = true }
+                },
+                onOpenBuild = {
+                    navController.navigate(CoderRoutes.build(projectId)) { launchSingleTop = true }
+                },
+            )
+        }
+    }
+    composable(
+        route = CoderRoutes.ENV,
+        arguments = listOf(navArgument(CoderRoutes.ARG_PROJECT_ID) { type = NavType.StringType }),
+    ) { entry ->
+        val projectId = entry.arguments?.getString(CoderRoutes.ARG_PROJECT_ID).orEmpty()
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            EnvironmentScreen(projectId = projectId, onBack = { navController.popBackStack() })
+        }
+    }
+    composable(
+        route = CoderRoutes.BUILD,
+        arguments = listOf(navArgument(CoderRoutes.ARG_PROJECT_ID) { type = NavType.StringType }),
+    ) { entry ->
+        val projectId = entry.arguments?.getString(CoderRoutes.ARG_PROJECT_ID).orEmpty()
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            BuildWizardScreen(
+                projectId = projectId,
+                onBack = { navController.popBackStack() },
+                onOpenGitHub = {
+                    navController.navigate(CoderRoutes.github(projectId)) { launchSingleTop = true }
+                },
+                onOpenEnvironment = {
+                    navController.navigate(CoderRoutes.env(projectId)) { launchSingleTop = true }
+                },
+                onAskAi = { navController.popBackStack() },
             )
         }
     }

@@ -70,6 +70,7 @@ import com.westly.neribovault.feature.coder.ai.CoderAiPanel
 import com.westly.neribovault.feature.coder.ai.CoderAiViewModel
 import com.westly.neribovault.feature.coder.ai.aiSelectionSnapshotOf
 import com.westly.neribovault.feature.coder.ai.aiSnapshotApplies
+import com.westly.neribovault.feature.coder.build.CoderBuildAiHandoff
 import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar
@@ -117,7 +118,14 @@ private sealed class PendingClose {
  * drawer, then saves and returns to the file list (the tabs stay open) and then leaves the project.
  */
 @Composable
-fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings: () -> Unit, onOpenGitHub: () -> Unit) {
+fun CoderWorkspaceScreen(
+    projectId: String,
+    onBack: () -> Unit,
+    onOpenAiSettings: () -> Unit,
+    onOpenGitHub: () -> Unit,
+    onOpenEnvironment: () -> Unit,
+    onOpenBuild: () -> Unit,
+) {
     val vm = neriboViewModel(key = "coder-workspace-$projectId") { c ->
         CoderWorkspaceViewModel(projectId, c.coderProjectsRepository, c.coderFileStore, c.coderPrefs)
     }
@@ -200,6 +208,16 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
     }
 
     LifecycleSaveEffect(onSave = { vm.flush() })
+
+    // A message the build wizard prepared for AI help (never sent): put it in the input and show the AI screen.
+    LaunchedEffect(projectId) {
+        val prepared = CoderBuildAiHandoff.take(projectId)
+        if (prepared != null) {
+            aiVm.setInput(prepared)
+            aiSnapshot = null
+            aiOpen = true
+        }
+    }
 
     // After the process was killed, open the files that were open before. It finishes even when the screen turns meanwhile.
     LaunchedEffect(Unit) {
@@ -320,6 +338,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
             entries = state.entries,
             session = previewSession,
             snackbarHostState = snackbarHostState,
+            onOpenBuild = onOpenBuild,
         )
         return
     }
@@ -440,6 +459,8 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                                     exportLauncher.launch(exportFileName(project?.name.orEmpty()))
                                 }),
                                 MenuAction("GitHub", onOpenGitHub),
+                                MenuAction("Build with GitHub", onOpenBuild),
+                                MenuAction("Environment", onOpenEnvironment),
                             ) + linkMenuActions(
                                 linkState = linkState,
                                 onChoose = { showLinkSheet = true },
@@ -587,6 +608,7 @@ fun CoderWorkspaceScreen(projectId: String, onBack: () -> Unit, onOpenAiSettings
                                         entries = state.entries,
                                         session = previewSession,
                                         snackbarHostState = snackbarHostState,
+                                        onOpenBuild = onOpenBuild,
                                     )
                                 }
                             },

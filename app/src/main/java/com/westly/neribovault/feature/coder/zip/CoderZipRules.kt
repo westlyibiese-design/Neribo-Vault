@@ -1,5 +1,6 @@
 package com.westly.neribovault.feature.coder.zip
 
+import com.westly.neribovault.feature.coder.files.CODER_HIDDEN_PREFIX
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
 
@@ -58,6 +59,8 @@ object CoderZipRules {
         if (segments.any { it == "node_modules" }) return SkipReason.NODE_MODULES
         if (segments.any { it == ".git" }) return SkipReason.GIT_FOLDER
         if (segments.any { it == "__MACOSX" }) return SkipReason.SYSTEM_FILE
+        // Folders that belong to the app can never come from a ZIP, even below an outer folder that is removed later.
+        if (segments.any { it.startsWith(CODER_HIDDEN_PREFIX) }) return SkipReason.SYSTEM_FILE
         val fileName = segments.last()
         if (fileName == ".DS_Store" || fileName == "Thumbs.db" || fileName == "desktop.ini") return SkipReason.SYSTEM_FILE
         return null

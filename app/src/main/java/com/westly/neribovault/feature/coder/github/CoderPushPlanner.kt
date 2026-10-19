@@ -23,11 +23,13 @@ object CoderPushPlanner {
 
     /**
      * True for a path that is never uploaded: what a ZIP import also leaves out (`node_modules`, `.git`,
-     * system files) and the half-written temp files the file store makes while saving.
+     * system files and the app's own `.coder` folders), the files named `.env` or starting with `.env.` (they
+     * hold secrets), and the half-written temp files the file store makes while saving.
      */
     fun isIgnored(path: String): Boolean {
         if (CoderZipRules.shouldSkip(path) != null) return true
         val name = CoderPaths.nameOf(path)
+        if (name == ".env" || name.startsWith(".env.")) return true
         return name.startsWith(".") && name.contains(TEMP_MARKER)
     }
 

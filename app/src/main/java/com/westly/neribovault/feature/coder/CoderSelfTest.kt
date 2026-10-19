@@ -49,6 +49,31 @@ import com.westly.neribovault.feature.coder.editor.smart.SMART_HTML_TAGS
 import com.westly.neribovault.feature.coder.editor.smart.Suggestion
 import com.westly.neribovault.feature.coder.editor.smart.SuggestionKind
 import com.westly.neribovault.feature.coder.editor.smart.SuggestionResult
+import com.westly.neribovault.feature.coder.build.ActionArtifact
+import com.westly.neribovault.feature.coder.build.ActionRun
+import com.westly.neribovault.feature.coder.build.BuildStageState
+import com.westly.neribovault.feature.coder.build.CoderActionsErrors
+import com.westly.neribovault.feature.coder.build.CoderActionsLogic
+import com.westly.neribovault.feature.coder.build.CoderActionsRequests
+import com.westly.neribovault.feature.coder.build.CoderBuildAiHandoff
+import com.westly.neribovault.feature.coder.build.CoderBuildErrorExplainer
+import com.westly.neribovault.feature.coder.build.CoderBuildFiles
+import com.westly.neribovault.feature.coder.build.CoderBuildMeta
+import com.westly.neribovault.feature.coder.build.CoderBuildRunner
+import com.westly.neribovault.feature.coder.build.CoderBuildStateFile
+import com.westly.neribovault.feature.coder.build.CoderBuildTools
+import com.westly.neribovault.feature.coder.build.CoderBuildWorkflow
+import com.westly.neribovault.feature.coder.build.CoderPackageAnalyzer
+import com.westly.neribovault.feature.coder.build.ExtractResult
+import com.westly.neribovault.feature.coder.build.mapStepState
+import com.westly.neribovault.feature.coder.build.scopesAllowWorkflow
+import com.westly.neribovault.feature.coder.env.CoderEnvCache
+import com.westly.neribovault.feature.coder.env.CoderEnvKeyCrypto
+import com.westly.neribovault.feature.coder.env.CoderEnvRules
+import com.westly.neribovault.feature.coder.env.CoderEnvStore
+import com.westly.neribovault.feature.coder.env.EnvVar
+import com.westly.neribovault.feature.coder.files.isCoderHiddenPath
+import com.westly.neribovault.feature.coder.github.CoderGitHubResult
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
@@ -102,6 +127,7 @@ import com.westly.neribovault.feature.coder.zip.CoderImportReport
 import com.westly.neribovault.feature.coder.zip.CoderImportResult
 import com.westly.neribovault.feature.coder.zip.CoderZipExporter
 import com.westly.neribovault.feature.coder.zip.CoderZipRules
+import com.westly.neribovault.feature.coder.zip.SkipReason
 import com.westly.neribovault.feature.coder.zip.ZIP_UNSAFE_NAMES_MESSAGE
 import com.westly.neribovault.feature.coder.zip.importStream
 import com.westly.neribovault.feature.coder.zip.writeProjectZip
@@ -216,6 +242,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(tipEngineChecks())
         results.addAll(guidanceDataChecks())
         results.addAll(previewUpgradeChecks(context, store))
+        results.addAll(buildAndEnvChecks(context, store))
     } finally {
         root.deleteRecursively()
     }
@@ -3354,5 +3381,640 @@ private fun localServerChecks(context: Context, store: CoderFileStore): List<Cod
         }
     })
     out.add(check("Local server: after stop nothing is served", "null") { server.serving.value == null })
+    return out
+}
+
+// ---- GitHub build and environment variables (phase C14) ---------------------------------------
+
+private fun buildAndEnvChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> =
+    envRuleChecks() + dotEnvChecks() + envScriptChecks() + envStoreChecks(context) + analyzerChecks() +
+        workflowChecks() + actionsRequestChecks() + actionsLogicChecks() + buildStateChecks(store) +
+        extractChecks(store) + c14SeamChecks(context, store)
+
+private fun envRuleChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    for (name in listOf("API_URL", "_X", "A1", "VITE_KEY", "A".repeat(64), "Z")) {
+        out.add(check("Env name accepted: ${name.take(12)}", "valid") { CoderEnvRules.validateName(name) == null })
+    }
+    val refused = listOf("" to "empty", "api" to "lowercase", "1A" to "starts with a digit", "A-B" to "hyphen", "A B" to "space", "A".repeat(65) to "65 characters")
+    for ((name, label) in refused) out.add(check("Env name refused: $label", "a message") { CoderEnvRules.validateName(name) != null })
+    for (name in listOf("GITHUB_TOKEN", "RUNNER_OS", "CI", "PATH", "HOME")) {
+        out.add(check("Env name reserved: $name", "reserved message") { CoderEnvRules.validateName(name) == CoderEnvRules.MSG_RESERVED })
+    }
+    out.add(check("Env value: empty and 2000 characters are fine", "valid") {
+        CoderEnvRules.validateValue("") == null && CoderEnvRules.validateValue("x".repeat(2000)) == null
+    })
+    out.add(check("Env value: 2001 characters are refused", "a message") { CoderEnvRules.validateValue("x".repeat(2001)) != null })
+    out.add(check("Env value: line break, tab and DEL are refused", "a message") {
+        CoderEnvRules.validateValue("a\nb") != null && CoderEnvRules.validateValue("a\tb") != null && CoderEnvRules.validateValue("a\u007Fb") != null
+    })
+    out.add(check("Env value: Unicode is fine", "valid") { CoderEnvRules.validateValue("héllo ✓ 日本") == null })
+    out.add(check("Env suggestion: spaces and hyphens become underscores", "API_URL, MY_VAR") {
+        CoderEnvRules.suggestName("api url") == "API_URL" && CoderEnvRules.suggestName("my-var!") == "MY_VAR"
+    })
+    out.add(check("Env suggestion: at most 64 characters", "64") { CoderEnvRules.suggestName("a".repeat(70)).length == 64 })
+    val some = listOf(EnvVar("A", "1"), EnvVar("B", "2"))
+    out.add(check("Env save: a new name that exists is refused", "a message") { CoderEnvRules.validateForSave(some, null, "A", "x") != null })
+    out.add(check("Env save: an edit may keep its own name", "null") { CoderEnvRules.validateForSave(some, "A", "A", "new") == null })
+    out.add(check("Env save: an edit may not take another name", "a message") { CoderEnvRules.validateForSave(some, "A", "B", "x") != null })
+    val full = (1..50).map { EnvVar("V$it", "x") }
+    out.add(check("Env save: the 51st variable is refused, an edit at 50 is fine", "refused, ok") {
+        CoderEnvRules.validateForSave(full, null, "EXTRA", "x") != null && CoderEnvRules.validateForSave(full, "V1", "V1", "y") == null
+    })
+    out.add(check("Env merge: new names are added, existing ones overwritten", "1 added, 1 overwritten") {
+        val m = CoderEnvRules.merge(some, listOf("A" to "9", "C" to "3"))
+        m.added == 1 && m.overwritten == 1 && m.merged.map { it.name } == listOf("A", "B", "C") && m.merged.first().value == "9"
+    })
+    out.add(check("Env merge: names beyond 50 are counted, not added", "2 not added") {
+        val m = CoderEnvRules.merge(full, listOf("N1" to "1", "N2" to "2", "V1" to "z"))
+        m.merged.size == 50 && m.notAdded == 2 && m.overwritten == 1
+    })
+    out.add(check("Env merge: the names a file would overwrite are listed", "A") {
+        CoderEnvRules.overwrittenNames(some, listOf("A" to "1", "Z" to "2")) == listOf("A")
+    })
+    return out
+}
+
+private fun dotEnvChecks(): List<CoderCheckResult> {
+    fun parse(text: String) = CoderEnvRules.parseDotEnvDetailed(text)
+    return listOf(
+        check("dotenv: KEY=VALUE and export KEY=VALUE", "two variables") {
+            parse("A=1\nexport B=2").variables == listOf("A" to "1", "B" to "2")
+        },
+        check("dotenv: comments and blank lines are ignored, not counted", "no skipped") {
+            val r = parse("# note\n\n  # another\nA=1")
+            r.variables == listOf("A" to "1") && r.skippedLines == 0
+        },
+        check("dotenv: double quotes are removed and \\\" is a quote", "say \"hi\"") {
+            parse("A=\"say \\\"hi\\\"\"").variables == listOf("A" to "say \"hi\"")
+        },
+        check("dotenv: single quotes keep everything as written", "a\\nb") {
+            parse("A='a\\nb'").variables == listOf("A" to "a\\nb")
+        },
+        check("dotenv: an inline comment needs a space before the #", "x, x#y") {
+            parse("A=x # c\nB=x#y").variables == listOf("A" to "x", "B" to "x#y")
+        },
+        check("dotenv: a # inside quotes stays", "a # b") { parse("A=\"a # b\" # real comment").variables == listOf("A" to "a # b") },
+        check("dotenv: an empty value and KEY= # comment", "two empty values") {
+            parse("A=\nB= # c").variables == listOf("A" to "", "B" to "")
+        },
+        check("dotenv: spaces around = are allowed", "A=1") { parse("A = 1").variables == listOf("A" to "1") },
+        check("dotenv: bad lines are counted and skipped", "4 skipped") {
+            val r = parse("lower=1\nNOEQUALS\nGITHUB_X=1\nA=\"open\nB=2")
+            r.variables == listOf("B" to "2") && r.skippedLines == 4
+        },
+        check("dotenv: a name that appears twice keeps its last value", "2") { parse("A=1\nA=2").variables == listOf("A" to "2") },
+        check("dotenv: Windows line endings and a BOM", "two variables") {
+            parse("\uFEFFA=1\r\nB=2\r\n").variables == listOf("A" to "1", "B" to "2")
+        },
+        check("dotenv: a value over 2000 characters is skipped", "1 skipped") {
+            val r = parse("A=" + "x".repeat(2001))
+            r.variables.isEmpty() && r.skippedLines == 1
+        },
+    )
+}
+
+private fun envScriptChecks(): List<CoderCheckResult> = listOf(
+    check("env.js: no variables", "empty object") { CoderEnvRules.generateEnvJs(emptyMap()) == "window.__ENV__ = Object.freeze({});" },
+    check("env.js: names in alphabetical order", "exact text") {
+        CoderEnvRules.generateEnvJs(mapOf("B" to "2", "A" to "1")) == "window.__ENV__ = Object.freeze({\"A\":\"1\",\"B\":\"2\"});"
+    },
+    check("env.js: </script> cannot close a script tag", "escaped") {
+        val js = CoderEnvRules.generateEnvJs(mapOf("A" to "</script><script>x</script>"))
+        !js.contains("</") && js.contains("<\\/script>")
+    },
+    check("env.js: quotes and backslashes are escaped", "escaped") {
+        val js = CoderEnvRules.generateEnvJs(mapOf("A" to "a\"b\\c"))
+        js.contains("\"a\\\"b\\\\c\"")
+    },
+    check("env.js: a web address keeps its slashes", "plain slashes") {
+        CoderEnvRules.generateEnvJs(mapOf("A" to "https://x.y/z")).contains("\"https://x.y/z\"")
+    },
+    check("env.js: <!-- and the line separators are escaped", "escaped") {
+        val js = CoderEnvRules.generateEnvJs(mapOf("A" to "<!-- \u2028 \u2029"))
+        !js.contains("<!--") && !js.contains("\u2028") && !js.contains("\u2029") && js.contains("\\u2028") && js.contains("\\u2029")
+    },
+    check("env.js: control characters are escaped", "escaped") {
+        val js = CoderEnvRules.jsString("a\nb\u0001")
+        !js.contains("\n") && js.contains("\\n") && js.contains("\\u0001")
+    },
+    check("env.json: reads back to the same values", "same map") {
+        val vars = mapOf("A" to "x\"y\\z/</script>", "B" to "é ✓")
+        val json = org.json.JSONObject(CoderEnvRules.generateEnvJson(vars))
+        vars.all { (k, v) -> json.getString(k) == v } && json.length() == 2
+    },
+)
+
+private fun envStoreChecks(context: Context): List<CoderCheckResult> {
+    if (!CoderEnvKeyCrypto.isAvailable()) {
+        return listOf(CoderCheckResult("Env store: Keystore unavailable on this phone, checks skipped", true, "ok"))
+    }
+    val envStore = CoderEnvStore.shared(context)
+    val id = newId()
+    val other = newId()
+    val secret = "ENVTESTVALUE" + newId()
+    val out = ArrayList<CoderCheckResult>()
+    out.add(check("Env store: save then load gives the same variables", "same list") {
+        runBlocking {
+            val vars = listOf(EnvVar("API_URL", "https://x.y/z"), EnvVar("TOKEN_VALUE", secret), EnvVar("EMPTY", ""))
+            envStore.save(id, vars) && envStore.load(id) == vars
+        }
+    })
+    out.add(check("Env store: the cache answers without waiting", "same map") {
+        CoderEnvCache.get(id)["TOKEN_VALUE"] == secret && CoderEnvCache.get(id).size == 3
+    })
+    out.add(check("Env store: the saved file holds no plain value", "no plain text") {
+        val file = File(context.applicationContext.filesDir, "datastore/neribo_coder_env.preferences_pb")
+        file.isFile && !String(file.readBytes(), Charsets.ISO_8859_1).contains(secret)
+    })
+    out.add(check("Env store: crypto round trip, new IV each time, tampering refused", "round trip") {
+        val bytes = "hello".toByteArray()
+        val a = CoderEnvKeyCrypto.encrypt(bytes)
+        val b = CoderEnvKeyCrypto.encrypt(bytes)
+        val back = if (a == null) null else CoderEnvKeyCrypto.decrypt(a.ciphertext, a.iv)
+        val wrong = if (a == null) null else CoderEnvKeyCrypto.decrypt(a.ciphertext, Base64.encodeToString(ByteArray(12), Base64.NO_WRAP))
+        a != null && b != null && back != null && back.contentEquals(bytes) && a.iv != b.iv && wrong == null
+    })
+    out.add(check("Env store: its key alias is its own", "different from the others") {
+        CoderEnvKeyCrypto.KEY_ALIAS == "neribo_coder_env_key" && CoderEnvKeyCrypto.KEY_ALIAS != CoderGitHubKeyCrypto.KEY_ALIAS
+    })
+    out.add(check("Env store: bad names, duplicates, 51 variables and bad ids are refused", "all false") {
+        runBlocking {
+            !envStore.save(id, listOf(EnvVar("lower", "x"))) &&
+                !envStore.save(id, listOf(EnvVar("A", "1"), EnvVar("A", "2"))) &&
+                !envStore.save(id, (1..51).map { EnvVar("V$it", "x") }) &&
+                !envStore.save("../bad", listOf(EnvVar("A", "1")))
+        }
+    })
+    out.add(check("Env store: purge removes projects that are not listed", "other gone, id kept") {
+        runBlocking {
+            envStore.save(other, listOf(EnvVar("A", "1")))
+            envStore.purgeOrphans(setOf(id))
+            envStore.load(other).isEmpty() && envStore.load(id).size == 3
+        }
+    })
+    out.add(check("Env store: saving an empty list removes the entry", "empty") {
+        runBlocking { envStore.save(id, emptyList()) && envStore.load(id).isEmpty() && CoderEnvCache.get(id).isEmpty() }
+    })
+    out.add(check("Env store: purge with no projects removes everything", "empty") {
+        runBlocking {
+            envStore.save(id, listOf(EnvVar("A", "1")))
+            envStore.purgeOrphans(emptySet())
+            envStore.load(id).isEmpty()
+        }
+    })
+    return out
+}
+
+private fun analyzerChecks(): List<CoderCheckResult> {
+    fun plan(json: String?, files: Set<String> = emptySet(), config: String? = null) = CoderPackageAnalyzer.analyze(json, files, config)
+    val vite = """{"scripts":{"build":"vite build"},"devDependencies":{"vite":"^5.0.0"}}"""
+    return listOf(
+        check("Analyzer: no package.json", "unsupported") { plan(null).let { !it.supported && it.unsupportedReason == CoderPackageAnalyzer.MSG_NO_PACKAGE } },
+        check("Analyzer: broken package.json", "unsupported") { plan("{not json").let { !it.supported && it.unsupportedReason == CoderPackageAnalyzer.MSG_UNREADABLE } },
+        check("Analyzer: no build script", "unsupported") {
+            plan("""{"scripts":{"start":"x"}}""").let { !it.supported && it.unsupportedReason == CoderPackageAnalyzer.MSG_NO_BUILD }
+        },
+        check("Analyzer: Vite uses dist and npm install without a lock file", "Vite, dist, npm install") {
+            plan(vite).let { it.supported && it.tool == CoderBuildTools.VITE && it.outputDir == "dist" && it.installCommand == "npm install" && it.buildCommand == "npm run build" }
+        },
+        check("Analyzer: Create React App uses build", "build") {
+            plan("""{"scripts":{"build":"react-scripts build"},"dependencies":{"react-scripts":"5"}}""").let { it.tool == CoderBuildTools.CREATE_REACT_APP && it.outputDir == "build" }
+        },
+        check("Analyzer: Parcel and webpack use dist", "dist") {
+            plan("""{"scripts":{"build":"parcel build index.html"},"devDependencies":{"parcel":"2"}}""").tool == CoderBuildTools.PARCEL &&
+                plan("""{"scripts":{"build":"webpack"},"devDependencies":{"webpack":"5"}}""").tool == CoderBuildTools.WEBPACK
+        },
+        check("Analyzer: an unknown tool is allowed with a warning", "supported, one warning") {
+            plan("""{"scripts":{"build":"node make.js"}}""").let { it.supported && it.tool == CoderBuildTools.UNKNOWN && it.warnings == listOf(CoderPackageAnalyzer.MSG_CHECK_OUTPUT) }
+        },
+        check("Analyzer: Next and Nuxt need a server", "unsupported") {
+            plan("""{"scripts":{"build":"next build"},"dependencies":{"next":"14"}}""").unsupportedReason == CoderPackageAnalyzer.MSG_SERVER &&
+                plan("""{"scripts":{"build":"nuxt build"},"dependencies":{"nuxt":"3"}}""").unsupportedReason == CoderPackageAnalyzer.MSG_SERVER
+        },
+        check("Analyzer: Angular, Astro and SvelteKit are not supported yet", "unsupported") {
+            listOf("@angular/cli", "astro", "@sveltejs/kit").all { dep ->
+                !plan("""{"scripts":{"build":"x build"},"devDependencies":{"$dep":"1","vite":"5"}}""").supported
+            }
+        },
+        check("Analyzer: Svelte with plain Vite is supported", "Vite") {
+            plan("""{"scripts":{"build":"vite build"},"devDependencies":{"svelte":"4","vite":"5"}}""").tool == CoderBuildTools.VITE
+        },
+        check("Analyzer: lock files choose the commands", "npm ci, yarn, pnpm") {
+            plan(vite, setOf("package-lock.json")).let { it.installCommand == "npm ci" && it.buildCommand == "npm run build" } &&
+                plan(vite, setOf("yarn.lock")).let { it.installCommand == "corepack enable && yarn install --frozen-lockfile" && it.buildCommand == "yarn build" } &&
+                plan(vite, setOf("pnpm-lock.yaml")).let { it.installCommand == "corepack enable && pnpm install --frozen-lockfile" && it.buildCommand == "pnpm build" }
+        },
+        check("Analyzer: Node version from engines", "18, 20, 22") {
+            CoderPackageAnalyzer.nodeMajorFor(">=18") == 18 && CoderPackageAnalyzer.nodeMajorFor("^20.1") == 20 &&
+                CoderPackageAnalyzer.nodeMajorFor("16") == 18 && CoderPackageAnalyzer.nodeMajorFor("18.x") == 18 &&
+                CoderPackageAnalyzer.nodeMajorFor("22.1.0") == 22 && CoderPackageAnalyzer.nodeMajorFor("24") == 22 &&
+                CoderPackageAnalyzer.nodeMajorFor("19") == 20 && CoderPackageAnalyzer.nodeMajorFor(null) == 20 &&
+                CoderPackageAnalyzer.nodeMajorFor("*") == 20 && CoderPackageAnalyzer.nodeMajorFor("lts") == 20
+        },
+        check("Analyzer: engines.node in package.json is used", "18") {
+            plan("""{"scripts":{"build":"vite build"},"devDependencies":{"vite":"5"},"engines":{"node":">=18"}}""").nodeVersion == 18
+        },
+        check("Analyzer: a Vite base path other than / warns", "warning") {
+            plan("""{"scripts":{"build":"vite build --base=/app/"},"devDependencies":{"vite":"5"}}""").warnings.contains(CoderPackageAnalyzer.MSG_BASE) &&
+                plan(vite, config = "export default { base: '/x/' }").warnings.contains(CoderPackageAnalyzer.MSG_BASE) &&
+                plan(vite, config = "export default { base: '/' }").warnings.isEmpty()
+        },
+        check("Analyzer: a Create React App homepage warns", "warning") {
+            plan("""{"scripts":{"build":"react-scripts build"},"dependencies":{"react-scripts":"5"},"homepage":"https://x.github.io/y"}""")
+                .warnings.contains(CoderPackageAnalyzer.MSG_HOMEPAGE)
+        },
+        check("Analyzer: output folder names", "plain folders only") {
+            CoderPackageAnalyzer.isValidOutputDir("dist") && CoderPackageAnalyzer.isValidOutputDir("build/web") &&
+                !CoderPackageAnalyzer.isValidOutputDir("") && !CoderPackageAnalyzer.isValidOutputDir("../x") &&
+                !CoderPackageAnalyzer.isValidOutputDir("a b") && !CoderPackageAnalyzer.isValidOutputDir("/abs") &&
+                !CoderPackageAnalyzer.isValidOutputDir("a\nb: x") && !CoderPackageAnalyzer.isValidOutputDir("./x")
+        },
+        check("Analyzer: variable name prefix hints", "Vite and CRA only") {
+            CoderPackageAnalyzer.prefixHint(CoderBuildTools.VITE, listOf("VITE_A", "B")) != null &&
+                CoderPackageAnalyzer.prefixHint(CoderBuildTools.VITE, listOf("VITE_A")) == null &&
+                CoderPackageAnalyzer.prefixHint(CoderBuildTools.CREATE_REACT_APP, listOf("X"))!!.contains("REACT_APP_") &&
+                CoderPackageAnalyzer.prefixHint(CoderBuildTools.WEBPACK, listOf("X")) == null
+        },
+    )
+}
+
+private fun workflowChecks(): List<CoderCheckResult> {
+    val viteJson = """{"scripts":{"build":"vite build"},"devDependencies":{"vite":"5"}}"""
+    val plan = CoderPackageAnalyzer.analyze(viteJson, setOf("package-lock.json"))
+    val expectedNoVars = "# Generated by Neribo Vault Coder. You can edit this file.\n" +
+        "name: Coder build\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  build:\n" +
+        "    runs-on: ubuntu-latest\n    timeout-minutes: 15\n    env:\n      CI: \"false\"\n    steps:\n" +
+        "      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n" +
+        "      - name: Install\n        run: npm ci\n      - name: Build\n        run: npm run build\n" +
+        "      - uses: actions/upload-artifact@v4\n        with:\n          name: coder-dist\n          path: dist\n" +
+        "          if-no-files-found: error\n          retention-days: 7\n"
+    return listOf(
+        check("Workflow: exact text without variables", "the fixed template") { CoderBuildWorkflow.generate(plan, emptyList()) == expectedNoVars },
+        check("Workflow: variable names only, sorted, once each", "two lines") {
+            val text = CoderBuildWorkflow.generate(plan, listOf("B_VAR", "A_VAR", "B_VAR"))
+            text.contains("      CI: \"false\"\n      A_VAR: \${{ vars.A_VAR }}\n      B_VAR: \${{ vars.B_VAR }}\n    steps:") &&
+                text.split("B_VAR:").size == 2
+        },
+        check("Workflow: starts with the marker and says workflow_dispatch", "marker first") {
+            val text = CoderBuildWorkflow.generate(plan, emptyList())
+            text.lineSequence().first() == CoderBuildWorkflow.MARKER && text.contains("on:\n  workflow_dispatch:\n")
+        },
+        check("Workflow: never holds a variable value", "no value") {
+            !CoderBuildWorkflow.generate(plan, listOf("API_URL")).contains("https")
+        },
+        check("Workflow: yarn commands and Node 22 land in the file", "commands") {
+            val yarn = CoderPackageAnalyzer.analyze(
+                """{"scripts":{"build":"vite build"},"devDependencies":{"vite":"5"},"engines":{"node":"22"}}""", setOf("yarn.lock"),
+            )
+            val text = CoderBuildWorkflow.generate(yarn, emptyList())
+            text.contains("node-version: 22") && text.contains("run: corepack enable && yarn install --frozen-lockfile") && text.contains("run: yarn build")
+        },
+        check("Workflow: Create React App uploads build", "path: build") {
+            val cra = CoderPackageAnalyzer.analyze("""{"scripts":{"build":"react-scripts build"},"dependencies":{"react-scripts":"5"}}""", emptySet())
+            CoderBuildWorkflow.generate(cra, emptyList()).contains("          path: build\n")
+        },
+        check("Workflow: an unsafe output folder becomes dist", "dist") {
+            CoderBuildWorkflow.generate(plan.copy(outputDir = "x\n  evil: 1"), emptyList()).contains("          path: dist\n")
+        },
+        check("Workflow: only a file with the marker is ours", "marker rule") {
+            CoderBuildWorkflow.isOurs(CoderBuildWorkflow.MARKER + "\nname: x") && !CoderBuildWorkflow.isOurs("name: mine\n") &&
+                !CoderBuildWorkflow.isOurs("\n" + CoderBuildWorkflow.MARKER) && !CoderBuildWorkflow.isOurs("")
+        },
+        check("Workflow: path and file name", "fixed") {
+            CoderBuildWorkflow.WORKFLOW_PATH == ".github/workflows/coder-build.yml" && CoderPaths.isValidPath(CoderBuildWorkflow.WORKFLOW_PATH)
+        },
+    )
+}
+
+private fun actionsRequestChecks(): List<CoderCheckResult> {
+    val tok = "ghp_TESTTOKEN000000000000000000000000000"
+    fun urlOf(r: okhttp3.Request) = r.url.toString()
+    fun body(r: okhttp3.Request): String {
+        val buffer = okio.Buffer()
+        r.body?.writeTo(buffer)
+        return buffer.readUtf8()
+    }
+    val base = "https://api.github.com/repos/me/site"
+    return listOf(
+        check("Actions request: create variable", "POST variables with name and value") {
+            val r = CoderActionsRequests.createVariable(tok, "me", "site", "API_URL", "https://x")
+            r.method == "POST" && urlOf(r) == "$base/actions/variables" && org.json.JSONObject(body(r)).getString("name") == "API_URL"
+        },
+        check("Actions request: update variable", "PATCH variables/NAME") {
+            val r = CoderActionsRequests.updateVariable(tok, "me", "site", "API_URL", "v")
+            r.method == "PATCH" && urlOf(r) == "$base/actions/variables/API_URL"
+        },
+        check("Actions request: dispatch", "POST dispatches with ref") {
+            val r = CoderActionsRequests.dispatch(tok, "me", "site", "main")
+            r.method == "POST" && urlOf(r) == "$base/actions/workflows/coder-build.yml/dispatches" && org.json.JSONObject(body(r)).getString("ref") == "main"
+        },
+        check("Actions request: runs list", "GET with event, branch, per_page") {
+            val r = CoderActionsRequests.runs(tok, "me", "site", "feat/x")
+            r.method == "GET" && r.url.queryParameter("event") == "workflow_dispatch" && r.url.queryParameter("branch") == "feat/x" && r.url.queryParameter("per_page") == "5"
+        },
+        check("Actions request: run, jobs, cancel, artifacts, zip, logs", "addresses") {
+            urlOf(CoderActionsRequests.run(tok, "me", "site", 7)) == "$base/actions/runs/7" &&
+                urlOf(CoderActionsRequests.jobs(tok, "me", "site", 7)) == "$base/actions/runs/7/jobs" &&
+                CoderActionsRequests.cancel(tok, "me", "site", 7).let { it.method == "POST" && urlOf(it) == "$base/actions/runs/7/cancel" } &&
+                urlOf(CoderActionsRequests.artifacts(tok, "me", "site", 7)) == "$base/actions/runs/7/artifacts" &&
+                urlOf(CoderActionsRequests.artifactZip(tok, "me", "site", 9)) == "$base/actions/artifacts/9/zip" &&
+                urlOf(CoderActionsRequests.jobLogs(tok, "me", "site", 5)) == "$base/actions/jobs/5/logs"
+        },
+        check("Actions request: https, api.github.com, token only in the header", "safe") {
+            val r = CoderActionsRequests.dispatch(tok, "me", "site", "main")
+            r.url.isHttps && r.url.host == "api.github.com" && r.header("Authorization") == "Bearer $tok" &&
+                !urlOf(r).contains(tok) && r.header("X-GitHub-Api-Version") == "2022-11-28"
+        },
+    )
+}
+
+private fun actionsLogicChecks(): List<CoderCheckResult> {
+    fun run(id: Long, at: Long) = ActionRun(id, "queued", null, at, "sha")
+    fun art(name: String, size: Long, expired: Boolean = false) = ActionArtifact(1, name, size, expired)
+    return listOf(
+        check("Run pick: the newest run after the start", "run 3") {
+            CoderActionsLogic.pickRun(listOf(run(1, 1_000), run(2, 100_000), run(3, 101_000)), 100_000)?.id == 3L
+        },
+        check("Run pick: 15 seconds of slack before the start", "run 2, none") {
+            CoderActionsLogic.pickRun(listOf(run(2, 86_000)), 100_000)?.id == 2L && CoderActionsLogic.pickRun(listOf(run(2, 84_999)), 100_000) == null
+        },
+        check("Run pick: no runs", "null") { CoderActionsLogic.pickRun(emptyList(), 5) == null },
+        check("Artifact pick: the named, live, small one", "found") {
+            CoderActionsLogic.pickArtifact(listOf(art("other", 1), art("coder-dist", 1000))).artifact?.name == "coder-dist"
+        },
+        check("Artifact pick: missing, expired and too big give a reason", "three problems") {
+            CoderActionsLogic.pickArtifact(listOf(art("other", 1))).problem != null &&
+                CoderActionsLogic.pickArtifact(listOf(art("coder-dist", 1, expired = true))).problem!!.contains("expired") &&
+                CoderActionsLogic.pickArtifact(listOf(art("coder-dist", 61L * 1024 * 1024))).problem!!.contains("60 MB") &&
+                CoderActionsLogic.pickArtifact(listOf(art("coder-dist", 60L * 1024 * 1024))).artifact != null
+        },
+        check("Dispatch retry: 404 and the missing trigger 422 only", "retry rules") {
+            CoderActionsLogic.shouldRetryDispatch(404, null) && CoderActionsLogic.shouldRetryDispatch(422, "Workflow does not have 'workflow_dispatch' trigger") &&
+                !CoderActionsLogic.shouldRetryDispatch(422, "Invalid ref") && !CoderActionsLogic.shouldRetryDispatch(403, null) && !CoderActionsLogic.shouldRetryDispatch(500, null)
+        },
+        check("Step state: done, failed, running, waiting", "mapping") {
+            mapStepState("completed", "success") == BuildStageState.Done && mapStepState("completed", "skipped") == BuildStageState.Done &&
+                mapStepState("completed", "neutral") == BuildStageState.Done && mapStepState("completed", "failure") == BuildStageState.Failed &&
+                mapStepState("completed", "cancelled") == BuildStageState.Failed && mapStepState("completed", "timed_out") == BuildStageState.Failed &&
+                mapStepState("completed", null) == BuildStageState.Failed && mapStepState("in_progress", null) == BuildStageState.Running &&
+                mapStepState("queued", null) == BuildStageState.Waiting && mapStepState("pending", null) == BuildStageState.Waiting
+        },
+        check("Log tail: timestamps and colours go, 60 lines stay", "60 clean lines") {
+            val raw = (1..100).joinToString("\n") { "2026-10-19T10:00:00.1234567Z \u001B[31mline $it\u001B[0m" }
+            val tail = CoderActionsLogic.cleanLogTail(raw).lines()
+            tail.size == 60 && tail.first() == "line 41" && tail.last() == "line 100"
+        },
+        check("Log tail: a line that looks like a secret is hidden", "hidden") {
+            val key = "AKIA" + "ABCDEFGHIJKLMNOP"
+            val tail = CoderActionsLogic.cleanLogTail("ok line\nusing key $key now\nlast line")
+            !tail.contains(key) && tail.contains("ok line") && tail.contains("last line") && tail.contains("hidden")
+        },
+        check("Log tail: empty log", "empty") { CoderActionsLogic.cleanLogTail("") == "" },
+        check("Error text: workflow permission", "workflow message") {
+            CoderActionsErrors.map(403, "4999", "Resource not accessible by personal access token").message == CoderActionsErrors.MSG_WORKFLOW_SCOPE &&
+                CoderActionsErrors.map(404, null, "Not Found").message == CoderActionsErrors.MSG_ACTIONS_OFF
+        },
+        check("Error text: no build minutes", "minutes message") {
+            CoderActionsErrors.map(403, "4999", "Billing: you have used all your minutes").message == CoderActionsErrors.MSG_NO_MINUTES
+        },
+        check("Error text: other answers use the existing messages", "same as before") {
+            CoderActionsErrors.map(401, null, null).message == CoderGitHubErrors.map(401, null, null).message
+        },
+        check("Error text: a push refused for the workflow permission", "workflow message") {
+            val err = CoderGitHubResult.Err(CoderGitHubErrorKind.Invalid, "refusing to allow an OAuth App to update workflow without workflow scope")
+            CoderActionsErrors.improvePushError(err).message == CoderActionsErrors.MSG_WORKFLOW_SCOPE &&
+                CoderActionsErrors.improvePushError(CoderGitHubResult.Err(CoderGitHubErrorKind.Other, "Something else")).message == "Something else"
+        },
+        check("Error text: no message holds a token or an address", "clean") {
+            listOf(CoderActionsErrors.MSG_WORKFLOW_SCOPE, CoderActionsErrors.MSG_NO_MINUTES, CoderActionsErrors.MSG_ACTIONS_OFF).none { it.contains("http") || it.contains("ghp_") }
+        },
+        check("Scopes: workflow ticked, missing, or no list", "rules") {
+            scopesAllowWorkflow("repo, workflow") && !scopesAllowWorkflow("repo") && !scopesAllowWorkflow("repo, workflow_x") && scopesAllowWorkflow(null)
+        },
+        check("Failure sentences: the common ones", "a sentence each") {
+            listOf(
+                "npm ERR! Missing script: \"build\"", "Error: Cannot find module 'x'", "Module not found: Error: Can't resolve './a'",
+                "npm ERR! code ERESOLVE", "src/a.ts(1,1): error TS2304", "SyntaxError: Unexpected token", "sh: 1: vite: not found",
+                "FATAL ERROR: JavaScript heap out of memory", "npm ERR! code EBADENGINE", "npm ERR! code ELIFECYCLE",
+                "ENOENT: no such file or directory, open '/home/runner/work/x/package.json'",
+            ).all { CoderBuildErrorExplainer.explain(it) != null }
+        },
+        check("Failure sentences: specific before general, and unknown is null", "rules") {
+            CoderBuildErrorExplainer.explain("Cannot find module 'x'\nnpm ERR! code ELIFECYCLE")!!.contains("can't be found") &&
+                CoderBuildErrorExplainer.explain("all fine here") == null
+        },
+        check("Ask AI handoff: kept once and then gone", "take empties it") {
+            val id = newId()
+            CoderBuildAiHandoff.put(id, "hello")
+            CoderBuildAiHandoff.take(id) == "hello" && CoderBuildAiHandoff.take(id) == null
+        },
+    )
+}
+
+private fun buildStateChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val id = newId()
+    return listOf(
+        check("Build meta: round trip", "same values") {
+            val meta = CoderBuildMeta(42, 1_700_000_000_000, "abc123", "dist")
+            CoderBuildFiles.parseMeta(CoderBuildFiles.metaJson(meta)) == meta && CoderBuildFiles.parseMeta("nope") == null
+        },
+        check("Build state: round trip", "same values") {
+            val state = CoderBuildStateFile(7, 99, "running", "me", "site", "main")
+            CoderBuildFiles.parseState(CoderBuildFiles.stateJson(state)) == state && CoderBuildFiles.parseState("{}") == null
+        },
+        check("Build files: written and read through the store, hidden from the tree", "found, not listed") {
+            val state = CoderBuildStateFile(7, 99, "running", "me", "site", "main")
+            store.write(id, "index.html", "<p>x</p>")
+            CoderBuildFiles.writeState(store, id, state) && CoderBuildFiles.readState(store, id) == state &&
+                CoderBuildFiles.writeMeta(store, id, CoderBuildMeta(1, 2, "s", "dist")) && CoderBuildFiles.readMeta(store, id)?.runId == 1L &&
+                store.listAll(id).map { it.path } == listOf("index.html") &&
+                store.listAll(id, includeHidden = true).any { it.path == ".coder" } && store.fileCount(id) == 1
+        },
+        check("Build files: paths are the planned ones", "fixed") {
+            CoderBuildFiles.STATE_PATH == ".coder/build-state.json" && CoderBuildFiles.META_PATH == ".coder-build/.meta" && CoderBuildFiles.BUILD_DIR == ".coder-build"
+        },
+    )
+}
+
+private fun zipBytes(entries: List<Pair<String, ByteArray>>): ByteArray {
+    val bytes = ByteArrayOutputStream()
+    ZipOutputStream(bytes).use { zip ->
+        for ((name, data) in entries) {
+            zip.putNextEntry(ZipEntry(name))
+            zip.write(data)
+            zip.closeEntry()
+        }
+    }
+    return bytes.toByteArray()
+}
+
+private fun extractChecks(store: CoderFileStore): List<CoderCheckResult> {
+    fun extract(id: String, entries: List<Pair<String, ByteArray>>, maxFiles: Int = CoderBuildRunner.MAX_FILES, maxBytes: Long = CoderBuildRunner.MAX_BYTES): ExtractResult =
+        runBlocking {
+            CoderBuildRunner.extractInto(ByteArrayInputStream(zipBytes(entries)), store, id, ".coder-build-tmp-test", maxFiles, maxBytes)
+        }
+    val good = listOf("index.html" to "<p>hi</p>".toByteArray(), "assets/app.js" to "1".toByteArray(), "assets/" to ByteArray(0))
+    return listOf(
+        check("Extract: a normal build is unpacked", "2 files") {
+            val id = newId()
+            val r = extract(id, good)
+            r is ExtractResult.Ok && r.files == 2 && File(store.projectDir(id), ".coder-build-tmp-test/assets/app.js").isFile
+        },
+        check("Extract: ../ names refuse the whole build and leave nothing", "refused, folder gone") {
+            val id = newId()
+            val r = extract(id, good + ("../x.txt" to "x".toByteArray()))
+            r is ExtractResult.Refused && !File(store.projectDir(id), ".coder-build-tmp-test").exists()
+        },
+        check("Extract: nested ../ and absolute names are refused", "both refused") {
+            extract(newId(), good + ("a/../../x" to "x".toByteArray())) is ExtractResult.Refused &&
+                extract(newId(), good + ("/etc/x" to "x".toByteArray())) is ExtractResult.Refused &&
+                extract(newId(), good + ("C:/x" to "x".toByteArray())) is ExtractResult.Refused &&
+                extract(newId(), good + ("..\\x" to "x".toByteArray())) is ExtractResult.Refused
+        },
+        check("Extract: too many files is refused", "refused") {
+            val many = listOf("index.html" to "x".toByteArray()) + (1..6).map { "f$it.txt" to "x".toByteArray() }
+            extract(newId(), many, maxFiles = 5) is ExtractResult.Refused
+        },
+        check("Extract: 5,001 files against the real limit is refused", "refused") {
+            val many = (1..5001).map { "f$it.txt" to ByteArray(1) } + ("index.html" to ByteArray(1))
+            extract(newId(), many) is ExtractResult.Refused
+        },
+        check("Extract: a huge entry is refused by the real byte count", "refused, nothing left") {
+            val id = newId()
+            val r = extract(id, listOf("index.html" to "x".toByteArray(), "big.bin" to ByteArray(2_000_000)), maxBytes = 1_000_000)
+            r is ExtractResult.Refused && !File(store.projectDir(id), ".coder-build-tmp-test").exists()
+        },
+        check("Extract: a build without index.html is refused", "refused") {
+            val r = extract(newId(), listOf("a.js" to "x".toByteArray()))
+            r is ExtractResult.Refused && r.message == CoderBuildRunner.MSG_NO_INDEX
+        },
+        check("Extract: something that is not a ZIP is refused", "refused") {
+            val r = runBlocking { CoderBuildRunner.extractInto(ByteArrayInputStream("not a zip".toByteArray()), store, newId(), ".coder-build-tmp-test") }
+            r is ExtractResult.Refused
+        },
+        check("Extract: duplicate names are kept once", "1 file") {
+            val r = extract(newId(), listOf("index.html" to "a".toByteArray(), "INDEX.html" to "b".toByteArray()))
+            r is ExtractResult.Ok && r.files == 1
+        },
+        check("Extract: unusable names are skipped, not fatal", "ok") {
+            extract(newId(), good + ("bad:name.txt" to "x".toByteArray())).let { it is ExtractResult.Ok && it.files == 2 }
+        },
+        check("Swap: the new build replaces the old and the old is removed", "new content only") {
+            val id = newId()
+            store.write(id, ".coder-build/index.html", "old")
+            extract(id, listOf("index.html" to "new".toByteArray()))
+            val swapped = CoderBuildRunner.swapIn(store, id, ".coder-build-tmp-test")
+            val dir = store.projectDir(id)
+            swapped && File(dir, ".coder-build/index.html").readText() == "new" && !File(dir, ".coder-build-tmp-test").exists() &&
+                dir.listFiles().orEmpty().none { it.name.startsWith(CoderBuildRunner.OLD_PREFIX) }
+        },
+        check("Swap: a refused build leaves the old one untouched", "old stays") {
+            val id = newId()
+            store.write(id, ".coder-build/index.html", "old")
+            extract(id, listOf("a.js" to "x".toByteArray()))
+            File(store.projectDir(id), ".coder-build/index.html").readText() == "old"
+        },
+        check("Swap: with no old build the new one is simply moved in", "moved") {
+            val id = newId()
+            extract(id, listOf("index.html" to "n".toByteArray()))
+            CoderBuildRunner.swapIn(store, id, ".coder-build-tmp-test") && File(store.projectDir(id), ".coder-build/index.html").isFile
+        },
+        check("Traversal test: the helper", "names") {
+            CoderBuildRunner.isTraversal("../a") && CoderBuildRunner.isTraversal("a/../b") && CoderBuildRunner.isTraversal("/a") &&
+                CoderBuildRunner.isTraversal("c:/a") && !CoderBuildRunner.isTraversal("a/b.js") && !CoderBuildRunner.isTraversal("a..b/c")
+        },
+    )
+}
+
+private fun c14SeamChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    // Hidden folders
+    val hid = newId()
+    store.write(hid, "index.html", "<p>x</p>")
+    store.write(hid, ".coder/build-state.json", "{}")
+    store.write(hid, ".coder-build/index.html", "<p>built</p>")
+    store.write(hid, ".github/workflows/coder-build.yml", "x")
+    out.add(check("Hidden: the file tree leaves out .coder folders", "no .coder entries") {
+        store.listAll(hid).none { it.path.startsWith(".coder") } && store.listAll(hid).any { it.path == ".github" }
+    })
+    out.add(check("Hidden: includeHidden shows them", "present") { store.listAll(hid, includeHidden = true).any { it.path == ".coder-build" } })
+    out.add(check("Hidden: they do not count toward file count or size", "2 files") {
+        store.fileCount(hid) == 2 && store.projectSizeBytes(hid) == "<p>x</p>".length.toLong() + 1
+    })
+    out.add(check("Hidden: a user cannot create or rename into a .coder name", "refused") {
+        store.createFile(hid, ".coder-x.txt", "") == CoderWriteResult.InvalidPath && store.createFolder(hid, ".coder-y") == CoderWriteResult.InvalidPath &&
+            store.rename(hid, "index.html", ".coder-z") == CoderWriteResult.InvalidPath && isCoderHiddenPath(".coder-build/a") && !isCoderHiddenPath("src/.coder-x") && !isCoderHiddenPath("a.coder")
+    })
+    out.add(check("Hidden: the ZIP export leaves them out", "no .coder") {
+        store.listAll(hid).none { it.path.startsWith(".coder") }
+    })
+    // ZIP rules and push ignores
+    out.add(check("Zip rules: .coder names are skipped at any depth", "system file") {
+        CoderZipRules.shouldSkip(".coder-build/index.html") == SkipReason.SYSTEM_FILE &&
+            CoderZipRules.shouldSkip("repo-main/.coder/x.json") == SkipReason.SYSTEM_FILE && CoderZipRules.shouldSkip("src/app.js") == null
+    })
+    out.add(check("Push: .coder folders and .env files are never uploaded", "ignored") {
+        CoderPushPlanner.isIgnored(".coder-build/index.html") && CoderPushPlanner.isIgnored(".coder/build-state.json") &&
+            CoderPushPlanner.isIgnored(".env") && CoderPushPlanner.isIgnored("a/.env.production") && CoderPushPlanner.isIgnored(".env.local")
+    })
+    out.add(check("Push: the workflow file and similar names are uploaded", "not ignored") {
+        !CoderPushPlanner.isIgnored(".github/workflows/coder-build.yml") && !CoderPushPlanner.isIgnored("a/.envrc") &&
+            !CoderPushPlanner.isIgnored("environment.txt") && !CoderPushPlanner.isIgnored("src/env.js")
+    })
+    // Preview root and detector
+    val own = newId()
+    store.write(own, "index.html", "<p>own</p>")
+    store.write(own, ".coder-build/index.html", "<p>built</p>")
+    out.add(check("Preview root: a usable own index.html wins over a build", "empty root") { CoderPreviewRoot.find(store, own) == "" })
+    val src = newId()
+    store.write(src, "index.html", "<script type=\"module\" src=\"/src/main.jsx\"></script>")
+    out.add(check("Preview root: a source index.html without a build still needs one", "NeedsBuild") {
+        CoderBuildDetector.check(store, src) is CoderBuildCheck.NeedsBuild
+    })
+    store.write(src, ".coder-build/index.html", "<p>built</p>")
+    out.add(check("Preview root: a source index.html gives way to the build", ".coder-build") { CoderPreviewRoot.find(store, src) == ".coder-build" })
+    out.add(check("Detector: a GitHub build is ready", "Ready") { CoderBuildDetector.check(store, src) == CoderBuildCheck.Ready })
+    val none = newId()
+    store.write(none, "readme.txt", "hi")
+    store.write(none, ".coder-build/index.html", "<p>built</p>")
+    out.add(check("Preview root: no index.html at all gives the build", ".coder-build") { CoderPreviewRoot.find(store, none) == ".coder-build" })
+    val plain = newId()
+    store.write(plain, "index.html", "<p>plain</p>")
+    out.add(check("Preview root: without a build nothing changes", "empty root") { CoderPreviewRoot.find(store, plain) == "" })
+    // Responder
+    val host = CoderPreviewHost.hostFor(src)
+    val builtResponder = CoderPreviewResponder(context, store, src, ".coder-build")
+    fun get(r: CoderPreviewResponder, path: String): WebResourceResponse? = r.respondTo(Uri.parse("https://$host$path"), "GET")
+    fun text(r: WebResourceResponse?): String = r?.data?.readBytes()?.toString(Charsets.UTF_8) ?: ""
+    out.add(check("Responder: the .coder-build folder can be the preview root", "served") {
+        val r = get(builtResponder, "/")
+        r?.statusCode == 200 && text(r).contains("built")
+    })
+    out.add(check("Responder: /.coder-build/ below a normal root stays blocked", "404") {
+        val normal = CoderPreviewResponder(context, store, own, "")
+        get(normal, "/.coder-build/index.html")?.statusCode == 404
+    })
+    out.add(check("Responder: /.coder-build/ below the built root is blocked too", "404") {
+        get(builtResponder, "/.coder-build/index.html")?.statusCode == 404
+    })
+    CoderEnvCache.put(src, listOf(EnvVar("API_URL", "https://x.y/</script>")))
+    out.add(check("Responder: env.js comes from the cache with no-store", "javascript") {
+        val r = get(CoderPreviewResponder(context, store, src, ""), "/__coder/env.js")
+        r?.statusCode == 200 && r.mimeType == "text/javascript" && text(r).startsWith("window.__ENV__ = Object.freeze(") &&
+            text(r).contains("API_URL") && !text(r).contains("</script") && r.responseHeaders["Cache-Control"] == "no-store" &&
+            !r.responseHeaders.containsKey("Access-Control-Allow-Origin")
+    })
+    out.add(check("Responder: env.json is JSON", "json") {
+        val r = get(CoderPreviewResponder(context, store, src, ""), "/__coder/env.json")
+        r?.statusCode == 200 && r.mimeType == "application/json" && org.json.JSONObject(text(r)).getString("API_URL").startsWith("https://x.y/")
+    })
+    out.add(check("Responder: a project with no variables gets an empty env.js", "empty object") {
+        text(get(CoderPreviewResponder(context, store, plain, ""), "/__coder/env.js")) == "window.__ENV__ = Object.freeze({});"
+    })
+    out.add(check("Responder: HEAD of env.js has no body", "empty") {
+        val r = CoderPreviewResponder(context, store, src, "").respondTo(Uri.parse("https://$host/__coder/env.js"), "HEAD")
+        r?.statusCode == 200 && text(r).isEmpty()
+    })
     return out
 }
