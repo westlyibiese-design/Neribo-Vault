@@ -74,7 +74,16 @@ import com.westly.neribovault.feature.coder.env.CoderEnvStore
 import com.westly.neribovault.feature.coder.env.EnvVar
 import com.westly.neribovault.feature.coder.files.isCoderHiddenPath
 import com.westly.neribovault.feature.coder.github.CoderGitHubResult
+import com.westly.neribovault.feature.coder.files.CoderConflictChoice
+import com.westly.neribovault.feature.coder.files.CoderCopyResult
+import com.westly.neribovault.feature.coder.files.CoderFileCopy
 import com.westly.neribovault.feature.coder.files.CoderFileStore
+import com.westly.neribovault.feature.coder.files.CoderLimits
+import com.westly.neribovault.feature.coder.files.CoderRecentFiles
+import com.westly.neribovault.feature.coder.workspace.CoderFileKind
+import com.westly.neribovault.feature.coder.workspace.coderFileKindOf
+import com.westly.neribovault.feature.coder.workspace.coderProjectStats
+import com.westly.neribovault.feature.coder.workspace.coderTemplateLabel
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
@@ -243,6 +252,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(guidanceDataChecks())
         results.addAll(previewUpgradeChecks(context, store))
         results.addAll(buildAndEnvChecks(context, store))
+        results.addAll(c15aChecks(store))
     } finally {
         root.deleteRecursively()
     }
@@ -4017,4 +4027,392 @@ private fun c14SeamChecks(context: Context, store: CoderFileStore): List<CoderCh
         r?.statusCode == 200 && text(r).isEmpty()
     })
     return out
+}
+
+// ---- Phase C15, part A: adding files, moving, recent files, project info ----------------------
+
+private fun c15Check(name: String, expected: String, actual: () -> String): CoderCheckResult =
+    check(name, expected, actual) { actual() == expected }
+
+/** Runs [body] on a fresh temporary project and removes the project afterwards, whatever happens. */
+private fun <T> withTempProject(store: CoderFileStore, body: (String) -> T): T {
+    val id = newId()
+    try {
+        return body(id)
+    } finally {
+        store.deleteProject(id)
+    }
+}
+
+/** A stream of [length] bytes (value 7) that counts what was read from it, so a limit can be checked without a huge file. */
+private class CountingStream(private val length: Long) : java.io.InputStream() {
+    var readTotal = 0L
+        private set
+
+    override fun read(): Int {
+        if (readTotal >= length) return -1
+        readTotal++
+        return 7
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (readTotal >= length) return -1
+        val n = minOf(len.toLong(), length - readTotal).toInt()
+        java.util.Arrays.fill(b, off, off + n, 7.toByte())
+        readTotal += n
+        return n
+    }
+}
+
+private fun tempLeftovers(store: CoderFileStore, id: String): List<String> =
+    store.projectDir(id).walkTopDown().filter { it.name.contains(".tmp-") }.map { it.name }.toList()
+
+private fun c15aChecks(store: CoderFileStore): List<CoderCheckResult> =
+    c15SanitizeChecks() + c15UniqueChecks() + c15PlanChecks() + c15CopyChecks(store) + c15MoveChecks(store) +
+        c15RecentChecks(store) + c15InfoChecks()
+
+private fun c15SanitizeChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Add files: forbidden characters become underscores", "a_b_c_d_e_f_g_h_i_j.txt") {
+        CoderFileCopy.sanitizeName("a\\b/c:d*e?f\"g<h>i|j.txt")
+    })
+    out.add(c15Check("Add files: control characters become underscores", "a_b_c.txt") {
+        CoderFileCopy.sanitizeName("a\u0001b\nc.txt")
+    })
+    out.add(c15Check("Add files: spaces at the ends and dots at the end are removed", "report.txt") {
+        CoderFileCopy.sanitizeName("  report.txt . .  ")
+    })
+    out.add(c15Check("Add files: a name of only dots becomes a fallback", "file") { CoderFileCopy.sanitizeName("...") })
+    out.add(c15Check("Add files: an empty or blank name becomes a fallback", "file|file") {
+        CoderFileCopy.sanitizeName("") + "|" + CoderFileCopy.sanitizeName("   ")
+    })
+    out.add(c15Check("Add files: Unicode letters are kept", "caf\u00E9 \u65E5\u672C.png") {
+        CoderFileCopy.sanitizeName("caf\u00E9 \u65E5\u672C.png")
+    })
+    out.add(c15Check("Add files: a dot-file keeps its name", ".gitignore") { CoderFileCopy.sanitizeName(".gitignore") })
+    val long = "a".repeat(150) + ".png"
+    out.add(c15Check("Add files: a long name is cut to 100 characters and keeps its extension", "100|true") {
+        val clean = CoderFileCopy.sanitizeName(long)
+        clean.length.toString() + "|" + clean.endsWith(".png")
+    })
+    out.add(c15Check("Add files: a long name without extension is cut to 100", "100") {
+        CoderFileCopy.sanitizeName("b".repeat(300)).length.toString()
+    })
+    out.add(c15Check("Add files: every cleaned name is a valid file name", "all valid") {
+        val awkward = listOf("..", " ", "a.", " a", "CON:", "x\\y", "\u0000", "\"\"", "a".repeat(101), "\uD83D\uDE00".repeat(60) + ".jpg")
+        val bad = awkward.filter { !CoderPaths.isValidSegment(CoderFileCopy.sanitizeName(it)) }
+        if (bad.isEmpty()) "all valid" else "invalid for " + bad.size
+    })
+    return out
+}
+
+private fun c15UniqueChecks(): List<CoderCheckResult> = listOf(
+    c15Check("Add files: a free name stays as it is", "logo.png") { CoderFileCopy.uniqueName(setOf("a.png"), "logo.png") },
+    c15Check("Add files: one conflict gives (2) before the extension", "logo (2).png") {
+        CoderFileCopy.uniqueName(setOf("logo.png"), "logo.png")
+    },
+    c15Check("Add files: many conflicts count up", "logo (4).png") {
+        CoderFileCopy.uniqueName(setOf("logo.png", "logo (2).png", "logo (3).png"), "logo.png")
+    },
+    c15Check("Add files: a name without extension gets the number at the end", "README (2)") {
+        CoderFileCopy.uniqueName(setOf("README"), "README")
+    },
+    c15Check("Add files: a dot-file gets the number at the end", ".env (2)") { CoderFileCopy.uniqueName(setOf(".env"), ".env") },
+    c15Check("Add files: only the last extension is kept apart", "site.tar (2).gz") {
+        CoderFileCopy.uniqueName(setOf("site.tar.gz"), "site.tar.gz")
+    },
+    c15Check("Add files: a unique name stays within 100 characters", "true") {
+        val name = "c".repeat(96) + ".png"
+        val unique = CoderFileCopy.uniqueName(setOf(name), name)
+        (unique.length <= 100 && unique != name && unique.endsWith(" (2).png") && CoderPaths.isValidSegment(unique)).toString()
+    },
+)
+
+private fun c15PlanChecks(): List<CoderCheckResult> {
+    val disk = setOf("a.txt")
+    return listOf(
+        c15Check("Add files: Replace keeps the name and replaces", "a.txt|true") {
+            CoderFileCopy.planName(disk, emptySet(), "a.txt", CoderConflictChoice.Replace).let { it.name + "|" + it.replaces }
+        },
+        c15Check("Add files: Keep both gives a new name", "a (2).txt|false") {
+            CoderFileCopy.planName(disk, emptySet(), "a.txt", CoderConflictChoice.KeepBoth).let { it.name + "|" + it.replaces }
+        },
+        c15Check("Add files: Skip leaves the file out", "null|false") {
+            CoderFileCopy.planName(disk, emptySet(), "a.txt", CoderConflictChoice.Skip).let { it.name + "|" + it.replaces }
+        },
+        c15Check("Add files: a free name is added as it is whatever the choice", "b.txt|false") {
+            CoderFileCopy.planName(disk, emptySet(), "b.txt", CoderConflictChoice.Skip).let { it.name + "|" + it.replaces }
+        },
+        c15Check("Add files: two files with one name in a batch are never mixed up", "b (2).txt|false") {
+            CoderFileCopy.planName(disk, setOf("b.txt"), "b.txt", CoderConflictChoice.Replace).let { it.name + "|" + it.replaces }
+        },
+        c15Check("Add files: conflicting names are listed once", "a.txt") {
+            CoderFileCopy.conflictingNames(disk, listOf("a.txt", "b.txt", "a.txt")).joinToString(",")
+        },
+        c15Check("Add files: the report heading says what happened", "Added 4 files, 1 skipped|Added 1 file|Nothing was added") {
+            listOf(CoderFileCopy.reportTitle(4, 1), CoderFileCopy.reportTitle(1, 0), CoderFileCopy.reportTitle(0, 0)).joinToString("|")
+        },
+        c15Check("Add files: picture names are recognised in any letter case", "true|true|false|false") {
+            listOf("a.PNG", "b.jpeg", "c.svg", "d").map { CoderFileCopy.isImageName(it) }.joinToString("|")
+        },
+        c15Check("Add files: the per-file limit is 20 MB", "20971520") { CoderFileCopy.MAX_FILE_BYTES.toString() },
+    )
+}
+
+private fun c15CopyChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Copy in: a text file arrives and can be read as text", "text") {
+        withTempProject(store) { id ->
+            val result = store.copyIn(id, "notes.txt", "hello \u2713".byteInputStream(Charsets.UTF_8), overwrite = false)
+            val read = store.read(id, "notes.txt")
+            if (result is CoderCopyResult.Copied && read is CoderReadResult.Text && read.text == "hello \u2713") "text" else "$result / $read"
+        }
+    })
+    out.add(c15Check("Copy in: binary bytes arrive identical", "identical") {
+        withTempProject(store) { id ->
+            val bytes = ByteArray(200_000) { (it * 31 % 256).toByte() }
+            val result = store.copyIn(id, "images/p.png", ByteArrayInputStream(bytes), overwrite = false)
+            val same = fileBytes(store, id, "images/p.png")?.contentEquals(bytes) == true
+            if (result == CoderCopyResult.Copied(200_000L) && same) "identical" else "$result same=$same"
+        }
+    })
+    out.add(c15Check("Copy in: a file over the limit is refused and leaves nothing", "TooLarge|stopped early|no file") {
+        withTempProject(store) { id ->
+            val stream = CountingStream(10L * 1024 * 1024)
+            val limit = 3L * CoderFileCopy.COPY_BUFFER_BYTES + 5
+            val result = store.copyIn(id, "big.bin", stream, overwrite = false, maxFileBytes = limit)
+            val early = stream.readTotal <= limit + CoderFileCopy.COPY_BUFFER_BYTES
+            val none = store.resolve(id, "big.bin")?.exists() == false && tempLeftovers(store, id).isEmpty()
+            (if (result == CoderCopyResult.TooLarge) "TooLarge" else "$result") + "|" + (if (early) "stopped early" else "read ${stream.readTotal}") + "|" +
+                (if (none) "no file" else "left a file")
+        }
+    })
+    out.add(c15Check("Copy in: a file exactly at the limit is accepted", "Copied(655360)") {
+        withTempProject(store) { id ->
+            store.copyIn(id, "edge.bin", CountingStream(655_360L), overwrite = false, maxFileBytes = 655_360L).toString().replace("Copied(bytes=", "Copied(")
+        }
+    })
+    out.add(c15Check("Copy in: cancelling removes the partial file", "Cancelled|clean") {
+        withTempProject(store) { id ->
+            var calls = 0
+            val result = store.copyIn(id, "c.bin", CountingStream(5_000_000L), overwrite = false, shouldContinue = { calls++ < 2 })
+            val clean = store.resolve(id, "c.bin")?.exists() == false && tempLeftovers(store, id).isEmpty()
+            (if (result == CoderCopyResult.Cancelled) "Cancelled" else "$result") + "|" + (if (clean) "clean" else "left a file")
+        }
+    })
+    out.add(c15Check("Copy in: an existing file is not overwritten without permission", "AlreadyExists|old") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "old")
+            val result = store.copyIn(id, "a.txt", "new".byteInputStream(), overwrite = false)
+            (if (result == CoderCopyResult.AlreadyExists) "AlreadyExists" else "$result") + "|" +
+                (fileBytes(store, id, "a.txt")?.toString(Charsets.UTF_8) ?: "missing")
+        }
+    })
+    out.add(c15Check("Copy in: with permission the file is replaced", "new") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "old")
+            store.copyIn(id, "a.txt", "new".byteInputStream(), overwrite = true)
+            fileBytes(store, id, "a.txt")?.toString(Charsets.UTF_8) ?: "missing"
+        }
+    })
+    out.add(c15Check("Copy in: a failed replace keeps the old file", "TooLarge|old") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "old")
+            val result = store.copyIn(id, "a.txt", CountingStream(5_000L), overwrite = true, maxFileBytes = 1_000L)
+            (if (result == CoderCopyResult.TooLarge) "TooLarge" else "$result") + "|" + (fileBytes(store, id, "a.txt")?.toString(Charsets.UTF_8) ?: "missing")
+        }
+    })
+    out.add(c15Check("Copy in: a folder with that name is never replaced", "AlreadyExists") {
+        withTempProject(store) { id ->
+            store.createFolder(id, "docs")
+            store.copyIn(id, "docs", "x".byteInputStream(), overwrite = true).let { if (it == CoderCopyResult.AlreadyExists) "AlreadyExists" else "$it" }
+        }
+    })
+    out.add(c15Check("Copy in: hidden and unsafe paths are refused", "InvalidPath x3") {
+        withTempProject(store) { id ->
+            val results = listOf(".coder/x.txt", "../x.txt", "a//b.txt").map { store.copyIn(id, it, "x".byteInputStream(), overwrite = true) }
+            if (results.all { it == CoderCopyResult.InvalidPath }) "InvalidPath x3" else results.joinToString()
+        }
+    })
+    out.add(c15Check("Copy in: a stream that fails gives Failed and no partial file", "Failed|clean") {
+        withTempProject(store) { id ->
+            val broken = object : java.io.InputStream() {
+                override fun read(): Int = throw IOException("boom")
+            }
+            val result = store.copyIn(id, "f.bin", broken, overwrite = false)
+            (if (result == CoderCopyResult.Failed) "Failed" else "$result") + "|" + (if (tempLeftovers(store, id).isEmpty() && store.resolve(id, "f.bin")?.exists() == false) "clean" else "left a file")
+        }
+    })
+    out.add(c15Check("Copy in: a full phone gives NoSpace and no partial file", "NoSpace|clean") {
+        withTempProject(store) { id ->
+            val full = object : java.io.InputStream() {
+                override fun read(): Int = throw IOException("write failed: ENOSPC (No space left on device)")
+            }
+            val result = store.copyIn(id, "f.bin", full, overwrite = false)
+            (if (result == CoderCopyResult.NoSpace) "NoSpace" else "$result") + "|" + (if (tempLeftovers(store, id).isEmpty()) "clean" else "left a file")
+        }
+    })
+    out.add(c15Check("Copy in: added files do not show temp names in the listing", "true") {
+        withTempProject(store) { id ->
+            store.copyIn(id, "a/b.bin", CountingStream(70_000L), overwrite = false)
+            store.listAll(id).none { it.path.contains(".tmp-") }.toString()
+        }
+    })
+    return out
+}
+
+private fun c15MoveChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Move: a folder cannot go into itself", "false") { CoderFileCopy.canMoveInto("src", "src").toString() })
+    out.add(c15Check("Move: a folder cannot go into one of its own folders", "false") { CoderFileCopy.canMoveInto("src", "src/lib").toString() })
+    out.add(c15Check("Move: a folder whose name only starts the same can be a target", "true") { CoderFileCopy.canMoveInto("src", "src2").toString() })
+    out.add(c15Check("Move: the top of the project is always a target", "true") { CoderFileCopy.canMoveInto("src/a.js", "").toString() })
+    out.add(c15Check("Move: the target list starts at the top and leaves out the folder and its folders", ",img,lib,src2") {
+        CoderFileCopy.moveTargets(listOf("img", "lib", "src", "src/deep", "src2"), "src").joinToString(",")
+    })
+    out.add(c15Check("Move: a file moves into a folder and keeps its name", "moved|true|false") {
+        withTempProject(store) { id ->
+            store.createFolder(id, "js")
+            store.write(id, "app.js", "x")
+            val result = store.moveEntry(id, "app.js", "js")
+            (if (result == CoderWriteResult.Saved) "moved" else "$result") + "|" +
+                (store.resolve(id, "js/app.js")?.exists() == true) + "|" + (store.resolve(id, "app.js")?.exists() == true)
+        }
+    })
+    out.add(c15Check("Move: a folder moves with everything inside it", "Saved|inner") {
+        withTempProject(store) { id ->
+            store.write(id, "a/b/c.txt", "inner")
+            store.createFolder(id, "z")
+            val result = store.moveEntry(id, "a", "z")
+            (if (result == CoderWriteResult.Saved) "Saved" else "$result") + "|" + (fileBytes(store, id, "z/a/b/c.txt")?.toString(Charsets.UTF_8) ?: "missing")
+        }
+    })
+    out.add(c15Check("Move: a file moves back to the top of the project", "Saved|true") {
+        withTempProject(store) { id ->
+            store.write(id, "js/app.js", "x")
+            val result = store.moveEntry(id, "js/app.js", "")
+            (if (result == CoderWriteResult.Saved) "Saved" else "$result") + "|" + (store.resolve(id, "app.js")?.exists() == true)
+        }
+    })
+    out.add(c15Check("Move: a name that is already there is refused and nothing changes", "AlreadyExists|one|two") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "one")
+            store.write(id, "d/a.txt", "two")
+            val result = store.moveEntry(id, "a.txt", "d")
+            (if (result == CoderWriteResult.AlreadyExists) "AlreadyExists" else "$result") + "|" +
+                (fileBytes(store, id, "a.txt")?.toString(Charsets.UTF_8) ?: "missing") + "|" + (fileBytes(store, id, "d/a.txt")?.toString(Charsets.UTF_8) ?: "missing")
+        }
+    })
+    out.add(c15Check("Move: a folder into itself or its child is refused", "Failed|Failed|true") {
+        withTempProject(store) { id ->
+            store.write(id, "a/b/f.txt", "x")
+            val self = store.moveEntry(id, "a", "a")
+            val child = store.moveEntry(id, "a", "a/b")
+            (if (self == CoderWriteResult.Failed) "Failed" else "$self") + "|" + (if (child == CoderWriteResult.Failed) "Failed" else "$child") + "|" +
+                (store.resolve(id, "a/b/f.txt")?.exists() == true)
+        }
+    })
+    out.add(c15Check("Move: a target folder that is not there is refused", "Failed") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "x")
+            store.moveEntry(id, "a.txt", "nope").let { if (it == CoderWriteResult.Failed) "Failed" else "$it" }
+        }
+    })
+    out.add(c15Check("Move: hidden paths cannot be moved or targeted", "InvalidPath|InvalidPath") {
+        withTempProject(store) { id ->
+            store.write(id, "a.txt", "x")
+            store.write(id, ".coder/recent.json", "[]")
+            val into = store.moveEntry(id, "a.txt", ".coder")
+            val from = store.moveEntry(id, ".coder/recent.json", "")
+            (if (into == CoderWriteResult.InvalidPath) "InvalidPath" else "$into") + "|" + (if (from == CoderWriteResult.InvalidPath) "InvalidPath" else "$from")
+        }
+    })
+    out.add(c15Check("Move: a move that makes the folders too deep is refused", "Failed|true") {
+        withTempProject(store) { id ->
+            val deep = (1..10).joinToString("/") { "d$it" }
+            store.write(id, "$deep/f.txt", "x")
+            store.write(id, "x/y/z/keep.txt", "k")
+            val result = store.moveEntry(id, "d1", "x/y/z")
+            (if (result == CoderWriteResult.Failed) "Failed" else "$result") + "|" + (store.resolve(id, "$deep/f.txt")?.exists() == true)
+        }
+    })
+    out.add(c15Check("Move: open tabs follow a moved file and a moved folder", "js/app.js,css/a.css|js/app/x.js,css/a.css:js/app/x.js") {
+        val file = CoderTabLogic.rename(CoderTabs(listOf("app.js", "css/a.css"), "app.js"), "app.js", CoderFileCopy.movedPath("app.js", "js"))
+        val folder = CoderTabLogic.rename(CoderTabs(listOf("app/x.js", "css/a.css"), "app/x.js"), "app", CoderFileCopy.movedPath("app", "js"))
+        file.paths.joinToString(",") + "|" + folder.paths.joinToString(",") + ":" + folder.active
+    })
+    return out
+}
+
+private fun c15RecentChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Recent: the newest file comes first", "c,b,a") {
+        CoderRecentFiles.record(CoderRecentFiles.record(CoderRecentFiles.record(emptyList(), "a"), "b"), "c").joinToString(",")
+    })
+    out.add(c15Check("Recent: opening a file again moves it to the front without a duplicate", "a,c,b") {
+        CoderRecentFiles.record(listOf("c", "b", "a"), "a").joinToString(",")
+    })
+    out.add(c15Check("Recent: the list keeps only the last 5", "g,f,e,d,c") {
+        listOf("a", "b", "c", "d", "e", "f", "g").fold(emptyList<String>()) { list, path -> CoderRecentFiles.record(list, path) }.joinToString(",")
+    })
+    out.add(c15Check("Recent: files that are gone are dropped", "c,a") {
+        CoderRecentFiles.dropMissing(listOf("c", "b", "a"), setOf("a", "c")).joinToString(",")
+    })
+    out.add(c15Check("Recent: a renamed folder carries its files along", "x/a.js,b.js") {
+        CoderRecentFiles.renamed(listOf("old/a.js", "b.js"), "old", "x").joinToString(",")
+    })
+    out.add(c15Check("Recent: merging keeps the newer entries first and the cap", "n,a,b,c,d") {
+        CoderRecentFiles.merge(listOf("n", "a"), listOf("a", "b", "c", "d", "e")).joinToString(",")
+    })
+    out.add(c15Check("Recent: a damaged file gives an empty list", "[]|[]|[]") {
+        listOf("not json", "{\"a\":1}", "[1,2").map { CoderRecentFiles.parse(it) }.joinToString("|")
+    })
+    out.add(c15Check("Recent: unsafe, hidden and non-text entries are ignored", "ok.js") {
+        CoderRecentFiles.parse("[\"../x\", \".coder/recent.json\", 5, \"ok.js\", \"ok.js\"]").joinToString(",")
+    })
+    out.add(c15Check("Recent: a missing file gives an empty list", "[]") {
+        withTempProject(store) { id -> CoderRecentFiles.load(store, id).toString() }
+    })
+    out.add(c15Check("Recent: a saved list is read back and stays hidden", "a.js,src/b.css|true|false") {
+        withTempProject(store) { id ->
+            store.write(id, "a.js", "x")
+            CoderRecentFiles.save(store, id, listOf("a.js", "src/b.css"))
+            CoderRecentFiles.load(store, id).joinToString(",") + "|" + (store.resolve(id, CoderRecentFiles.FILE_PATH)?.exists() == true) + "|" +
+                store.listAll(id).any { it.path.startsWith(".coder") }
+        }
+    })
+    return out
+}
+
+private fun c15InfoChecks(): List<CoderCheckResult> {
+    val entries = listOf(
+        CoderEntry("src", true, 0L, 0L),
+        CoderEntry("src/a.js", false, 500L, 0L),
+        CoderEntry("b.png", false, 9_000L, 0L),
+        CoderEntry("c.txt", false, 100L, 0L),
+        CoderEntry("d.txt", false, 100L, 0L),
+        CoderEntry("e.css", false, 700L, 0L),
+        CoderEntry("f.md", false, 50L, 0L),
+        CoderEntry(".coder/recent.json", false, 99_999L, 0L),
+    )
+    val stats = coderProjectStats(entries)
+    return listOf(
+        c15Check("Project info: files and size leave out folders and hidden files", "6|10450") { "${stats.fileCount}|${stats.totalBytes}" },
+        c15Check("Project info: the five biggest files, biggest first, ties by path", "b.png,e.css,src/a.js,c.txt,d.txt") {
+            stats.largest.joinToString(",") { it.path }
+        },
+        c15Check("Project info: an empty project has no files", "0|0|0") {
+            coderProjectStats(emptyList()).let { "${it.fileCount}|${it.totalBytes}|${it.largest.size}" }
+        },
+        c15Check("Project info: the template is named in words", "My first web page|Imported ZIP file|Not from a template") {
+            listOf("hello-web", "zip", "other").joinToString("|") { coderTemplateLabel(it) }
+        },
+        c15Check("File kinds: code, picture, other text and other files", "Code|Image|Text|Other|Other|Text") {
+            listOf(
+                coderFileKindOf("a.js", 10L), coderFileKindOf("p.PNG", 10L), coderFileKindOf("README.md", 10L),
+                coderFileKindOf("x.pdf", 10L), coderFileKindOf("big.json", CoderLimits.MAX_EDITABLE_BYTES + 1), coderFileKindOf(".gitignore", 10L),
+            ).joinToString("|") { it.name }
+        },
+        c15Check("File kinds: a big picture is still a picture", "Image") { coderFileKindOf("a.jpg", 15_000_000L).name },
+    )
 }

@@ -3,6 +3,7 @@ package com.westly.neribovault.feature.coder.files
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -40,6 +41,19 @@ sealed interface CoderWriteResult {
     object InvalidPath : CoderWriteResult
     object AlreadyExists : CoderWriteResult
     object Failed : CoderWriteResult
+}
+
+/** The outcome of copying one file into a project from a stream. */
+sealed interface CoderCopyResult {
+    /** The file is in the project; [bytes] is how many bytes were really copied. */
+    data class Copied(val bytes: Long) : CoderCopyResult
+    object TooLarge : CoderCopyResult
+    object LimitReached : CoderCopyResult
+    object NoSpace : CoderCopyResult
+    object AlreadyExists : CoderCopyResult
+    object InvalidPath : CoderCopyResult
+    object Cancelled : CoderCopyResult
+    object Failed : CoderCopyResult
 }
 
 /**
@@ -166,6 +180,117 @@ class CoderFileStore(private val rootDir: File) {
         } catch (e: Exception) {
             CoderWriteResult.Failed
         }
+    }
+
+    /**
+     * Copies [input] to [path] (missing parent folders are made). The bytes go to a temp file first, so a copy that is
+     * stopped, too big or failed never leaves half a file and never damages the file it would have replaced.
+     * More than [maxFileBytes] really read gives [CoderCopyResult.TooLarge]; a project that would pass its size limit
+     * gives [CoderCopyResult.LimitReached]. Something already at [path] is only replaced when [overwrite] is true.
+     * [shouldContinue] is asked before every chunk; when it says false the copy is undone and [CoderCopyResult.Cancelled]
+     * returned. The caller closes [input].
+     */
+    fun copyIn(
+        projectId: String,
+        path: String,
+        input: InputStream,
+        overwrite: Boolean,
+        maxFileBytes: Long = CoderFileCopy.MAX_FILE_BYTES,
+        shouldContinue: () -> Boolean = { true },
+    ): CoderCopyResult {
+        if (path.isEmpty() || isCoderHiddenPath(path)) return CoderCopyResult.InvalidPath
+        val target = resolve(projectId, path) ?: return CoderCopyResult.InvalidPath
+        if (target.isDirectory) return CoderCopyResult.AlreadyExists
+        val existed = target.isFile
+        if (existed && !overwrite) return CoderCopyResult.AlreadyExists
+        if (!existed && fileCount(projectId) >= CoderLimits.MAX_FILES_PER_PROJECT) return CoderCopyResult.LimitReached
+        val replacedBytes = if (existed) target.length() else 0L
+        val budget = CoderLimits.MAX_PROJECT_BYTES - projectSizeBytes(projectId) + replacedBytes
+        val parent = target.parentFile ?: return CoderCopyResult.Failed
+        if (!parent.isDirectory && !parent.mkdirs() && !parent.isDirectory) return CoderCopyResult.Failed
+        val temp = File(parent, "." + target.name + TEMP_MARKER + UUID.randomUUID().toString().substring(0, TEMP_TOKEN_LENGTH))
+        var total = 0L
+        var stopped: CoderCopyResult? = null
+        try {
+            FileOutputStream(temp).use { stream ->
+                val buffer = ByteArray(CoderFileCopy.COPY_BUFFER_BYTES)
+                while (true) {
+                    if (!shouldContinue()) {
+                        stopped = CoderCopyResult.Cancelled
+                        break
+                    }
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    if (total > maxFileBytes) {
+                        stopped = CoderCopyResult.TooLarge
+                        break
+                    }
+                    if (total > budget) {
+                        stopped = CoderCopyResult.LimitReached
+                        break
+                    }
+                    stream.write(buffer, 0, read)
+                }
+                if (stopped != null) return@use
+                stream.flush()
+                stream.fd.sync()
+            }
+        } catch (e: Exception) {
+            temp.delete()
+            return if (e is IOException && isNoSpace(e)) CoderCopyResult.NoSpace else CoderCopyResult.Failed
+        }
+        val verdict = stopped
+        if (verdict != null) {
+            temp.delete()
+            return verdict
+        }
+        var moved = temp.renameTo(target)
+        if (!moved) {
+            target.delete()
+            moved = temp.renameTo(target)
+        }
+        if (!moved) {
+            temp.delete()
+            return CoderCopyResult.Failed
+        }
+        return CoderCopyResult.Copied(total)
+    }
+
+    /**
+     * Moves the file or folder [fromPath] into the existing folder [newParent] ("" is the project root), keeping its
+     * name. It uses [rename], so nothing is ever overwritten: a name that is already taken gives
+     * [CoderWriteResult.AlreadyExists]. A folder cannot go into itself or into one of its own folders, and a move that
+     * would make the content too deep or too long for the project gives [CoderWriteResult.Failed].
+     */
+    fun moveEntry(projectId: String, fromPath: String, newParent: String): CoderWriteResult {
+        if (fromPath.isEmpty() || isCoderHiddenPath(fromPath)) return CoderWriteResult.InvalidPath
+        if (newParent.isNotEmpty() && (!CoderPaths.isValidPath(newParent) || isCoderHiddenPath(newParent))) {
+            return CoderWriteResult.InvalidPath
+        }
+        if (!CoderFileCopy.canMoveInto(fromPath, newParent)) return CoderWriteResult.Failed
+        val source = resolve(projectId, fromPath) ?: return CoderWriteResult.InvalidPath
+        if (newParent.isNotEmpty() && resolve(projectId, newParent)?.isDirectory != true) return CoderWriteResult.Failed
+        val toPath = CoderFileCopy.movedPath(fromPath, newParent)
+        if (toPath == fromPath) return CoderWriteResult.Saved
+        if (!fitsAfterMove(source, toPath)) return CoderWriteResult.Failed
+        return rename(projectId, fromPath, toPath)
+    }
+
+    /** True when every path inside [source] is still a valid project path once [source] lives at [toPath]. */
+    private fun fitsAfterMove(source: File, toPath: String): Boolean {
+        if (!source.isDirectory) return true
+        val base = source.path
+        for (inside in source.walkTopDown()) {
+            val relative = inside.path.removePrefix(base).replace(File.separatorChar, '/')
+            if (!CoderPaths.isValidPath(toPath + relative)) return false
+        }
+        return true
+    }
+
+    private fun isNoSpace(e: IOException): Boolean {
+        val text = e.message ?: return false
+        return text.contains("ENOSPC") || text.contains("No space left", ignoreCase = true)
     }
 
     /** Deletes a file or a folder with everything inside it. The project folder itself is refused. */

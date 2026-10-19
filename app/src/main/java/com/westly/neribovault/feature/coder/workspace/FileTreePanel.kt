@@ -16,12 +16,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FileCopy
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -41,20 +43,15 @@ import com.westly.neribovault.core.ui.components.MenuAction
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.feature.backup.formatBytes
 import com.westly.neribovault.feature.coder.files.CoderEntry
-import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
 
 private val INDENT_PER_LEVEL = 16.dp
 
-private val NON_TEXT_EXTENSIONS = setOf(
-    "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "pdf", "zip", "gz", "tar", "7z", "rar", "mp3",
-    "wav", "ogg", "mp4", "mov", "webm", "ttf", "otf", "woff", "woff2", "apk", "jar", "class", "so",
-)
-
 /**
  * The project's files as a tree. Folders open and close when tapped; [expandedFolders] is kept by
  * the caller so it survives rotation. Tapping a file calls [onOpenFile]. The file at [activePath], when given,
- * is highlighted (the side drawer passes the active tab; the Files screen passes nothing).
+ * is highlighted (the side drawer passes the active tab; the Files screen passes nothing). Each file shows an icon for its
+ * kind (code, picture, other text, other file), and every row's menu offers "Move to\u2026" through [onMove].
  */
 @Composable
 fun FileTreePanel(
@@ -64,6 +61,7 @@ fun FileTreePanel(
     onOpenFile: (String) -> Unit,
     onRename: (CoderEntry) -> Unit,
     onDelete: (CoderEntry) -> Unit,
+    onMove: (CoderEntry) -> Unit,
     onNewFileIn: (String) -> Unit,
     onNewFolderIn: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -96,6 +94,7 @@ fun FileTreePanel(
                 onClick = { if (entry.isDirectory) onToggleFolder(entry.path) else onOpenFile(entry.path) },
                 onRename = { onRename(entry) },
                 onDelete = { onDelete(entry) },
+                onMove = { onMove(entry) },
                 onNewFileIn = { onNewFileIn(entry.path) },
                 onNewFolderIn = { onNewFolderIn(entry.path) },
             )
@@ -112,13 +111,6 @@ private fun ancestorsOpen(path: String, open: Set<String>): Boolean {
     return true
 }
 
-private fun looksNonEditable(entry: CoderEntry): Boolean {
-    if (entry.sizeBytes > CoderLimits.MAX_EDITABLE_BYTES) return true
-    val name = CoderPaths.nameOf(entry.path)
-    val dot = name.lastIndexOf('.')
-    return dot >= 0 && name.substring(dot + 1).lowercase() in NON_TEXT_EXTENSIONS
-}
-
 @Composable
 private fun TreeRow(
     entry: CoderEntry,
@@ -127,6 +119,7 @@ private fun TreeRow(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onMove: () -> Unit,
     onNewFileIn: () -> Unit,
     onNewFolderIn: () -> Unit,
 ) {
@@ -137,8 +130,12 @@ private fun TreeRow(
     val icon = when {
         entry.isDirectory && expanded -> Icons.Outlined.FolderOpen
         entry.isDirectory -> Icons.Outlined.Folder
-        looksNonEditable(entry) -> Icons.Outlined.AttachFile
-        else -> Icons.Outlined.Description
+        else -> when (coderFileKindOf(entry.path, entry.sizeBytes)) {
+            CoderFileKind.Code -> Icons.Outlined.Code
+            CoderFileKind.Image -> Icons.Outlined.Image
+            CoderFileKind.Text -> Icons.Outlined.Description
+            CoderFileKind.Other -> Icons.Outlined.AttachFile
+        }
     }
     val actions = buildList {
         add(MenuAction(label = "Rename", onClick = onRename, icon = Icons.Outlined.Edit))
@@ -146,6 +143,7 @@ private fun TreeRow(
             add(MenuAction(label = "New file here", onClick = onNewFileIn, icon = Icons.Outlined.FileCopy))
             add(MenuAction(label = "New folder here", onClick = onNewFolderIn, icon = Icons.Outlined.Folder))
         }
+        add(MenuAction(label = "Move to\u2026", onClick = onMove, icon = Icons.Outlined.FolderOpen))
         add(MenuAction(label = "Delete", onClick = onDelete, icon = Icons.Outlined.Delete, destructive = true))
     }
     Row(

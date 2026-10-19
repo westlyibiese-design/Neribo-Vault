@@ -20,7 +20,9 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Redo
@@ -103,7 +105,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, Delete, RenameProject }
+private enum class WorkspaceDialog { None, Chooser, NewFile, NewFolder, Rename, Delete, RenameProject, Move }
 
 /** A tab close that waits for the person to confirm, because a file in it could not be saved. */
 private sealed class PendingClose {
@@ -150,8 +152,17 @@ fun CoderWorkspaceScreen(
     val suggestions by vm.suggestions.collectAsStateWithLifecycle()
     val issues by vm.issues.collectAsStateWithLifecycle()
     val find by vm.find.collectAsStateWithLifecycle()
+    val recentFiles by vm.recentFiles.collectAsStateWithLifecycle()
+    val binaryPath by vm.binaryFile.collectAsStateWithLifecycle()
+    val importProgress by vm.importProgress.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val showMessage: (String) -> Unit = { text ->
+        scope.launch {
+            snackbarHostState.currentSnackbarData?.dismiss()
+            snackbarHostState.showSnackbar(text)
+        }
+    }
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
 
@@ -177,6 +188,10 @@ fun CoderWorkspaceScreen(
     var showLinkSheet by rememberSaveable { mutableStateOf(false) }
     var showEditorSettings by rememberSaveable { mutableStateOf(false) }
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
+    var showProjectInfo by rememberSaveable { mutableStateOf(false) }
+    // The folder last tapped in the file tree: "Add files" puts the new files there ("" is the top of the project).
+    var addTarget by rememberSaveable { mutableStateOf("") }
+    val addFilesRequest = remember { AddFilesRequest() }
     var pendingClose by remember { mutableStateOf<PendingClose?>(null) }
     var findFieldFocused by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
@@ -344,11 +359,14 @@ fun CoderWorkspaceScreen(
     }
 
     val existingPaths = remember(state.entries) { state.entries.map { it.path }.toSet() }
+    val folderPaths = remember(state.entries) { state.entries.filter { it.isDirectory }.map { it.path } }
+    // A folder that was renamed or deleted since it was tapped no longer counts: the files go to the top then.
+    val addFolder = if (addTarget in folderPaths) addTarget else ""
     val project = state.project
     val canBrowse = !state.isLoading && project != null
     // A tip never appears while a dialog or sheet is open.
     val tipsBlocked = dialog != WorkspaceDialog.None || showEditorSettings || showLinkSheet || showTrustDialog ||
-        pendingClose != null || exporting
+        pendingClose != null || exporting || showProjectInfo || binaryPath != null || importProgress != null
     // On a narrow phone the top bar has no room for one more button, so Find moves into the menu.
     val findInTopBar = LocalConfiguration.current.screenWidthDp >= FIND_IN_TOP_BAR_MIN_WIDTH_DP
 
@@ -439,6 +457,8 @@ fun CoderWorkspaceScreen(
                                         icon = Icons.Outlined.Visibility,
                                     ),
                                     MenuAction("Editor settings", { showEditorSettings = true }),
+                                    MenuAction("Add files", { addFilesRequest.ask() }, icon = Icons.Outlined.AttachFile),
+                                    MenuAction("Project info", { showProjectInfo = true }, icon = Icons.Outlined.Info),
                                 ),
                         )
                     } else if (canBrowse) {
@@ -455,12 +475,14 @@ fun CoderWorkspaceScreen(
                                     dialogPath = ""
                                     dialog = WorkspaceDialog.NewFolder
                                 }),
+                                MenuAction("Add files", { addFilesRequest.ask() }, icon = Icons.Outlined.AttachFile),
                                 MenuAction("Export as ZIP", {
                                     exportLauncher.launch(exportFileName(project?.name.orEmpty()))
                                 }),
                                 MenuAction("GitHub", onOpenGitHub),
                                 MenuAction("Build with GitHub", onOpenBuild),
                                 MenuAction("Environment", onOpenEnvironment),
+                                MenuAction("Project info", { showProjectInfo = true }, icon = Icons.Outlined.Info),
                             ) + linkMenuActions(
                                 linkState = linkState,
                                 onChoose = { showLinkSheet = true },
@@ -623,11 +645,18 @@ fun CoderWorkspaceScreen(
                         expandedFolders = expandedFolders,
                         activePath = openPath,
                         onToggleFolder = { path ->
+                            addTarget = path
                             expandedFolders = if (path in expandedFolders) expandedFolders - path else expandedFolders + path
                         },
                         onOpenFile = {
                             vm.openFile(it)
                             drawerOpen = false
+                        },
+                        recentFiles = recentFiles,
+                        onAddFiles = { addFilesRequest.ask() },
+                        onMove = {
+                            dialogPath = it.path
+                            dialog = WorkspaceDialog.Move
                         },
                         onRename = {
                             dialogPath = it.path
@@ -674,9 +703,14 @@ fun CoderWorkspaceScreen(
                     entries = state.entries,
                     expandedFolders = expandedFolders,
                     onToggleFolder = { path ->
+                        addTarget = path
                         expandedFolders = if (path in expandedFolders) expandedFolders - path else expandedFolders + path
                     },
                     onOpenFile = { vm.openFile(it) },
+                    onMove = {
+                        dialogPath = it.path
+                        dialog = WorkspaceDialog.Move
+                    },
                     onRename = {
                         dialogPath = it.path
                         dialog = WorkspaceDialog.Rename
@@ -769,6 +803,23 @@ fun CoderWorkspaceScreen(
                 )
             }
         }
+        WorkspaceDialog.Move -> {
+            val entry = state.entries.firstOrNull { it.path == dialogPath }
+            if (entry == null) {
+                LaunchedEffect(Unit) { dialog = WorkspaceDialog.None }
+            } else {
+                MoveDialog(
+                    entry = entry,
+                    folders = folderPaths,
+                    onMove = { target ->
+                        vm.moveEntry(entry.path, target)
+                        dismissDialog()
+                        if (target.isNotEmpty() && target !in expandedFolders) expandedFolders = expandedFolders + target
+                    },
+                    onDismiss = dismissDialog,
+                )
+            }
+        }
         WorkspaceDialog.RenameProject -> NameEntryDialog(
             title = "Rename project",
             label = "Project name",
@@ -808,6 +859,47 @@ fun CoderWorkspaceScreen(
     if (showEditorSettings) {
         EditorSettingsSheet(onDismiss = { showEditorSettings = false })
     }
+    if (showProjectInfo && project != null) {
+        ProjectInfoSheet(
+            project = project,
+            entries = state.entries,
+            linkState = linkState,
+            onDismiss = { showProjectInfo = false },
+        )
+    }
+    binaryPath?.let { path ->
+        val entry = state.entries.firstOrNull { it.path == path }
+        if (entry == null) {
+            LaunchedEffect(path) { vm.closeBinarySheet() }
+        } else {
+            BinaryFileSheet(
+                entry = entry,
+                file = remember(projectId, path) {
+                    (context.applicationContext as NeriboApp).container.coderFileStore.resolve(projectId, path)
+                },
+                viewModel = vm,
+                onRename = {
+                    vm.closeBinarySheet()
+                    dialogPath = path
+                    dialog = WorkspaceDialog.Rename
+                },
+                onDelete = {
+                    vm.closeBinarySheet()
+                    dialogPath = path
+                    dialog = WorkspaceDialog.Delete
+                },
+                onMessage = showMessage,
+                onDismiss = { vm.closeBinarySheet() },
+            )
+        }
+    }
+    AddFilesFlow(
+        viewModel = vm,
+        request = addFilesRequest,
+        targetFolder = addFolder,
+        existingPaths = existingPaths,
+        onMessage = showMessage,
+    )
     if (showLinkSheet) {
         CoderLinkSheet(viewModel = linkVm, onDismiss = { showLinkSheet = false })
     }

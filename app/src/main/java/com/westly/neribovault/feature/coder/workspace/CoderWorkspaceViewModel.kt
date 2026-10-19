@@ -17,7 +17,12 @@ import com.westly.neribovault.feature.coder.editor.smart.CoderLinter
 import com.westly.neribovault.feature.coder.editor.smart.CoderSuggestionEngine
 import com.westly.neribovault.feature.coder.editor.smart.FindState
 import com.westly.neribovault.feature.coder.editor.smart.Suggestion
+import com.westly.neribovault.feature.coder.files.CoderConflictChoice
+import com.westly.neribovault.feature.coder.files.CoderCopyResult
 import com.westly.neribovault.feature.coder.files.CoderEntry
+import com.westly.neribovault.feature.coder.files.CoderFileCopy
+import com.westly.neribovault.feature.coder.files.CoderRecentFiles
+import com.westly.neribovault.feature.coder.files.isCoderHiddenPath
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
@@ -33,6 +38,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -122,6 +128,22 @@ private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer
 private const val MSG_TOO_MANY_MATCHES = "There are too many matches to replace at once. Search for something longer."
 private const val MSG_NOTHING_TO_REPLACE = "Nothing changed. The replacement is the same as the text."
 private const val MSG_FILE_GONE = "This file is no longer there."
+private const val MSG_MOVE_EXISTS = "A file with that name is already there."
+private const val MSG_MOVE_INTO_ITSELF = "A folder can't be moved into itself."
+private const val MSG_MOVE_FAILED = "Couldn't move that. Please try again."
+private const val MSG_FOLDER_GONE = "That folder is no longer there."
+private const val MSG_NO_SPACE = "Not enough space on this phone."
+
+/** One file to copy into the project: where it comes from, where it goes and whether it replaces what is there. */
+private class CopyTask(val picked: CoderPickedFile, val path: String, val overwrite: Boolean)
+
+/** What copying a list of files did. [noSpace] is true when the phone ran out of room and the rest was not tried. */
+private class CopyOutcome(
+    val added: Int,
+    val notes: List<String>,
+    val firstImagePath: String?,
+    val noSpace: Boolean,
+)
 
 /**
  * State and actions of one project's workspace: the file list, the open files (one tab each, with its own
@@ -189,6 +211,30 @@ class CoderWorkspaceViewModel(
     /** The find and replace bar: its texts, switches and the matches in the open file. */
     val find: StateFlow<FindState> = _find.asStateFlow()
 
+    private val _recentFiles = MutableStateFlow<List<String>>(emptyList())
+
+    /** The last 5 files that were opened, most recent first; the file drawer shows them. Files that are gone are dropped. */
+    val recentFiles: StateFlow<List<String>> = _recentFiles.asStateFlow()
+
+    private val recentMutex = Mutex()
+
+    private val _binaryFile = MutableStateFlow<String?>(null)
+
+    /** The file that cannot be edited and was tapped; the screen shows its sheet. Null when no sheet is wanted. */
+    val binaryFile: StateFlow<String?> = _binaryFile.asStateFlow()
+
+    private val _importProgress = MutableStateFlow<CoderImportProgress?>(null)
+
+    /** How far adding files has come; null when nothing is being added. */
+    val importProgress: StateFlow<CoderImportProgress?> = _importProgress.asStateFlow()
+
+    private val _importReport = MutableStateFlow<CoderAddReport?>(null)
+
+    /** What the last add did, until it is dismissed. */
+    val importReport: StateFlow<CoderAddReport?> = _importReport.asStateFlow()
+
+    private var importJob: Job? = null
+
     init {
         viewModelScope.launch {
             prefs.suggestionsEnabled.collect { on ->
@@ -211,6 +257,10 @@ class CoderWorkspaceViewModel(
                 _state.update { it.copy(project = project, isLoading = !entriesLoaded) }
             }
         }
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) { CoderRecentFiles.load(files, projectId) }
+            _recentFiles.update { CoderRecentFiles.merge(it, saved) }
+        }
         refreshEntries()
     }
 
@@ -223,6 +273,8 @@ class CoderWorkspaceViewModel(
             val list = withContext(Dispatchers.IO) { files.listAll(projectId) }
             entriesLoaded = true
             _state.update { it.copy(entries = list, isLoading = !projectLoaded) }
+            val present = list.mapTo(HashSet<String>()) { it.path }
+            _recentFiles.update { CoderRecentFiles.dropMissing(it, present) }
             closeVanishedTabs(list)
         }
     }
@@ -275,7 +327,12 @@ class CoderWorkspaceViewModel(
      * open only becomes the active tab; it is not read from the disk again.
      */
     fun openFile(path: String) {
-        viewModelScope.launch { openTab(path, loud = true, show = true) }
+        viewModelScope.launch { openTab(path, loud = true, show = true, binarySheet = true) }
+    }
+
+    /** Hides the sheet of a file that cannot be edited. */
+    fun closeBinarySheet() {
+        _binaryFile.value = null
     }
 
     /** Saves the active tab and closes it. The tab stays open when saving fails, so no text is lost. With no tab left the screen shows the file list. */
@@ -350,8 +407,18 @@ class CoderWorkspaceViewModel(
         _state.update { it.copy(editorVisible = show && tabs.paths.isNotEmpty()) }
     }
 
-    /** Opens [path] as a tab, or activates it when it is already open. False when it could not be opened. */
-    private suspend fun openTab(path: String, loud: Boolean, show: Boolean): Boolean {
+    /**
+     * Opens [path] as a tab, or activates it when it is already open. False when it could not be opened. A file that
+     * is shown (not one restored quietly after the app stopped) is put on the recent list, so every way of opening
+     * a file is recorded here. With [binarySheet] a file that cannot be edited asks for its sheet instead of a message.
+     */
+    private suspend fun openTab(path: String, loud: Boolean, show: Boolean, binarySheet: Boolean = false): Boolean {
+        val opened = openTabCore(path, loud, show, binarySheet)
+        if (opened && show) recordRecent(path)
+        return opened
+    }
+
+    private suspend fun openTabCore(path: String, loud: Boolean, show: Boolean, binarySheet: Boolean): Boolean {
         val existing = tabStates[path]
         if (existing != null) {
             makeActive(existing, show)
@@ -361,14 +428,39 @@ class CoderWorkspaceViewModel(
             if (loud) postMessage(MSG_CANNOT_OPEN)
             return false
         }
+        if (binarySheet) {
+            val size = _state.value.entries.firstOrNull { it.path == path }?.sizeBytes ?: 0L
+            val kind = coderFileKindOf(path, size)
+            if (kind == CoderFileKind.Image || kind == CoderFileKind.Other) return showBinarySheet(path)
+        }
         val message = when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
             is CoderReadResult.Text -> return addTab(path, result, loud, show)
-            CoderReadResult.TooLarge -> MSG_TOO_BIG_TO_OPEN
-            CoderReadResult.Binary -> MSG_NOT_TEXT
+            CoderReadResult.TooLarge -> if (binarySheet) return showBinarySheet(path) else MSG_TOO_BIG_TO_OPEN
+            CoderReadResult.Binary -> if (binarySheet) return showBinarySheet(path) else MSG_NOT_TEXT
             CoderReadResult.Missing, CoderReadResult.Failed -> MSG_CANNOT_OPEN
         }
         if (loud) postMessage(message)
         return false
+    }
+
+    private fun showBinarySheet(path: String): Boolean {
+        _binaryFile.value = path
+        return false
+    }
+
+    /** Puts [path] first on the recent list and saves the list in the background. */
+    private fun recordRecent(path: String) {
+        val updated = CoderRecentFiles.record(_recentFiles.value, path)
+        if (updated == _recentFiles.value) return
+        _recentFiles.value = updated
+        saveRecent(updated)
+    }
+
+    /** Writes [list] to the hidden recent file. Writes wait for each other, so the last list always wins. */
+    private fun saveRecent(list: List<String>) {
+        viewModelScope.launch {
+            recentMutex.withLock { withContext(Dispatchers.IO) { CoderRecentFiles.save(files, projectId, list) } }
+        }
     }
 
     /** Adds a tab for a file that was just read. When 12 tabs are open the least recently used clean one makes room. */
@@ -1016,8 +1108,187 @@ class CoderWorkspaceViewModel(
         }
         for (tab in moved) tabStates[tab.path] = tab
         tabs = CoderTabLogic.rename(tabs, from, to)
+        val renamedRecent = CoderRecentFiles.renamed(_recentFiles.value, from, to)
+        if (renamedRecent != _recentFiles.value) {
+            _recentFiles.value = renamedRecent
+            saveRecent(renamedRecent)
+        }
         publishTabs()
         if (moved.any { it === active }) scheduleLint()
+    }
+
+    /**
+     * Moves a file or folder into the folder [newParent] ("" is the top of the project). Open tabs under it are saved
+     * first and then follow the new place, like a rename. Nothing is overwritten.
+     */
+    fun moveEntry(from: String, newParent: String) {
+        viewModelScope.launch {
+            if (!CoderFileCopy.canMoveInto(from, newParent)) {
+                postMessage(MSG_MOVE_INTO_ITSELF)
+                return@launch
+            }
+            val to = CoderFileCopy.movedPath(from, newParent)
+            val affected = tabs.paths.filter { CoderTabLogic.isInside(it, from) }.mapNotNull { tabStates[it] }
+            for (tab in affected) {
+                tab.autosaveJob?.cancel()
+                if (!performSave(tab, loud = true)) return@launch
+            }
+            val result = saveMutex.withLock {
+                val outcome = withContext(Dispatchers.IO) { files.moveEntry(projectId, from, newParent) }
+                if (outcome == CoderWriteResult.Saved && to != from) renameTabs(from, to)
+                outcome
+            }
+            postMessage(
+                when (result) {
+                    CoderWriteResult.Saved -> "Moved"
+                    CoderWriteResult.AlreadyExists -> MSG_MOVE_EXISTS
+                    CoderWriteResult.InvalidPath -> MSG_BAD_NAME
+                    else -> MSG_MOVE_FAILED
+                },
+            )
+            refreshEntries()
+        }
+    }
+
+    /**
+     * Copies the picked files into [folder] ("" is the top of the project). Names are cleaned first; a name that is
+     * already used follows [choice] for all such files (a name used twice inside the batch is always kept apart).
+     * Progress and the report are in [importProgress] and [importReport]; [cancelImport] stops it and removes the
+     * file being copied. Ignored while another add runs.
+     */
+    fun importFiles(picked: List<CoderPickedFile>, folder: String, choice: CoderConflictChoice) {
+        if (picked.isEmpty() || importJob?.isActive == true) return
+        importJob = viewModelScope.launch { runImport(picked, folder, choice) }
+    }
+
+    /** Overwrites the file at [path] with [picked]. Open tabs on it are closed first; the old file stays when the copy fails. */
+    fun replaceFile(path: String, picked: CoderPickedFile) {
+        if (importJob?.isActive == true) return
+        importJob = viewModelScope.launch {
+            val outcome = copyAll(listOf(CopyTask(picked, path, true)), showProgress = false, folder = CoderPaths.parentOf(path))
+            refreshEntries()
+            postMessage(
+                when {
+                    outcome.added == 1 -> "File replaced"
+                    outcome.noSpace -> MSG_NO_SPACE
+                    else -> outcome.notes.firstOrNull() ?: MSG_FAILED
+                },
+            )
+        }
+    }
+
+    /** Stops adding files. The file being copied is removed; files that were already added stay. */
+    fun cancelImport() {
+        importJob?.cancel()
+    }
+
+    /** Hides the report of the last add. */
+    fun dismissImportReport() {
+        _importReport.value = null
+    }
+
+    private suspend fun runImport(picked: List<CoderPickedFile>, folder: String, choice: CoderConflictChoice) {
+        val listing = withContext(Dispatchers.IO) { files.listAll(projectId) }
+        val folderOk = folder.isEmpty() ||
+            (CoderPaths.isValidPath(folder) && !isCoderHiddenPath(folder) && listing.any { it.isDirectory && it.path == folder })
+        if (!folderOk) {
+            postMessage(MSG_FOLDER_GONE)
+            return
+        }
+        val inFolder = listing.filter { CoderPaths.parentOf(it.path) == folder }
+        val onDisk = inFolder.mapTo(HashSet<String>()) { CoderPaths.nameOf(it.path) }
+        val folders = inFolder.filter { it.isDirectory }.mapTo(HashSet<String>()) { CoderPaths.nameOf(it.path) }
+        val assigned = HashSet<String>()
+        val notes = ArrayList<String>()
+        val tasks = ArrayList<CopyTask>()
+        for (file in picked) {
+            val clean = CoderFileCopy.sanitizeName(file.displayName)
+            val plan = CoderFileCopy.planName(onDisk, assigned, clean, choice)
+            val name = plan.name
+            if (name == null) {
+                notes.add("$clean: the name is already used")
+                continue
+            }
+            val path = CoderPaths.join(folder, name)
+            val size = file.sizeBytes
+            when {
+                plan.replaces && name in folders -> notes.add("$clean: a folder has that name")
+                isCoderHiddenPath(path) -> notes.add("$clean: the name can't be used")
+                size != null && size > CoderFileCopy.MAX_FILE_BYTES -> notes.add("$clean: bigger than 20 MB")
+                else -> {
+                    assigned.add(name)
+                    tasks.add(CopyTask(file, path, plan.replaces))
+                }
+            }
+        }
+        val outcome = try {
+            copyAll(tasks, showProgress = true, folder = folder)
+        } catch (e: CancellationException) {
+            postMessage("Adding stopped. Files that were already added stay.")
+            throw e
+        } finally {
+            _importProgress.value = null
+            refreshEntries()
+        }
+        val spaceNote = if (outcome.noSpace) listOf(MSG_NO_SPACE) else emptyList<String>()
+        val allNotes = notes + outcome.notes + spaceNote
+        _importReport.value = CoderAddReport(
+            added = outcome.added,
+            skipped = picked.size - outcome.added,
+            folder = folder,
+            notes = allNotes,
+            firstImagePath = outcome.firstImagePath,
+        )
+    }
+
+    /**
+     * Copies each task in turn. A replaced file's open tabs close first, so an old autosave can never write over the
+     * new file. Stops at once when cancelled (the copy being made is removed) and when the phone is out of space.
+     */
+    private suspend fun copyAll(tasks: List<CopyTask>, showProgress: Boolean, folder: String): CopyOutcome {
+        var added = 0
+        var firstImage: String? = null
+        var noSpace = false
+        val notes = ArrayList<String>()
+        for ((index, task) in tasks.withIndex()) {
+            if (showProgress) {
+                _importProgress.value = CoderImportProgress(index, tasks.size, CoderPaths.nameOf(task.path), folder)
+            }
+            if (task.overwrite) closeTabsAt(task.path)
+            val result = withContext(Dispatchers.IO) {
+                val scope = this
+                val stream = task.picked.open()
+                if (stream == null) {
+                    CoderCopyResult.Failed
+                } else {
+                    stream.use { files.copyIn(projectId, task.path, it, task.overwrite, shouldContinue = { scope.isActive }) }
+                }
+            }
+            val label = CoderPaths.nameOf(task.path)
+            when (result) {
+                is CoderCopyResult.Copied -> {
+                    added++
+                    if (firstImage == null && CoderFileCopy.isImageName(label)) firstImage = task.path
+                }
+                CoderCopyResult.TooLarge -> notes.add("$label: bigger than 20 MB")
+                CoderCopyResult.LimitReached -> notes.add("$label: the project is full (50 MB or 2,000 files)")
+                CoderCopyResult.AlreadyExists -> notes.add("$label: the name is already used")
+                CoderCopyResult.InvalidPath -> notes.add("$label: the name can't be used")
+                CoderCopyResult.Cancelled, CoderCopyResult.Failed -> notes.add("$label: couldn't be read")
+                CoderCopyResult.NoSpace -> noSpace = true
+            }
+            if (noSpace) break
+        }
+        if (added > 0) touchProject()
+        return CopyOutcome(added, notes, firstImage, noSpace)
+    }
+
+    /** Closes the tabs at [path] (or inside it) without saving them. Used before a file is overwritten from outside. */
+    private suspend fun closeTabsAt(path: String) {
+        saveMutex.withLock {
+            val victims = tabs.paths.filter { CoderTabLogic.isInside(it, path) }
+            if (victims.isNotEmpty()) commitTabs(CoderTabLogic.removed(tabs, path), victims)
+        }
     }
 
     fun renameProject(name: String) {
