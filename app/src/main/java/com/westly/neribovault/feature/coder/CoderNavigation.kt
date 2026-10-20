@@ -13,6 +13,7 @@ import com.westly.neribovault.feature.coder.env.EnvironmentScreen
 import com.westly.neribovault.feature.coder.github.CoderGitHubScreen
 import com.westly.neribovault.feature.coder.guidance.CoderHelpScreen
 import com.westly.neribovault.feature.coder.home.CoderHomeScreen
+import com.westly.neribovault.feature.coder.home.ImportFromGitHubScreen
 import com.westly.neribovault.feature.coder.trash.CoderTrashScreen
 import com.westly.neribovault.feature.coder.workspace.CoderWorkspaceScreen
 
@@ -32,6 +33,7 @@ object CoderRoutes {
     const val GITHUB = "coder/github/{projectId}"
     const val ENV = "coder/env/{projectId}"
     const val BUILD = "coder/build/{projectId}"
+    const val IMPORT_GITHUB = "coder/import-github"
     const val ARG_PROJECT_ID = "projectId"
 
     fun project(id: String) = "coder/project/$id"
@@ -60,6 +62,23 @@ fun NavGraphBuilder.coderGraph(navController: NavHostController) {
                 },
                 onOpenHelp = {
                     navController.navigate(CoderRoutes.HELP) { launchSingleTop = true }
+                },
+                onOpenImportGitHub = {
+                    navController.navigate(CoderRoutes.IMPORT_GITHUB) { launchSingleTop = true }
+                },
+            )
+        }
+    }
+    composable(CoderRoutes.IMPORT_GITHUB) {
+        VaultLockGate(VAULT_ID, VAULT_NAME, onBack = { navController.popBackStack() }) {
+            ImportFromGitHubScreen(
+                onBack = { navController.popBackStack() },
+                onOpenProject = { id ->
+                    // Replace this screen with the new project, so Back goes to the project list.
+                    navController.navigate(CoderRoutes.project(id)) {
+                        popUpTo(CoderRoutes.IMPORT_GITHUB) { inclusive = true }
+                        launchSingleTop = true
+                    }
                 },
             )
         }

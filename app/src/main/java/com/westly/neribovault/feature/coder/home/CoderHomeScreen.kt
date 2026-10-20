@@ -24,9 +24,11 @@ import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Book
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FileCopy
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
@@ -68,12 +70,16 @@ import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.ui.components.OverflowMenu
 import com.westly.neribovault.core.util.formatRelative
+import com.westly.neribovault.core.util.newId
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.feature.coder.CoderCheckResult
 import com.westly.neribovault.feature.coder.GuidanceMode
 import com.westly.neribovault.feature.coder.VAULT_ID
 import com.westly.neribovault.feature.coder.VAULT_NAME
+import com.westly.neribovault.data.repository.CoderProjectsRepository
+import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderLimits
+import com.westly.neribovault.feature.coder.files.CoderProjectCopyResult
 import com.westly.neribovault.feature.coder.guidance.CoderTipEngine
 import com.westly.neribovault.feature.coder.guidance.CoderTipHost
 import com.westly.neribovault.feature.coder.guidance.CoderWelcomeCard
@@ -90,6 +96,7 @@ import com.westly.neribovault.feature.coder.zip.ZipProgressDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -101,6 +108,7 @@ fun CoderHomeScreen(
     onOpenTrash: () -> Unit,
     onOpenAiSettings: () -> Unit,
     onOpenHelp: () -> Unit,
+    onOpenImportGitHub: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val vm = neriboViewModel { c -> CoderHomeViewModel(c.coderProjectsRepository) }
@@ -166,6 +174,29 @@ fun CoderHomeScreen(
         }
     }
 
+    // Duplicate: the copy runs in the background with a Cancel button; the new row appears through the project list.
+    var duplicating by remember { mutableStateOf(false) }
+    var duplicateJob by remember { mutableStateOf<Job?>(null) }
+    val startDuplicate: (CoderProjectEntity) -> Unit = { source ->
+        if (!duplicating) {
+            duplicating = true
+            val container = (context.applicationContext as NeriboApp).container
+            duplicateJob = scope.launch {
+                var message = ""
+                try {
+                    message = duplicateCoderProject(container.coderFileStore, container.coderProjectsRepository, source)
+                } finally {
+                    duplicating = false
+                    duplicateJob = null
+                }
+                if (message.isNotEmpty()) {
+                    snackbarHostState.currentSnackbarData?.dismiss()
+                    snackbarHostState.showSnackbar(message)
+                }
+            }
+        }
+    }
+
     LaunchedEffect(state.createdProjectId) {
         val id = state.createdProjectId ?: return@LaunchedEffect
         vm.consumeCreated()
@@ -180,6 +211,7 @@ fun CoderHomeScreen(
 
     val menuActions = buildList<MenuAction> {
         add(MenuAction(label = "Import ZIP", onClick = { importLauncher.launch(ZIP_MIME_TYPES) }, icon = Icons.Outlined.Archive))
+        add(MenuAction(label = "Import from GitHub", onClick = onOpenImportGitHub, icon = Icons.Outlined.Cloud))
         add(MenuAction(label = "AI settings", onClick = onOpenAiSettings, icon = Icons.Outlined.Settings))
         add(MenuAction(label = "Recently deleted", onClick = onOpenTrash, icon = Icons.Outlined.History))
         add(MenuAction(label = "Vault lock", onClick = { showLockSheet = true }, icon = Icons.Outlined.Lock))
@@ -210,7 +242,7 @@ fun CoderHomeScreen(
                     screen = TipScreen.Home,
                     projectListShown = !state.isLoading && state.projects.isNotEmpty(),
                     welcomeVisible = welcomeVisible,
-                    busy = showNewDialog || renameId != null || showLockSheet || showGuidanceSheet || importing ||
+                    busy = showNewDialog || renameId != null || showLockSheet || showGuidanceSheet || importing || duplicating ||
                         importedId != null || importError != null || state.selfTest != null,
                 ),
                 modifier = Modifier.padding(horizontal = spacing.screen, vertical = spacing.xs),
@@ -255,6 +287,7 @@ fun CoderHomeScreen(
                             project = project,
                             onOpen = { onOpenProject(project.id) },
                             onRename = { renameId = project.id },
+                            onDuplicate = { startDuplicate(project) },
                             onDelete = {
                                 vm.delete(project.id)
                                 scope.launch {
@@ -317,6 +350,9 @@ fun CoderHomeScreen(
     if (importing) {
         ZipProgressDialog(title = "Unpacking\u2026", onCancel = { importJob?.cancel() })
     }
+    if (duplicating) {
+        ZipProgressDialog(title = "Duplicating\u2026", onCancel = { duplicateJob?.cancel() })
+    }
     val finishedId = importedId
     if (finishedId != null) {
         ImportReportDialog(
@@ -344,6 +380,62 @@ fun CoderHomeScreen(
     }
 }
 
+private const val MSG_DUPLICATE_NO_SPACE = "Not enough space to duplicate this project."
+private const val MSG_DUPLICATE_FAILED = "Couldn't duplicate this project. Please try again."
+private const val MSG_DUPLICATED = "Project duplicated"
+
+/**
+ * The name of a copy of [name]: "X copy", then "X copy 2", "X copy 3" and so on, the first one no project in [existing]
+ * has (ignoring case). The result is never longer than the project name limit; a long [name] is cut to make room.
+ */
+internal fun duplicateProjectName(name: String, existing: Collection<String>): String {
+    val taken = existing.map { it.trim().lowercase() }.toSet()
+    val base = name.trim()
+    var number = 1
+    while (true) {
+        val suffix = if (number == 1) " copy" else " copy $number"
+        val candidate = base.take(CoderLimits.MAX_PROJECT_NAME_LENGTH - suffix.length).trimEnd() + suffix
+        if (candidate.lowercase() !in taken) return candidate
+        number++
+    }
+}
+
+/**
+ * Copies [source] into a new project: every file and folder except the app's own `.coder*` folders (so GitHub and
+ * Developer links, variables and history stay with the original), at least twice the size free on the phone, and the
+ * row inserted last so no row ever points at a half copy. Returns the message to show ("" when it was cancelled).
+ * Cancelling the calling coroutine stops the copy and removes the half-made folder.
+ */
+internal suspend fun duplicateCoderProject(
+    files: CoderFileStore,
+    projects: CoderProjectsRepository,
+    source: CoderProjectEntity,
+): String {
+    val newProjectId = newId()
+    val result = withContext(Dispatchers.IO) {
+        val scope = this
+        files.copyProject(source.id, newProjectId, shouldContinue = { scope.isActive })
+    }
+    when (result) {
+        is CoderProjectCopyResult.Copied -> Unit
+        CoderProjectCopyResult.NoSpace -> return MSG_DUPLICATE_NO_SPACE
+        CoderProjectCopyResult.Cancelled -> return ""
+        else -> return MSG_DUPLICATE_FAILED
+    }
+    val taken = projects.observeAll().first().map { it.name }
+    val created = projects.createProject(
+        name = duplicateProjectName(source.name, taken),
+        templateId = source.templateId,
+        starterFiles = emptyList(),
+        id = newProjectId,
+    )
+    if (created == null) {
+        withContext(Dispatchers.IO) { files.deleteProject(newProjectId) }
+        return MSG_DUPLICATE_FAILED
+    }
+    return MSG_DUPLICATED
+}
+
 /** The file types the picker offers for Import ZIP; some phones label a ZIP with the generic type. */
 private val ZIP_MIME_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
 
@@ -362,6 +454,7 @@ private fun ProjectCard(
     project: CoderProjectEntity,
     onOpen: () -> Unit,
     onRename: () -> Unit,
+    onDuplicate: () -> Unit,
     onDelete: () -> Unit,
 ) {
     val spacing = NeriboTheme.spacing
@@ -390,6 +483,7 @@ private fun ProjectCard(
             OverflowMenu(
                 actions = listOf(
                     MenuAction(label = "Rename", onClick = onRename, icon = Icons.Outlined.Edit),
+                    MenuAction(label = "Duplicate", onClick = onDuplicate, icon = Icons.Outlined.FileCopy),
                     MenuAction(label = "Delete", onClick = onDelete, icon = Icons.Outlined.Delete, destructive = true),
                 ),
             )

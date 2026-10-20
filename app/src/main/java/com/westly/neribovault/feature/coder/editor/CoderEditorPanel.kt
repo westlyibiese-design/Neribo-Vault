@@ -64,6 +64,8 @@ private val FOLLOW_MARGIN = 28.dp
 private const val ISSUE_TINT_ALPHA = 0.2f
 private const val MATCH_TINT_ALPHA = 0.22f
 private const val CURRENT_MATCH_TINT_ALPHA = 0.5f
+private const val JUMP_MAX_WAIT_FRAMES = 30
+private const val JUMP_TOP_FRACTION = 3
 
 /**
  * The code editor: line numbers, colors, no wrapping (long lines scroll sideways) and a monospace
@@ -72,7 +74,9 @@ private const val CURRENT_MATCH_TINT_ALPHA = 0.5f
  * as find results; both only change how the text looks. Each time [revealTick] goes up the editor scrolls to the
  * current match, even when the text box does not have the keyboard. The panel starts scrolled to
  * ([initialScrollX], [initialScrollY]) and reports every scroll through [onScrollChanged]; the caller keys the
- * panel by the open file so scroll and focus never leak from one file to another.
+ * panel by the open file so scroll and focus never leak from one file to another. Each time [jumpTick] goes up
+ * (a tapped search result) the editor scrolls so the character at [jumpOffset] is near the top, then reports the
+ * tick through [onJumpDone].
  */
 @Composable
 fun CoderEditorPanel(
@@ -87,6 +91,9 @@ fun CoderEditorPanel(
     initialScrollX: Int = 0,
     initialScrollY: Int = 0,
     onScrollChanged: (x: Int, y: Int) -> Unit = { _, _ -> },
+    jumpTick: Int = 0,
+    jumpOffset: Int = 0,
+    onJumpDone: (Int) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val syntax = rememberCoderSyntaxColors()
@@ -205,6 +212,34 @@ fun CoderEditorPanel(
             startPaddingPx = startPaddingPx,
             marginPx = marginPx,
         )
+    }
+
+    // Scrolls to the line of a tapped search result. Waits (a few frames at most) until the text has been laid out.
+    val latestJumpDone by rememberUpdatedState(onJumpDone)
+    LaunchedEffect(jumpTick) {
+        if (jumpTick == 0) return@LaunchedEffect
+        var frames = 0
+        while (frames < JUMP_MAX_WAIT_FRAMES) {
+            val ready = layoutResult
+            if (ready != null && viewportHeight > 0 && textViewportWidth > 0 &&
+                ready.layoutInput.text.length == latestValue.text.length
+            ) {
+                break
+            }
+            withFrameNanos { }
+            frames++
+        }
+        val layout = layoutResult
+        if (layout != null && viewportHeight > 0) {
+            val length = layout.layoutInput.text.length
+            val rect = runCatching { layout.getCursorRect(jumpOffset.coerceIn(0, length)) }.getOrNull()
+            if (rect != null) {
+                val target = (topPaddingPx + rect.top - viewportHeight / JUMP_TOP_FRACTION).toInt().coerceAtLeast(0)
+                vScroll.animateScrollTo(target, tween(durationMillis = 120))
+                hScroll.scrollTo(0)
+            }
+        }
+        latestJumpDone(jumpTick)
     }
 
     val viewportHeightDp = with(density) { viewportHeight.toDp() }

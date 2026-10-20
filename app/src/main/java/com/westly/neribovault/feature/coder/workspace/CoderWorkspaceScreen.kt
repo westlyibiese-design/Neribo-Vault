@@ -153,6 +153,8 @@ fun CoderWorkspaceScreen(
     val issues by vm.issues.collectAsStateWithLifecycle()
     val find by vm.find.collectAsStateWithLifecycle()
     val recentFiles by vm.recentFiles.collectAsStateWithLifecycle()
+    val projectSearch by vm.projectSearch.collectAsStateWithLifecycle()
+    val jump by vm.jump.collectAsStateWithLifecycle()
     val binaryPath by vm.binaryFile.collectAsStateWithLifecycle()
     val importProgress by vm.importProgress.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -318,6 +320,22 @@ fun CoderWorkspaceScreen(
     }
     // The AI help screen takes Back first and then returns to where the person was.
     BackHandler(enabled = aiOpen) { closeAiHelp() }
+    // The project search is declared last, so it is asked before every handler above.
+    BackHandler(enabled = projectSearch.open && !aiOpen && previewEntry == null) { vm.closeProjectSearch() }
+    if (projectSearch.open && !aiOpen && previewEntry == null) {
+        ProjectSearchPanel(
+            state = projectSearch,
+            onQueryChange = { vm.setProjectSearchQuery(it) },
+            onToggleCase = { vm.toggleProjectSearchCase() },
+            onToggleWholeWord = { vm.toggleProjectSearchWholeWord() },
+            onOpenResult = { path, line ->
+                vm.closeProjectSearch()
+                vm.openFileAt(path, line)
+            },
+            onBack = { vm.closeProjectSearch() },
+        )
+        return
+    }
     if (aiOpen) {
         CoderAiPanel(
             viewModel = aiVm,
@@ -462,6 +480,7 @@ fun CoderWorkspaceScreen(
                                 ),
                         )
                     } else if (canBrowse) {
+                        SearchFilesAction(onClick = { vm.openProjectSearch() })
                         AiHelpAction(onClick = openAiHelp)
                         RunAction(onClick = onRun)
                         OverflowMenu(
@@ -586,6 +605,9 @@ fun CoderWorkspaceScreen(
                                 initialScrollX = scrollX,
                                 initialScrollY = scrollY,
                                 onScrollChanged = { x, y -> vm.updateScroll(openPath, x, y) },
+                                jumpTick = if (jump.path == openPath) jump.tick else 0,
+                                jumpOffset = jump.offset,
+                                onJumpDone = { vm.consumeJump(it) },
                             )
                         }
                         // While a find box has the keyboard the strip and the extra keys are hidden: they would type
@@ -654,6 +676,10 @@ fun CoderWorkspaceScreen(
                         },
                         recentFiles = recentFiles,
                         onAddFiles = { addFilesRequest.ask() },
+                        onSearch = {
+                            drawerOpen = false
+                            vm.openProjectSearch()
+                        },
                         onMove = {
                             dialogPath = it.path
                             dialog = WorkspaceDialog.Move
@@ -1017,6 +1043,16 @@ private fun FindAction(isOpen: Boolean, onClick: () -> Unit) {
         contentDescription = "Find",
         onClick = onClick,
         tint = if (isOpen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+/** The Search button of the Files screen: looks in every file of the project. */
+@Composable
+private fun SearchFilesAction(onClick: () -> Unit) {
+    NeriboIconButton(
+        icon = Icons.Outlined.Search,
+        contentDescription = "Search in files",
+        onClick = onClick,
     )
 }
 

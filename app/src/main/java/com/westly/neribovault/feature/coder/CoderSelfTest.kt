@@ -8,6 +8,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.westly.neribovault.core.util.newId
+import com.westly.neribovault.data.local.dao.CoderProjectDao
+import com.westly.neribovault.data.local.entity.CoderProjectEntity
+import com.westly.neribovault.data.repository.CoderProjectsRepository
+import com.westly.neribovault.feature.coder.files.CoderProjectCopyResult
+import com.westly.neribovault.feature.coder.files.CoderProjectSearch
+import com.westly.neribovault.feature.coder.github.CoderGitHubRepos
+import com.westly.neribovault.feature.coder.github.CoderLimitedCopyResult
+import com.westly.neribovault.feature.coder.home.duplicateCoderProject
+import com.westly.neribovault.feature.coder.home.duplicateProjectName
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import com.westly.neribovault.data.local.entity.ProjectEntity
 import com.westly.neribovault.feature.coder.ai.AiSelectionSnapshot
 import com.westly.neribovault.feature.coder.ai.CODER_SYSTEM_PROMPT
@@ -253,6 +265,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(previewUpgradeChecks(context, store))
         results.addAll(buildAndEnvChecks(context, store))
         results.addAll(c15aChecks(store))
+        results.addAll(c15bChecks(store))
     } finally {
         root.deleteRecursively()
     }
@@ -4415,4 +4428,380 @@ private fun c15InfoChecks(): List<CoderCheckResult> {
         },
         c15Check("File kinds: a big picture is still a picture", "Image") { coderFileKindOf("a.jpg", 15_000_000L).name },
     )
+}
+
+// ---- Phase C15, part B: import from GitHub, search across all files, duplicate a project ------
+
+private fun c15bChecks(store: CoderFileStore): List<CoderCheckResult> =
+    c15bSearchChecks() + c15bGitHubChecks() + c15bCopyChecks(store) + c15bDuplicateChecks(store)
+
+private fun c15bSearch(files: List<Pair<String, String>>, query: String, caseSensitive: Boolean = false, wholeWord: Boolean = false) =
+    CoderProjectSearch.search(files.asSequence(), query, caseSensitive, wholeWord, CoderProjectSearch.MAX_TEXT_MATCHES)
+
+private fun c15bSearchChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Search: one character is refused", "true|0") {
+        val r = c15bSearch(listOf("a.txt" to "aaa"), "a")
+        "${r.refused}|${r.totalCount}"
+    })
+    out.add(c15Check("Search: blank and multi-line queries are refused", "true|true|true") {
+        listOf("  ", "ab\ncd", "ab\r").joinToString("|") { c15bSearch(listOf("a.txt" to "ab cd"), it).refused.toString() }
+    })
+    out.add(c15Check("Search: a file name matches ignoring case", "src/Main.kt") {
+        c15bSearch(listOf("src/Main.kt" to "", "x.txt" to ""), "main").nameMatches.joinToString(",")
+    })
+    out.add(c15Check("Search: at most 20 file names are listed", "20") {
+        c15bSearch((1..30).map { "abc$it.txt" to "" }, "abc").nameMatches.size.toString()
+    })
+    out.add(c15Check("Search: text matches ignore case by default", "2") {
+        c15bSearch(listOf("a.txt" to "Hello hello"), "hello").textMatchCount.toString()
+    })
+    out.add(c15Check("Search: Aa makes the match exact", "1") {
+        c15bSearch(listOf("a.txt" to "Hello hello"), "hello", caseSensitive = true).textMatchCount.toString()
+    })
+    out.add(c15Check("Search: ab matches whole words only", "2") {
+        c15bSearch(listOf("a.txt" to "cat concat cat."), "cat", wholeWord = true).textMatchCount.toString()
+    })
+    out.add(c15Check("Search: the line number is 1-based", "3") {
+        c15bSearch(listOf("a.txt" to "a\nb\nfoo\nd"), "foo").files.first().hits.first().line.toString()
+    })
+    out.add(c15Check("Search: a long line gives a snippet of 120 characters or less with the match inside", "true|needle") {
+        val line = "x".repeat(300) + "needle" + "y".repeat(300)
+        val hit = c15bSearch(listOf("a.txt" to line), "needle").files.first().hits.first()
+        "${hit.snippet.length <= CoderProjectSearch.MAX_SNIPPET_CHARS}|" + hit.snippet.substring(hit.highlightStart, hit.highlightEnd)
+    })
+    out.add(c15Check("Search: a cut snippet says so on both sides", "true|true") {
+        val line = "x".repeat(300) + "needle" + "y".repeat(300)
+        val hit = c15bSearch(listOf("a.txt" to line), "needle").files.first().hits.first()
+        "${hit.cutStart}|${hit.cutEnd}"
+    })
+    out.add(c15Check("Search: at most 20 matches are listed per file", "20|true") {
+        val r = c15bSearch(listOf("a.txt" to "kk\n".repeat(50)), "kk")
+        "${r.files.first().hits.size}|${r.truncated}"
+    })
+    out.add(c15Check("Search: at most 200 text matches are listed in all", "200|true") {
+        val r = c15bSearch((1..15).map { "f$it.txt" to "kk\n".repeat(30) }, "kk")
+        "${r.textMatchCount}|${r.truncated}"
+    })
+    out.add(c15Check("Search: the app's folders, node_modules and .git are skipped", "0") {
+        val files = listOf(".coder/notes.txt" to "needle", "node_modules/p/i.js" to "needle", "a/.git/config" to "needle")
+        c15bSearch(files, "needle").totalCount.toString()
+    })
+    out.add(c15Check("Search: only hidden and library paths are unsearchable", "true|false|false|false") {
+        listOf("src/a.js", ".coder/recent.json", "node_modules/x.js", ".git/HEAD").joinToString("|") { CoderProjectSearch.isSearchable(it).toString() }
+    })
+    out.add(c15Check("Search: a file can match by name and by text", "1|1|2") {
+        val r = c15bSearch(listOf("todo.txt" to "todo: write tests"), "todo")
+        "${r.nameMatches.size}|${r.textMatchCount}|${r.totalCount}"
+    })
+    out.add(c15Check("Search: a match never crosses a line", "0") {
+        c15bSearch(listOf("a.txt" to "ab\ncd"), "bc").totalCount.toString()
+    })
+    out.add(c15Check("Search: files keep the order they were given in", "b.txt,a.txt") {
+        c15bSearch(listOf("b.txt" to "zzz", "a.txt" to "zzz"), "zzz").files.joinToString(",") { it.path }
+    })
+    out.add(c15Check("Search: the start of a line is found for a result jump", "0|3|6|6") {
+        val text = "ab\ncd\nef"
+        listOf(1, 2, 3, 99).joinToString("|") { CoderProjectSearch.lineStartOffset(text, it).toString() }
+    })
+    return out
+}
+
+private fun c15bRepoJson(fullName: String, private: Boolean = false, branch: String = "main", size: Long = 12): String =
+    JSONObject().put("full_name", fullName).put("private", private).put("default_branch", branch).put("size", size).toString()
+
+private fun c15bGitHubChecks(): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("GitHub import: the repository list is read", "me/app|true|dev|42") {
+        val list = CoderGitHubRepos.parseRepoList("[" + c15bRepoJson("me/app", true, "dev", 42) + "]")
+        val first = list?.firstOrNull()
+        "${first?.fullName}|${first?.isPrivate}|${first?.defaultBranch}|${first?.sizeKb}"
+    })
+    out.add(c15Check("GitHub import: an entry with a bad name is left out", "me/ok") {
+        val json = "[" + c15bRepoJson("nonsense") + "," + c15bRepoJson("me/ok") + ",{\"size\":1}]"
+        CoderGitHubRepos.parseRepoList(json)?.joinToString(",") { it.fullName }.orEmpty()
+    })
+    out.add(c15Check("GitHub import: missing fields get calm defaults", "false||0") {
+        val first = CoderGitHubRepos.parseRepoList("[{\"full_name\":\"me/app\"}]")?.firstOrNull()
+        "${first?.isPrivate}|${first?.defaultBranch}|${first?.sizeKb}"
+    })
+    out.add(c15Check("GitHub import: at most 100 repositories are kept", "100") {
+        val json = "[" + (1..150).joinToString(",") { c15bRepoJson("me/r$it") } + "]"
+        CoderGitHubRepos.parseRepoList(json)?.size.toString()
+    })
+    out.add(c15Check("GitHub import: an answer that is not a list gives null", "null|null") {
+        "${CoderGitHubRepos.parseRepoList("{}")}|${CoderGitHubRepos.parseRepoList("nope")}"
+    })
+    out.add(c15Check("GitHub import: the search box ignores case and looks at owner/name", "me/Alpha") {
+        val all = CoderGitHubRepos.parseRepoList("[" + c15bRepoJson("me/Alpha") + "," + c15bRepoJson("me/beta") + "]").orEmpty()
+        CoderGitHubRepos.filterRepos(all, "ALPH").joinToString(",") { it.fullName }
+    })
+    out.add(c15Check("GitHub import: push permission and default branch are read", "true|dev|false") {
+        val withPush = CoderGitHubRepos.parseRepoDetails(
+            "{\"name\":\"app\",\"owner\":{\"login\":\"me\"},\"default_branch\":\"dev\",\"permissions\":{\"push\":true}}", "x", "y",
+        )
+        val without = CoderGitHubRepos.parseRepoDetails("{\"name\":\"app\"}", "me", "app")
+        "${withPush?.canPush}|${withPush?.defaultBranch}|${without?.canPush}"
+    })
+    out.add(c15Check("GitHub import: details that are not JSON give null", "null") {
+        CoderGitHubRepos.parseRepoDetails("<html>", "me", "app").toString()
+    })
+    out.add(c15Check("GitHub import: a missing repository gets the calm 404 message", CoderGitHubRepos.MSG_NOT_FOUND) {
+        CoderGitHubRepos.failureFor(404, null, false).message
+    })
+    out.add(c15Check("GitHub import: a rate limit gets the calm message", "${CoderGitHubRepos.MSG_RATE_LIMITED}|${CoderGitHubRepos.MSG_RATE_LIMITED}") {
+        CoderGitHubRepos.failureFor(403, "0", false).message + "|" + CoderGitHubRepos.failureFor(429, null, true).message
+    })
+    out.add(c15Check("GitHub import: the 50 MB limit is exact", "false|true|false") {
+        val limit = CoderGitHubRepos.MAX_ZIPBALL_BYTES
+        "${CoderGitHubRepos.exceedsLimit(limit)}|${CoderGitHubRepos.exceedsLimit(limit + 1)}|${CoderGitHubRepos.exceedsLimit(-1L)}"
+    })
+    out.add(c15Check("GitHub import: a download past the limit stops early", "TooBig|true") {
+        val stream = CountingStream(20L * 1024 * 1024)
+        val result = CoderGitHubRepos.copyLimited(stream, ByteArrayOutputStream(), 1L * 1024 * 1024)
+        "${result.javaClass.simpleName}|${stream.readTotal < 3L * 1024 * 1024}"
+    })
+    out.add(c15Check("GitHub import: a download within the limit is copied whole", "1000|1000") {
+        val sink = ByteArrayOutputStream()
+        val result = CoderGitHubRepos.copyLimited(ByteArrayInputStream(ByteArray(1000)), sink, 1000L)
+        "${(result as? CoderLimitedCopyResult.Done)?.bytes}|${sink.size()}"
+    })
+    out.add(c15Check("GitHub import: a stopped download is reported as stopped", "Stopped") {
+        CoderGitHubRepos.copyLimited(ByteArrayInputStream(ByteArray(10)), ByteArrayOutputStream(), 1000L, { false }).javaClass.simpleName
+    })
+    out.add(c15Check("GitHub import: the list request asks for 100 repositories, newest first", "api.github.com|/user/repos|100|updated") {
+        val url = CoderGitHubRepos.userRepos("tok").url
+        "${url.host}|${url.encodedPath}|${url.queryParameter("per_page")}|${url.queryParameter("sort")}"
+    })
+    out.add(c15Check("GitHub import: the download request is https and keeps a slash in the branch", "https|/repos/me/app/zipball/feature/x") {
+        val url = CoderGitHubRepos.zipball(null, "me", "app", "feature/x").url
+        "${url.scheme}|${url.encodedPath}"
+    })
+    out.add(c15Check("GitHub import: no token means no Authorization header", "null|Bearer tok") {
+        val anonymous = CoderGitHubRepos.zipball(null, "me", "app", "main").header("Authorization")
+        val signedIn = CoderGitHubRepos.repoDetails("tok", "me", "app").header("Authorization")
+        "$anonymous|$signedIn"
+    })
+    out.add(c15Check("GitHub import: project names are cleaned and cut to 60", "app|60|GitHub project") {
+        listOf("a\u0001pp", "n".repeat(100), "  ").joinToString("|") {
+            val name = CoderGitHubRepos.projectNameFor(it)
+            if (name.length == 60) "60" else name
+        }
+    })
+    out.add(c15Check("GitHub import: unsafe branch names are refused", "true|true|false|false|false|false") {
+        listOf("main", "feature/x", "a..b", "", "a b", "/x").joinToString("|") { CoderGitHubRepos.isSafeRef(it).toString() }
+    })
+    out.add(c15Check("GitHub import: an imported repository becomes a new project named after it", "Test Repo|github") {
+        // The same all-or-nothing importer the ZIP import uses; GitHub's wrapper folder is stripped.
+        val zip = zipOf("me-app-1a2b3c/" to "", "me-app-1a2b3c/index.html" to "<p>hi</p>")
+        val created = ArrayList<String>()
+        val store = CoderFileStore(File(System.getProperty("java.io.tmpdir"), "c15b-import-" + newId()))
+        try {
+            val result = runBlocking {
+                importStream(store, { ByteArrayInputStream(zip) }, CoderGitHubRepos.projectNameFor("Test Repo")) { id, baseName ->
+                    created.add(id)
+                    created.size == 1 && baseName.isNotEmpty()
+                }
+            }
+            val ok = result is CoderImportResult.Success && store.read(created.first(), "index.html") is CoderReadResult.Text
+            (if (ok) "Test Repo" else "failed") + "|" + CoderGitHubRepos.TEMPLATE_ID
+        } finally {
+            created.forEach { store.deleteProject(it) }
+        }
+    })
+    return out
+}
+
+private fun c15bWriteHidden(store: CoderFileStore, id: String, path: String, text: String) {
+    val file = File(store.projectDir(id), path)
+    file.parentFile?.mkdirs()
+    file.writeText(text)
+}
+
+private fun c15bCopyChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    fun filled(id: String) {
+        store.createFile(id, "a.txt", "hello")
+        store.createFile(id, "dir/b.txt", "world")
+        store.createFolder(id, "empty")
+        c15bWriteHidden(store, id, ".coder/recent.json", "[]")
+        c15bWriteHidden(store, id, ".coder-extra/x.txt", "x")
+    }
+    out.add(c15Check("Duplicate: files and folders are copied, the original stays", "hello|world|true|hello") {
+        withTempProject(store) { from ->
+            filled(from)
+            val to = newId()
+            try {
+                val result = store.copyProject(from, to)
+                val a = (store.read(to, "a.txt") as? CoderReadResult.Text)?.text
+                val b = (store.read(to, "dir/b.txt") as? CoderReadResult.Text)?.text
+                val keptOriginal = (store.read(from, "a.txt") as? CoderReadResult.Text)?.text
+                "$a|$b|${result is CoderProjectCopyResult.Copied && File(store.projectDir(to), "empty").isDirectory}|$keptOriginal"
+            } finally {
+                store.deleteProject(to)
+            }
+        }
+    })
+    out.add(c15Check("Duplicate: every .coder folder is left out", "false|false|true") {
+        withTempProject(store) { from ->
+            filled(from)
+            val to = newId()
+            try {
+                store.copyProject(from, to)
+                "${File(store.projectDir(to), ".coder").exists()}|${File(store.projectDir(to), ".coder-extra").exists()}|${File(store.projectDir(from), ".coder").exists()}"
+            } finally {
+                store.deleteProject(to)
+            }
+        }
+    })
+    out.add(c15Check("Duplicate: exactly twice the size free is enough, one byte less is not", "Copied|NoSpace|false") {
+        withTempProject(store) { from ->
+            filled(from)
+            val size = store.projectSizeBytes(from)
+            val tight = newId()
+            val short = newId()
+            try {
+                val enough = store.copyProject(from, tight, freeSpaceBytes = 2L * size)
+                val notEnough = store.copyProject(from, short, freeSpaceBytes = 2L * size - 1L)
+                "${enough.javaClass.simpleName}|${notEnough.javaClass.simpleName}|${File(store.projectDir(short), "").exists()}"
+            } finally {
+                store.deleteProject(tight)
+                store.deleteProject(short)
+            }
+        }
+    })
+    out.add(c15Check("Duplicate: a stopped copy leaves no folder behind", "Cancelled|false") {
+        withTempProject(store) { from ->
+            filled(from)
+            val to = newId()
+            try {
+                val result = store.copyProject(from, to, shouldContinue = { false })
+                "${result.javaClass.simpleName}|${store.projectDir(to).exists()}"
+            } finally {
+                store.deleteProject(to)
+            }
+        }
+    })
+    out.add(c15Check("Duplicate: a copy that stops half way leaves no folder behind", "Cancelled|false") {
+        withTempProject(store) { from ->
+            filled(from)
+            val to = newId()
+            try {
+                var asked = 0
+                val result = store.copyProject(from, to, shouldContinue = { ++asked < 3 })
+                "${result.javaClass.simpleName}|${store.projectDir(to).exists()}"
+            } finally {
+                store.deleteProject(to)
+            }
+        }
+    })
+    out.add(c15Check("Duplicate: a missing source, the same id and an existing target are refused", "NotFound|Failed|AlreadyExists") {
+        withTempProject(store) { from ->
+            filled(from)
+            val missing = store.copyProject(newId(), newId())
+            val same = store.copyProject(from, from)
+            val existing = withTempProject(store) { other ->
+                store.createFile(other, "keep.txt", "k")
+                store.copyProject(from, other)
+            }
+            "${missing.javaClass.simpleName}|${same.javaClass.simpleName}|${existing.javaClass.simpleName}"
+        }
+    })
+    return out
+}
+
+/** A Room project table in memory, so the whole Duplicate step (copy, then row) can be checked without a database. */
+private class FakeCoderProjectDao : CoderProjectDao {
+    val rows = MutableStateFlow<List<CoderProjectEntity>>(emptyList())
+
+    private fun change(id: String, update: (CoderProjectEntity) -> CoderProjectEntity) {
+        rows.value = rows.value.map { if (it.id == id) update(it) else it }
+    }
+
+    override fun observeAll(): Flow<List<CoderProjectEntity>> = rows.map { list -> list.filter { !it.isDeleted } }
+    override fun observeById(id: String): Flow<CoderProjectEntity?> = rows.map { list -> list.firstOrNull { it.id == id && !it.isDeleted } }
+    override suspend fun getById(id: String): CoderProjectEntity? = rows.value.firstOrNull { it.id == id }
+    override suspend fun upsert(item: CoderProjectEntity) {
+        rows.value = rows.value.filter { it.id != item.id } + item
+    }
+    override suspend fun softDelete(id: String, now: Long) = change(id) { it.copy(isDeleted = true, deletedAt = now) }
+    override suspend fun restore(id: String) = change(id) { it.copy(isDeleted = false, deletedAt = null) }
+    override fun observeTrashed(): Flow<List<CoderProjectEntity>> = rows.map { list -> list.filter { it.isDeleted } }
+    override suspend fun deletePermanently(id: String) {
+        rows.value = rows.value.filter { it.id != id }
+    }
+    override suspend fun trashedIdsBefore(cutoff: Long): List<String> =
+        rows.value.filter { it.isDeleted && (it.deletedAt ?: Long.MAX_VALUE) < cutoff }.map { it.id }
+    override suspend fun deleteTrashedBefore(cutoff: Long) {
+        rows.value = rows.value.filter { !(it.isDeleted && (it.deletedAt ?: Long.MAX_VALUE) < cutoff) }
+    }
+    override suspend fun setRepoLink(id: String, owner: String?, name: String?, branch: String?, now: Long) =
+        change(id) { it.copy(repoOwner = owner, repoName = name, repoBranch = branch, updatedAt = now) }
+    override suspend fun markPushed(id: String, time: Long) = change(id) { it.copy(lastPushedAt = time, updatedAt = time) }
+    override suspend fun setDeveloperLink(id: String, developerProjectId: String?, now: Long) =
+        change(id) { it.copy(developerProjectId = developerProjectId, updatedAt = now) }
+    override fun observeByDeveloperProject(developerProjectId: String): Flow<List<CoderProjectEntity>> =
+        rows.map { list -> list.filter { it.developerProjectId == developerProjectId && !it.isDeleted } }
+}
+
+private fun c15bDuplicateChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val out = ArrayList<CoderCheckResult>()
+    out.add(c15Check("Duplicate: the first copy is called \"X copy\"", "X copy") { duplicateProjectName("X", emptyList()) })
+    out.add(c15Check("Duplicate: later copies count up from 2", "X copy 2|X copy 3") {
+        duplicateProjectName("X", listOf("X", "X copy")) + "|" + duplicateProjectName("X", listOf("X", "x COPY", "X copy 2"))
+    })
+    out.add(c15Check("Duplicate: a long name is cut so the copy name fits 60 characters", "true|true") {
+        val first = duplicateProjectName("n".repeat(60), emptyList())
+        val second = duplicateProjectName("n".repeat(60), listOf(first))
+        "${first.length <= 60 && first.endsWith(" copy")}|${second.length <= 60 && second.endsWith(" copy 2")}"
+    })
+    out.add(c15Check("Duplicate: the new project keeps the template, drops the links and gets the files", "X copy|web|null|null|hello|false") {
+        val dao = FakeCoderProjectDao()
+        val repo = CoderProjectsRepository(dao, store)
+        val sourceId = newId()
+        var copyId: String? = null
+        try {
+            store.createFile(sourceId, "a.txt", "hello")
+            c15bWriteHidden(store, sourceId, ".coder/recent.json", "[]")
+            val source = CoderProjectEntity(
+                id = sourceId, createdAt = 1L, updatedAt = 1L, name = "X", templateId = "web",
+                repoOwner = "me", repoName = "app", repoBranch = "main", developerProjectId = "dev-1",
+            )
+            runBlocking { dao.upsert(source) }
+            val message = runBlocking { duplicateCoderProject(store, repo, source) }
+            val copy = dao.rows.value.firstOrNull { it.id != sourceId }
+            copyId = copy?.id
+            val text = copyId?.let { (store.read(it, "a.txt") as? CoderReadResult.Text)?.text }
+            val hidden = copyId?.let { File(store.projectDir(it), ".coder").exists() }
+            if (message != "Project duplicated") throw IllegalStateException("message was $message")
+            "${copy?.name}|${copy?.templateId}|${copy?.repoOwner}|${copy?.developerProjectId}|$text|$hidden"
+        } finally {
+            store.deleteProject(sourceId)
+            copyId?.let { store.deleteProject(it) }
+        }
+    })
+    out.add(c15Check("Duplicate: copying a project twice gives X copy and X copy 2", "X copy,X copy 2") {
+        val dao = FakeCoderProjectDao()
+        val repo = CoderProjectsRepository(dao, store)
+        val sourceId = newId()
+        try {
+            store.createFile(sourceId, "a.txt", "hello")
+            val source = CoderProjectEntity(id = sourceId, createdAt = 1L, updatedAt = 1L, name = "X", templateId = "web")
+            runBlocking { dao.upsert(source) }
+            runBlocking { duplicateCoderProject(store, repo, source) }
+            runBlocking { duplicateCoderProject(store, repo, source) }
+            dao.rows.value.filter { it.id != sourceId }.map { it.name }.sorted().joinToString(",")
+        } finally {
+            store.deleteProject(sourceId)
+            dao.rows.value.forEach { store.deleteProject(it.id) }
+        }
+    })
+    out.add(c15Check("Duplicate: a source that is gone fails calmly and adds no row", "Couldn't duplicate this project. Please try again.|0") {
+        val dao = FakeCoderProjectDao()
+        val repo = CoderProjectsRepository(dao, store)
+        val ghost = CoderProjectEntity(id = newId(), createdAt = 1L, updatedAt = 1L, name = "Ghost", templateId = "web")
+        val message = runBlocking { duplicateCoderProject(store, repo, ghost) }
+        "$message|${dao.rows.value.size}"
+    })
+    return out
 }

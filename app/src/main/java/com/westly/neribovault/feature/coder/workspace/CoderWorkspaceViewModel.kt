@@ -26,14 +26,17 @@ import com.westly.neribovault.feature.coder.files.isCoderHiddenPath
 import com.westly.neribovault.feature.coder.files.CoderFileStore
 import com.westly.neribovault.feature.coder.files.CoderLimits
 import com.westly.neribovault.feature.coder.files.CoderPaths
+import com.westly.neribovault.feature.coder.files.CoderProjectSearch
 import com.westly.neribovault.feature.coder.files.CoderReadResult
 import com.westly.neribovault.feature.coder.files.CoderWriteResult
+import com.westly.neribovault.feature.coder.files.SearchResults
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -104,6 +107,7 @@ private const val INDENT_UNIT = "  "
 private const val MAX_RECENT_SUGGESTIONS = 20
 private const val LINT_DELAY_MS = 600L
 private const val MAX_QUERY_CHARS = 200
+private const val SEARCH_PAUSE_MS = 400L
 
 /** The most characters one change may add and still count as typing (a keyboard word completion); more is a paste. */
 private const val MAX_TYPED_CHUNK = 12
@@ -218,6 +222,20 @@ class CoderWorkspaceViewModel(
 
     private val recentMutex = Mutex()
 
+    private val _jump = MutableStateFlow(CoderJump())
+
+    /** The newest request to scroll the editor to a place (from a search result); [CoderJump.tick] is 0 when there is none. */
+    val jump: StateFlow<CoderJump> = _jump.asStateFlow()
+
+    private var jumpCounter = 0
+
+    private val _projectSearch = MutableStateFlow(ProjectSearchState())
+
+    /** The search across all files of the project. */
+    val projectSearch: StateFlow<ProjectSearchState> = _projectSearch.asStateFlow()
+
+    private var searchJob: Job? = null
+
     private val _binaryFile = MutableStateFlow<String?>(null)
 
     /** The file that cannot be edited and was tapped; the screen shows its sheet. Null when no sheet is wanted. */
@@ -326,8 +344,31 @@ class CoderWorkspaceViewModel(
      * Opens [path] in a tab and shows the editor, or explains why it can't be opened. A file that is already
      * open only becomes the active tab; it is not read from the disk again.
      */
-    fun openFile(path: String) {
-        viewModelScope.launch { openTab(path, loud = true, show = true, binarySheet = true) }
+    fun openFile(path: String): Job {
+        return viewModelScope.launch { openTab(path, loud = true, show = true, binarySheet = true) }
+    }
+
+    /**
+     * Opens [path] through [openFile] (so it is put on the recent list like any other opened file) and, when its editor
+     * is showing, moves the cursor to the start of the 1-based [line] and asks the editor to scroll there.
+     */
+    fun openFileAt(path: String, line: Int) {
+        viewModelScope.launch {
+            openFile(path).join()
+            val tab = active ?: return@launch
+            if (tab.path != path || !_state.value.editorVisible) return@launch
+            val text = tab.value.text
+            val offset = CoderProjectSearch.lineStartOffset(text, line).coerceIn(0, text.length)
+            clearSuggestions()
+            setActiveValue(TextFieldValue(text, TextRange(offset)))
+            jumpCounter++
+            _jump.value = CoderJump(path, jumpCounter, offset)
+        }
+    }
+
+    /** Called by the editor once it has scrolled for the request with [tick], so coming back to the tab later does not jump again. */
+    fun consumeJump(tick: Int) {
+        if (_jump.value.tick == tick) _jump.value = CoderJump()
     }
 
     /** Hides the sheet of a file that cannot be edited. */
@@ -827,6 +868,80 @@ class CoderWorkspaceViewModel(
     private fun clearIssues() {
         lintJob?.cancel()
         if (_issues.value.isNotEmpty()) _issues.value = emptyList()
+    }
+
+    // ---- Search across all files -----------------------------------------------------------
+
+    /** Opens the project search. A search typed earlier is kept and shown again. */
+    fun openProjectSearch() {
+        _projectSearch.update { it.copy(open = true) }
+        scheduleProjectSearch(pause = false)
+    }
+
+    /** Closes the project search and stops a running scan. The query stays for next time. */
+    fun closeProjectSearch() {
+        searchJob?.cancel()
+        _projectSearch.update { it.copy(open = false, searching = false) }
+    }
+
+    fun setProjectSearchQuery(query: String) {
+        _projectSearch.update { it.copy(query = query.take(MAX_QUERY_CHARS)) }
+        scheduleProjectSearch(pause = true)
+    }
+
+    fun toggleProjectSearchCase() {
+        _projectSearch.update { it.copy(caseSensitive = !it.caseSensitive) }
+        scheduleProjectSearch(pause = true)
+    }
+
+    fun toggleProjectSearchWholeWord() {
+        _projectSearch.update { it.copy(wholeWord = !it.wholeWord) }
+        scheduleProjectSearch(pause = true)
+    }
+
+    /**
+     * Starts a search for the current query after a 400 ms pause (every call cancels the one before). The scan runs on
+     * `Dispatchers.Default`. Open files with unsaved text are searched with that text, so line numbers match the editor.
+     */
+    private fun scheduleProjectSearch(pause: Boolean) {
+        searchJob?.cancel()
+        val request = _projectSearch.value
+        if (!CoderProjectSearch.isQueryAllowed(request.query)) {
+            _projectSearch.update { it.copy(results = null, searching = false) }
+            return
+        }
+        _projectSearch.update { it.copy(searching = true) }
+        searchJob = viewModelScope.launch {
+            if (pause) delay(SEARCH_PAUSE_MS)
+            val dirty = HashMap<String, String>()
+            for (tab in tabStates.values) if (tab.dirty) dirty[tab.path] = tab.value.text
+            val found = withContext(Dispatchers.Default) {
+                scanProject(this, request.query, request.caseSensitive, request.wholeWord, dirty)
+            }
+            _projectSearch.update {
+                if (it.query == request.query && it.caseSensitive == request.caseSensitive && it.wholeWord == request.wholeWord) {
+                    it.copy(results = found, searching = false)
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    private fun scanProject(scope: CoroutineScope, query: String, caseSensitive: Boolean, wholeWord: Boolean, dirty: Map<String, String>): SearchResults {
+        val list = files.listAll(projectId).filter { !it.isDirectory && CoderProjectSearch.isSearchable(it.path) }
+        val sequence = list.asSequence().map { entry ->
+            scope.ensureActive()
+            Pair(entry.path, dirty[entry.path] ?: readSearchText(entry))
+        }
+        return CoderProjectSearch.search(sequence, query, caseSensitive, wholeWord, CoderProjectSearch.MAX_TEXT_MATCHES)
+    }
+
+    /** The text of a file for searching, or "" when it is not an editable text file (so only its name is searched). */
+    private fun readSearchText(entry: CoderEntry): String {
+        val kind = coderFileKindOf(entry.path, entry.sizeBytes)
+        if (kind == CoderFileKind.Image || kind == CoderFileKind.Other) return ""
+        return (files.read(projectId, entry.path) as? CoderReadResult.Text)?.text ?: ""
     }
 
     // ---- Find and replace ------------------------------------------------------------------

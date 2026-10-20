@@ -1,6 +1,7 @@
 package com.westly.neribovault.feature.coder.files
 
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -54,6 +55,17 @@ sealed interface CoderCopyResult {
     object InvalidPath : CoderCopyResult
     object Cancelled : CoderCopyResult
     object Failed : CoderCopyResult
+}
+
+/** The outcome of copying a whole project folder with [CoderFileStore.copyProject]. Anything but [Copied] leaves no new folder behind. */
+sealed interface CoderProjectCopyResult {
+    /** The copy is complete: [fileCount] files and [bytes] bytes. */
+    data class Copied(val fileCount: Int, val bytes: Long) : CoderProjectCopyResult
+    object NotFound : CoderProjectCopyResult
+    object AlreadyExists : CoderProjectCopyResult
+    object NoSpace : CoderProjectCopyResult
+    object Cancelled : CoderProjectCopyResult
+    object Failed : CoderProjectCopyResult
 }
 
 /**
@@ -286,6 +298,75 @@ class CoderFileStore(private val rootDir: File) {
             if (!CoderPaths.isValidPath(toPath + relative)) return false
         }
         return true
+    }
+
+    /**
+     * Copies every file and folder of the project [fromId] into the new project folder [toId]; the app's own `.coder*`
+     * folders and half-written temp files are left out. Nothing is copied unless the phone has at least twice the project's
+     * size free ([freeSpaceBytes]). The folder [toId] must not exist yet. A copy that fails, runs out of room or is stopped
+     * ([shouldContinue] says false, asked before every chunk) removes the folder it made, so no half project is left.
+     * It makes no project row; the caller does that last.
+     */
+    fun copyProject(
+        fromId: String,
+        toId: String,
+        shouldContinue: () -> Boolean = { true },
+        freeSpaceBytes: Long = rootDir.usableSpace,
+    ): CoderProjectCopyResult {
+        if (fromId == toId || !isValidProjectId(fromId) || !isValidProjectId(toId)) return CoderProjectCopyResult.Failed
+        val source = resolve(fromId, "") ?: return CoderProjectCopyResult.Failed
+        if (!source.isDirectory) return CoderProjectCopyResult.NotFound
+        val target = resolve(toId, "") ?: return CoderProjectCopyResult.Failed
+        if (target.exists()) return CoderProjectCopyResult.AlreadyExists
+        if (freeSpaceBytes < 2L * projectSizeBytes(fromId)) return CoderProjectCopyResult.NoSpace
+        var finished = false
+        try {
+            if (!target.mkdirs() && !target.isDirectory) return CoderProjectCopyResult.Failed
+            var fileCount = 0
+            var bytes = 0L
+            for (entry in listAll(fromId)) {
+                if (!shouldContinue()) return CoderProjectCopyResult.Cancelled
+                val destination = resolve(toId, entry.path) ?: continue
+                if (entry.isDirectory) {
+                    if (!destination.isDirectory && !destination.mkdirs() && !destination.isDirectory) return CoderProjectCopyResult.Failed
+                    continue
+                }
+                val origin = resolve(fromId, entry.path)
+                if (origin == null || !origin.isFile) continue
+                val copied = copyFileInto(origin, destination, shouldContinue) ?: return CoderProjectCopyResult.Cancelled
+                fileCount++
+                bytes += copied
+            }
+            finished = true
+            return CoderProjectCopyResult.Copied(fileCount, bytes)
+        } catch (e: IOException) {
+            return if (isNoSpace(e)) CoderProjectCopyResult.NoSpace else CoderProjectCopyResult.Failed
+        } catch (e: Exception) {
+            return CoderProjectCopyResult.Failed
+        } finally {
+            if (!finished) target.deleteRecursively()
+        }
+    }
+
+    /** Copies [origin] to [destination] (missing parent folders are made) and returns the bytes copied, or null when [shouldContinue] said stop. */
+    private fun copyFileInto(origin: File, destination: File, shouldContinue: () -> Boolean): Long? {
+        val parent = destination.parentFile ?: throw IOException("No parent folder")
+        if (!parent.isDirectory && !parent.mkdirs() && !parent.isDirectory) throw IOException("Folder could not be made")
+        var total = 0L
+        FileInputStream(origin).use { input ->
+            FileOutputStream(destination).use { output ->
+                val buffer = ByteArray(CoderFileCopy.COPY_BUFFER_BYTES)
+                while (true) {
+                    if (!shouldContinue()) return null
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    total += read
+                }
+            }
+        }
+        destination.setLastModified(origin.lastModified())
+        return total
     }
 
     private fun isNoSpace(e: IOException): Boolean {

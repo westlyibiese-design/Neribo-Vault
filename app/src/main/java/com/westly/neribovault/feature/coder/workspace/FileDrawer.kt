@@ -26,6 +26,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FileCopy
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.ViewList
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -68,7 +69,7 @@ fun FilesToggleButton(onClick: () -> Unit) {
  * The project's file tree in a panel that slides in from the left over the editor, behind a dimmed scrim. A tap
  * on the scrim closes it. It uses the same [FileTreePanel] as the Files screen, so rename, delete and the
  * "new file here" actions work the same, and it highlights the file at [activePath]. With at least two [recentFiles]
- * a Recent section sits above the tree, and the header has an Add files button ([onAddFiles]). It is built from plain
+ * a Recent section sits above the tree, the header has a Search button ([onSearch]) and an Add files button ([onAddFiles]). It is built from plain
  * Compose parts, not a Material drawer, and draws nothing while it is closed.
  */
 @Composable
@@ -89,6 +90,7 @@ fun FileDrawer(
     modifier: Modifier = Modifier,
     recentFiles: List<String> = emptyList(),
     onAddFiles: () -> Unit = {},
+    onSearch: () -> Unit = {},
 ) {
     val progress by animateFloatAsState(
         targetValue = if (open) 1f else 0f,
@@ -134,6 +136,11 @@ fun FileDrawer(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).semantics { heading() },
+                )
+                NeriboIconButton(
+                    icon = Icons.Outlined.Search,
+                    contentDescription = "Search in files",
+                    onClick = onSearch,
                 )
                 NeriboIconButton(
                     icon = Icons.Outlined.FileCopy,
