@@ -147,6 +147,9 @@ fun CoderWorkspaceScreen(
         CoderLinkViewModel(projectId, c.coderProjectsRepository, c.projectsRepository)
     }
     val state by vm.state.collectAsStateWithLifecycle()
+    val aiBackupAvailable by vm.aiBackupAvailable.collectAsStateWithLifecycle()
+    val aiUndoActions: List<MenuAction> =
+        if (aiBackupAvailable) listOf(MenuAction("Undo last AI build", { vm.undoLastAiBuild() }, icon = Icons.Outlined.Undo)) else emptyList()
     val linkState by linkVm.linkState.collectAsStateWithLifecycle()
     val editorValue by vm.editorValue.collectAsStateWithLifecycle()
     val suggestions by vm.suggestions.collectAsStateWithLifecycle()
@@ -358,6 +361,8 @@ fun CoderWorkspaceScreen(
             onReplaceAll = { vm.replaceAll(it) },
             onOpenAndReplace = { path, text -> vm.openAndReplaceAll(path, text) },
             onCreateFile = { path, text -> vm.createFile(path, text) },
+            onApplyPlan = { items -> vm.applyAiPlan(items) },
+            onUndoBuild = { backupId -> vm.undoAiBuild(backupId) },
         )
         return
     }
@@ -477,7 +482,7 @@ fun CoderWorkspaceScreen(
                                     MenuAction("Editor settings", { showEditorSettings = true }),
                                     MenuAction("Add files", { addFilesRequest.ask() }, icon = Icons.Outlined.AttachFile),
                                     MenuAction("Project info", { showProjectInfo = true }, icon = Icons.Outlined.Info),
-                                ),
+                                ) + aiUndoActions,
                         )
                     } else if (canBrowse) {
                         SearchFilesAction(onClick = { vm.openProjectSearch() })
@@ -502,7 +507,7 @@ fun CoderWorkspaceScreen(
                                 MenuAction("Build with GitHub", onOpenBuild),
                                 MenuAction("Environment", onOpenEnvironment),
                                 MenuAction("Project info", { showProjectInfo = true }, icon = Icons.Outlined.Info),
-                            ) + linkMenuActions(
+                            ) + aiUndoActions + linkMenuActions(
                                 linkState = linkState,
                                 onChoose = { showLinkSheet = true },
                                 onUnlink = { linkVm.unlink() },

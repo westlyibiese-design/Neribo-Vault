@@ -43,6 +43,8 @@ private const val MESSAGE_UNEXPECTED = "Something went wrong. Try again."
 private const val MESSAGE_TOO_LONG = "The answer got too long and was cut short."
 private const val MESSAGE_STOPPED = "Stopped. What arrived is shown above."
 private const val MESSAGE_STOPPED_EMPTY = "Stopped."
+private const val MESSAGE_APPLY_STOPPED = "Stopped. Nothing was changed."
+private const val MESSAGE_ALREADY_UNDONE = "This build was already undone, or it is too old to undo."
 private const val MAX_NOTICE_FILES = 3
 private const val MAX_PROJECT_NOTES = 5
 private const val FILE_TAG = "<file path=\""
@@ -118,6 +120,7 @@ private class LiveReply(val id: Long, val startedAt: Long) {
     var chars = 0
     var dirty = true
     var lastSecond = 0L
+    var plan: CoderFilePlan? = null
 
     fun move(event: CoderStageEvent) {
         stage = CoderAiStages.next(stage, event)
@@ -135,6 +138,7 @@ private class LiveReply(val id: Long, val startedAt: Long) {
         stopped = stopped,
         interrupted = interrupted,
         elapsedMillis = (endedAt ?: now) - startedAt,
+        plan = plan,
     )
 }
 
@@ -421,7 +425,9 @@ class CoderAiViewModel(
                 val history = historyFor(questionId, prepared.turn.text)
                 val end = collectAnswer(config, live, history)
                 if (activeRequest != mine) return@launch
-                conclude(live, questionId, end)
+                val plan = planFor(end, live)
+                if (activeRequest != mine) return@launch
+                conclude(live, questionId, end, plan)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -517,14 +523,18 @@ class CoderAiViewModel(
         }
     }
 
-    /** Ends the answer [live]: shows its final form, or, when no text came at all, marks the question as not sent. */
-    private fun conclude(live: LiveReply, questionId: Long, end: StreamEnd) {
+    /**
+     * Ends the answer [live]: shows its final form, or, when no text came at all, marks the question as not sent.
+     * [plan] is kept only for an answer that ended normally (the provider finished it and it was not cut short).
+     */
+    private fun conclude(live: LiveReply, questionId: Long, end: StreamEnd, plan: CoderFilePlan? = null) {
         val now = SystemClock.elapsedRealtime()
         when (end) {
             is StreamEnd.Done -> {
                 live.parser.finish()
                 live.truncated = end.truncated
                 live.move(if (end.truncated) CoderStageEvent.StreamCutShort else CoderStageEvent.StreamFinished)
+                live.plan = if (end.truncated) null else plan
                 settle(live, now, null)
             }
             StreamEnd.TooLong -> {
@@ -567,6 +577,103 @@ class CoderAiViewModel(
                 messages = s.messages.map { if (it.id == live.id) message else it },
                 isSending = false,
                 failureKind = kind,
+            )
+        }
+    }
+
+    // ---- File plan -------------------------------------------------------------------------
+
+    /**
+     * The file plan of an answer that ended normally, or null (the answer was cut short, stopped or broke off, or it
+     * has fewer than two files). Reads the project's file list on the IO dispatcher, and only when a plan is possible.
+     */
+    private suspend fun planFor(end: StreamEnd, live: LiveReply): CoderFilePlan? {
+        if (end !is StreamEnd.Done || end.truncated) return null
+        live.parser.finish()
+        val blocks = ArrayList<CoderCodeBlock>()
+        for (segment in live.parser.segments) {
+            if (segment is CoderReplySegment.Code) blocks.add(segment.block)
+        }
+        if (!CoderApplyPlan.worthOffering(blocks)) return null
+        val existing = withContext(Dispatchers.IO) {
+            files.listAll(projectId).filter { !it.isDirectory }.mapTo(HashSet<String>()) { it.path }
+        }
+        return CoderApplyPlan.offer(blocks, existing)
+    }
+
+    /** Checks or unchecks one file of the plan of message [messageId]. Ignored while an apply or an undo runs, and for a file that can't be applied. */
+    fun togglePlanFile(messageId: Long, path: String) {
+        updatePlan(messageId) { plan ->
+            if (plan.phase != CoderPlanPhase.Idle) plan else CoderApplyPlan.toggle(plan, path)
+        }
+    }
+
+    /**
+     * Applies the checked files of the plan of message [messageId] through [run] (the workspace does the writing and
+     * the backup) and shows the result line on the card. Does nothing while the plan is busy or applied, or when no
+     * file is checked. Nothing is applied unless this is called, and the screen calls it only after the person confirmed.
+     */
+    fun applyPlan(messageId: Long, run: suspend (List<CoderApplyItem>) -> CoderApplyResult) {
+        val plan = _state.value.messages.firstOrNull { it.id == messageId }?.plan ?: return
+        if (plan.phase != CoderPlanPhase.Idle) return
+        val items = CoderApplyPlan.itemsFor(plan)
+        if (items.isEmpty()) return
+        updatePlan(messageId) { it.copy(phase = CoderPlanPhase.Working, note = null) }
+        viewModelScope.launch {
+            val result = try {
+                run(items)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                CoderApplyResult.Refused(MESSAGE_UNEXPECTED)
+            }
+            updatePlan(messageId) { current -> planAfterApply(current, result) }
+        }
+    }
+
+    /**
+     * Undoes the build that the plan of message [messageId] made, through [run], which gets the backup id. Does nothing
+     * unless the plan is applied. When the undo can't finish the card stays applied, so it can be tried again.
+     */
+    fun undoPlan(messageId: Long, run: suspend (String) -> CoderUndoResult) {
+        val plan = _state.value.messages.firstOrNull { it.id == messageId }?.plan ?: return
+        val applied = plan.phase as? CoderPlanPhase.Applied ?: return
+        updatePlan(messageId) { it.copy(phase = CoderPlanPhase.Working, note = null) }
+        viewModelScope.launch {
+            val result = try {
+                run(applied.backupId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                CoderUndoResult.Failed(MESSAGE_UNEXPECTED)
+            }
+            updatePlan(messageId) { current -> planAfterUndo(current, applied, result) }
+        }
+    }
+
+    private fun planAfterApply(plan: CoderFilePlan, result: CoderApplyResult): CoderFilePlan = when (result) {
+        is CoderApplyResult.Applied ->
+            plan.copy(phase = CoderPlanPhase.Applied(result.backupId), note = CoderAiApply.appliedLine(result))
+        is CoderApplyResult.Refused -> plan.copy(phase = CoderPlanPhase.Idle, note = result.message)
+        is CoderApplyResult.RolledBack -> plan.copy(phase = CoderPlanPhase.Idle, note = result.message)
+        CoderApplyResult.Cancelled -> plan.copy(phase = CoderPlanPhase.Idle, note = MESSAGE_APPLY_STOPPED)
+    }
+
+    private fun planAfterUndo(plan: CoderFilePlan, applied: CoderPlanPhase.Applied, result: CoderUndoResult): CoderFilePlan =
+        when (result) {
+            is CoderUndoResult.Done -> plan.copy(phase = CoderPlanPhase.Idle, note = CoderAiApply.undoLine(result))
+            is CoderUndoResult.Failed -> plan.copy(phase = applied, note = result.message)
+            CoderUndoResult.NoBackup -> plan.copy(phase = CoderPlanPhase.Idle, note = MESSAGE_ALREADY_UNDONE)
+        }
+
+    /** Changes the plan of message [messageId] with [change]; nothing happens when the message or its plan is gone. */
+    private fun updatePlan(messageId: Long, change: (CoderFilePlan) -> CoderFilePlan) {
+        _state.update { s ->
+            s.copy(
+                messages = s.messages.map { m ->
+                    val current = m.plan
+                    if (m.id == messageId && current != null) m.copy(plan = change(current)) else m
+                },
             )
         }
     }

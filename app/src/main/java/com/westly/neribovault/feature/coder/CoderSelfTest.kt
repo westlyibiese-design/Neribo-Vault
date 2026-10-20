@@ -25,7 +25,14 @@ import com.westly.neribovault.feature.coder.ai.AiSelectionSnapshot
 import com.westly.neribovault.feature.coder.ai.CODER_SYSTEM_PROMPT
 import com.westly.neribovault.feature.coder.ai.ChatRole
 import com.westly.neribovault.feature.coder.ai.CODER_AI_IDEAS
+import com.westly.neribovault.feature.coder.ai.CoderAiApply
 import com.westly.neribovault.feature.coder.ai.CoderAiClient
+import com.westly.neribovault.feature.coder.ai.CoderApplyItem
+import com.westly.neribovault.feature.coder.ai.CoderApplyLimits
+import com.westly.neribovault.feature.coder.ai.CoderApplyPlan
+import com.westly.neribovault.feature.coder.ai.CoderApplyResult
+import com.westly.neribovault.feature.coder.ai.CoderPlanRow
+import com.westly.neribovault.feature.coder.ai.CoderUndoResult
 import com.westly.neribovault.feature.coder.ai.CoderAiProgress
 import com.westly.neribovault.feature.coder.ai.CoderAiStage
 import com.westly.neribovault.feature.coder.ai.CoderAiStages
@@ -279,6 +286,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(c15aChecks(store))
         results.addAll(c15bChecks(store))
         results.addAll(c16aChecks())
+        results.addAll(c16bChecks(store))
     } finally {
         root.deleteRecursively()
     }
@@ -2048,8 +2056,9 @@ private fun infoInTurnChecks(): List<CoderCheckResult> {
             absurd.text.length <= 120_000 && absurd.text.contains("q".repeat(20_000)) &&
                 !absurd.text.contains("q".repeat(20_001))
         },
-        check("System prompt names the project info and notes tags", "the new tag list") {
-            CODER_SYSTEM_PROMPT.contains("Text inside <file>, <selection>, <console>, <project_info> and <notes> tags")
+        check("System prompt names the project info and notes tags and has the say-first rule", "the new tag list and the say-first rule") {
+            CODER_SYSTEM_PROMPT.contains("Text inside <file>, <selection>, <console>, <project_info> and <notes> tags") &&
+                CODER_SYSTEM_PROMPT.contains("- Before the code, say in one short sentence what you are going to do and which files you will create or change.")
         },
     )
 }
@@ -5485,3 +5494,324 @@ private fun c16MiscChecks(): List<CoderCheckResult> = listOf(
 private fun c16aChecks(): List<CoderCheckResult> =
     c16SseChecks() + c16EventChecks() + c16DecoderChecks() + c16ParserChecks() + c16StageChecks() +
         c16GateChecks() + c16RequestChecks() + c16MiscChecks()
+
+// ---- C16 Part B: file plan, apply with backup, undo --------------------------------------------
+
+private val C16B_BOM = byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte())
+
+private fun c16bBlock(path: String?, code: String = "x", unfinished: Boolean = false): CoderCodeBlock =
+    CoderCodeBlock("js", path, code, unfinished)
+
+private fun c16bRows(vararg blocks: CoderCodeBlock, existing: Set<String> = emptySet(), limits: CoderApplyLimits = CoderApplyLimits()): List<CoderPlanRow> =
+    CoderApplyPlan.build(blocks.toList(), existing, limits)
+
+private fun c16bRefused(path: String): String =
+    if (c16bRows(c16bBlock(path)).single().canApply) "applies" else "refused"
+
+private fun c16bPut(store: CoderFileStore, id: String, path: String, bytes: ByteArray) {
+    val file = store.resolve(id, path) ?: throw IOException("bad path $path")
+    file.parentFile?.mkdirs()
+    file.writeBytes(bytes)
+}
+
+private fun c16bSeed(store: CoderFileStore, id: String): Map<String, ByteArray> {
+    val seed = linkedMapOf(
+        "a.txt" to (C16B_BOM + "one\r\ntwo\r\n".toByteArray(Charsets.UTF_8)),
+        "src/b.js" to "let b = 1;\n".toByteArray(Charsets.UTF_8),
+        "c.css" to "body {\r\n  color: red;\r\n}\r\n".toByteArray(Charsets.UTF_8),
+    )
+    for ((path, bytes) in seed) c16bPut(store, id, path, bytes)
+    return seed
+}
+
+private fun c16bItems(): List<CoderApplyItem> = listOf(
+    CoderApplyItem("a.txt", "ONE\nTWO\n"),
+    CoderApplyItem("src/b.js", "let b = 2;\n"),
+    CoderApplyItem("c.css", "body {\n  color: blue;\n}\n"),
+    CoderApplyItem("new1.js", "console.log(1);\n"),
+    CoderApplyItem("pages/new2.html", "<p>hi</p>\n"),
+)
+
+private fun c16bText(store: CoderFileStore, id: String, path: String): String =
+    fileBytes(store, id, path)?.toString(Charsets.UTF_8) ?: "(missing)"
+
+private fun c16bExists(store: CoderFileStore, id: String, path: String): Boolean = store.resolve(id, path)?.exists() == true
+
+private fun c16bSameBytes(store: CoderFileStore, id: String, seed: Map<String, ByteArray>): Boolean =
+    seed.all { (path, bytes) -> fileBytes(store, id, path)?.contentEquals(bytes) == true }
+
+private fun c16bChecks(store: CoderFileStore): List<CoderCheckResult> {
+    val r = ArrayList<CoderCheckResult>()
+    // Plan rules
+    r.add(c16Check("Plan: a .coder-backup path is refused", "refused") { c16bRefused(".coder-backup/x/a.js") })
+    r.add(c16Check("Plan: any .coder prefix is refused, ignoring case", "refused|refused") { c16bRefused(".coder-build/a.js") + "|" + c16bRefused(".CODER/a.js") })
+    r.add(c16Check("Plan: .git and .github folders are refused", "refused|refused") { c16bRefused(".git/config") + "|" + c16bRefused(".github/workflows/ci.yml") })
+    r.add(c16Check("Plan: .gitignore, .github-notes.md and .envrc are allowed", "applies|applies|applies") {
+        c16bRefused(".gitignore") + "|" + c16bRefused(".github-notes.md") + "|" + c16bRefused(".envrc")
+    })
+    r.add(c16Check("Plan: .env and .env.local are refused, at any depth", "refused|refused|refused") {
+        c16bRefused(".env") + "|" + c16bRefused(".env.local") + "|" + c16bRefused("config/.env")
+    })
+    r.add(c16Check("Plan: .env.example is allowed", "applies") { c16bRefused(".env.example") })
+    r.add(check("Plan: a refused folder says the AI can't change it", "reason starts with The AI can't change") {
+        c16bRows(c16bBlock(".github/a.yml")).single().reason?.startsWith("The AI can't change") == true
+    })
+    r.add(c16Check("Plan: invalid paths are refused", "refused|refused") { c16bRefused("../x.js") + "|" + c16bRefused("a//b.js") })
+    r.add(c16Check("Plan: a block without a path gets no row", "1") { c16bRows(c16bBlock(null), c16bBlock("a.js")).size.toString() })
+    r.add(c16Check("Plan: an unfinished block is refused", "refused|true") {
+        val row = c16bRows(c16bBlock("a.js", unfinished = true)).single()
+        (if (row.canApply) "applies" else "refused") + "|" + row.unfinished
+    })
+    r.add(c16Check("Plan: same path twice, the last wins and the first is skipped", "skipped|applies|second") {
+        val rows = c16bRows(c16bBlock("a.js", "first"), c16bBlock("b.js"), c16bBlock("a.js", "second"))
+        (if (rows[0].canApply) "applies" else "skipped") + "|" + (if (rows[2].canApply) "applies" else "skipped") + "|" + rows[2].code
+    })
+    r.add(c16Check("Plan: exactly 300000 bytes is allowed, one more is refused", "applies|refused") {
+        val ok = c16bRows(c16bBlock("a.js", "a".repeat(300_000))).single().canApply
+        val big = c16bRows(c16bBlock("a.js", "a".repeat(300_001))).single()
+        (if (ok) "applies" else "refused") + "|" + (if (big.canApply) "applies" else "refused")
+    })
+    r.add(c16Check("Plan: size counts UTF-8 bytes", "2|refused") {
+        val small = c16bRows(c16bBlock("a.js", "\u00E9")).single().sizeBytes
+        val big = c16bRows(c16bBlock("a.js", "\u00E9".repeat(150_001))).single()
+        small.toString() + "|" + (if (big.canApply) "applies" else "refused")
+    })
+    r.add(c16Check("Plan: 20 files apply, the 21st is refused", "20|1") {
+        val rows = c16bRows(*Array(21) { c16bBlock("f$it.js") })
+        rows.count { it.canApply }.toString() + "|" + rows.count { !it.canApply }
+    })
+    r.add(c16Check("Plan: the total past 2 MB is refused", "7|1") {
+        val rows = c16bRows(*Array(8) { c16bBlock("f$it.js", "a".repeat(290_000)) })
+        rows.count { it.canApply }.toString() + "|" + rows.count { it.reason?.contains("2 MB") == true }
+    })
+    r.add(c16Check("Plan: New and Replaces follow the existing files", "Replaces|New") {
+        val rows = c16bRows(c16bBlock("a.js"), c16bBlock("b.js"), existing = setOf("a.js"))
+        rows[0].status.name + "|" + rows[1].status.name
+    })
+    r.add(c16Check("Plan: default limits are 20 files and 2 MB", "20|2097152|300000") {
+        val l = CoderApplyLimits()
+        "${l.maxFiles}|${l.maxTotalBytes}|${l.maxFileBytes}"
+    })
+    r.add(c16Check("Offer: needs two finished files with different valid paths", "null|plan|null|null|plan") {
+        fun show(vararg b: CoderCodeBlock) = if (CoderApplyPlan.offer(b.toList(), emptySet()) == null) "null" else "plan"
+        listOf(
+            show(c16bBlock("a.js")),
+            show(c16bBlock("a.js"), c16bBlock("b.js")),
+            show(c16bBlock("a.js"), c16bBlock("a.js")),
+            show(c16bBlock("a.js"), c16bBlock("b.js", unfinished = true)),
+            show(c16bBlock("a.js"), c16bBlock("b.js"), c16bBlock("c.js", unfinished = true)),
+        ).joinToString("|")
+    })
+    r.add(c16Check("Offer: refused and unfinished files start unchecked", "a.js,b.js") {
+        val plan = CoderApplyPlan.offer(listOf(c16bBlock("a.js"), c16bBlock(".env"), c16bBlock("b.js"), c16bBlock("c.js", unfinished = true)), emptySet())
+        plan?.selected?.joinToString(",") ?: "null"
+    })
+    r.add(c16Check("Plan: toggle flips a file, ignores a refused one, and itemsFor follows", "b.js|a.js,b.js|b.js") {
+        val plan = CoderApplyPlan.offer(listOf(c16bBlock("a.js"), c16bBlock("b.js"), c16bBlock(".env")), emptySet())
+        if (plan == null) "null" else {
+            val off = CoderApplyPlan.toggle(plan, "a.js")
+            val same = CoderApplyPlan.toggle(plan, ".env")
+            CoderApplyPlan.itemsFor(off).joinToString(",") { it.path } + "|" +
+                CoderApplyPlan.itemsFor(same).joinToString(",") { it.path } + "|" +
+                CoderApplyPlan.itemsFor(off).joinToString(",") { it.path }
+        }
+    })
+    r.add(c16Check("Plan: counts and confirm text", "2,1|Creates 2 new files and replaces 1 file. A backup of the replaced files is saved so you can undo this.") {
+        val plan = CoderApplyPlan.offer(listOf(c16bBlock("a.js"), c16bBlock("b.js"), c16bBlock("c.js")), setOf("a.js"))
+        if (plan == null) "null" else {
+            val c = CoderApplyPlan.counts(plan)
+            "${c.first},${c.second}|" + CoderApplyPlan.confirmText(c.first, c.second)
+        }
+    })
+    r.add(c16Check("Plan: one new file reads in the singular", "Creates 1 new file and replaces 0 files.") {
+        CoderApplyPlan.confirmText(1, 0).substringBefore(" A backup")
+    })
+    r.add(c16Check("Plan: Copy all skips unfinished files and names each path", "true|false") {
+        val rows = c16bRows(c16bBlock("a.js", "AAA"), c16bBlock("b.js", "BBB", unfinished = true))
+        val text = CoderApplyPlan.copyAllText(rows)
+        (text.contains("a.js") && text.contains("AAA")).toString() + "|" + text.contains("BBB")
+    })
+    r.add(c16Check("Plan: sizes and header texts", "0 B|1.5 KB|The AI wrote 3 files") {
+        CoderApplyPlan.sizeText(0) + "|" + CoderApplyPlan.sizeText(1536) + "|" + CoderApplyPlan.headerText(3)
+    })
+    r.add(c16Check("Message: a chat message has no plan by default", "null") { CoderChatMessage(1L, ChatRole.Assistant, "hi").plan.toString() })
+    r.add(c16Check("Prompt: the say-first rule follows the complete-files rule", "true") {
+        val complete = CODER_SYSTEM_PROMPT.indexOf("- When you change a file, give the COMPLETE new content")
+        val first = CODER_SYSTEM_PROMPT.indexOf("- Before the code, say in one short sentence what you are going to do and which files you will create or change.")
+        (complete in 0 until first).toString()
+    })
+    r.add(c16Check("Apply: limits and ids", "20971520|5|0000000001006") {
+        "${CoderAiApply.MAX_BACKUP_BYTES}|${CoderAiApply.KEEP_BACKUPS}|${CoderAiApply.backupIdFor(1006L)}"
+    })
+    r.add(c16Check("Apply: result lines", "Created 2, replaced 1|Created 1, replaced 0. The editor history of 1 open file was cleared.|Undone: removed 1 file, restored 2 files. x.js was edited after the AI build, so it was kept.") {
+        CoderAiApply.appliedLine(CoderApplyResult.Applied("b", listOf("x", "y"), listOf("a"))) + "|" +
+            CoderAiApply.appliedLine(CoderApplyResult.Applied("b", listOf("x"), emptyList(), listOf("q"))) + "|" +
+            CoderAiApply.undoLine(CoderUndoResult.Done(listOf("n"), listOf("a", "b"), listOf("x.js")))
+    })
+
+    // Applying on the disk
+    r.add(c16Check("Apply then undo: created and replaced files, CRLF kept, exact bytes back", "true|true|true|true|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val result = CoderAiApply.apply(store, id, c16bItems(), now = 1000L)
+            val applied = result as? CoderApplyResult.Applied
+            val crlfKept = c16bText(store, id, "a.txt") == "ONE\r\nTWO\r\n" && c16bText(store, id, "c.css") == "body {\r\n  color: blue;\r\n}\r\n"
+            val lfKept = c16bText(store, id, "src/b.js") == "let b = 2;\n"
+            val created = c16bText(store, id, "new1.js") == "console.log(1);\n" && c16bText(store, id, "pages/new2.html") == "<p>hi</p>\n"
+            val lists = applied != null && applied.created == listOf("new1.js", "pages/new2.html") && applied.replaced.size == 3
+            val undo = CoderAiApply.undo(store, id, applied?.backupId ?: "")
+            val back = c16bSameBytes(store, id, seed) && !c16bExists(store, id, "new1.js") && !c16bExists(store, id, "pages")
+            val gone = CoderAiApply.backupIds(store, id).isEmpty() && undo is CoderUndoResult.Done
+            "$lists|$crlfKept|$lfKept|$created|$back|$gone"
+        }
+    })
+    r.add(c16Check("Apply: backup holds exact copies and a manifest, hidden from every listing", "true|true|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val applied = CoderAiApply.apply(store, id, c16bItems(), now = 2000L) as? CoderApplyResult.Applied
+            val bid = applied?.backupId ?: "none"
+            val copy = fileBytes(store, id, ".coder-backup/$bid/files/a.txt")?.contentEquals(seed["a.txt"]) == true
+            val manifest = try {
+                val o = JSONObject(c16bText(store, id, ".coder-backup/$bid/manifest.json"))
+                o.has("createdPaths") && o.has("replacedPaths") && o.getLong("createdAtMillis") == 2000L
+            } catch (e: Exception) {
+                false
+            }
+            val hidden = store.listAll(id).none { it.path.startsWith(".coder") } && store.listAll(id, true).any { it.path == ".coder-backup" }
+            val counts = store.fileCount(id) == 5 && store.projectSizeBytes(id) == store.listAll(id).filter { !it.isDirectory }.sumOf { it.sizeBytes }
+            "$copy|$manifest|$hidden|$counts"
+        }
+    })
+    r.add(c16Check("Apply: a project file named manifest.json is replaced and restored", "true") {
+        withTempProject(store) { id ->
+            val original = "{\"a\":1}\n".toByteArray(Charsets.UTF_8)
+            c16bPut(store, id, "manifest.json", original)
+            val applied = CoderAiApply.apply(store, id, listOf(CoderApplyItem("manifest.json", "{\"a\":2}\n")), now = 3000L)
+            val id2 = (applied as? CoderApplyResult.Applied)?.backupId ?: ""
+            CoderAiApply.undo(store, id, id2)
+            (applied is CoderApplyResult.Applied && fileBytes(store, id, "manifest.json")?.contentEquals(original) == true).toString()
+        }
+    })
+    r.add(c16Check("Apply: a failing write rolls everything back and leaves no backup or temp file", "RolledBack|true|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val items = listOf(
+                CoderApplyItem("a.txt", "NEW A\n"),
+                CoderApplyItem("src/b.js", "NEW B\n"),
+                CoderApplyItem("x", "a file\n"),
+                CoderApplyItem("x/y.js", "inside a file\n"),
+            )
+            val result = CoderAiApply.apply(store, id, items, now = 4000L)
+            val name = result.javaClass.simpleName
+            val restored = c16bSameBytes(store, id, seed) && !c16bExists(store, id, "x")
+            val clean = CoderAiApply.backupIds(store, id).isEmpty() && store.resolve(id, ".coder-backup")?.list().orEmpty().isEmpty()
+            "$name|$restored|$clean|${tempLeftovers(store, id).isEmpty()}"
+        }
+    })
+    r.add(c16Check("Apply: stopping before the first step changes nothing", "Cancelled|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val result = CoderAiApply.apply(store, id, c16bItems(), shouldContinue = { false }, now = 5000L)
+            "${result.javaClass.simpleName}|${c16bSameBytes(store, id, seed)}|${!c16bExists(store, id, "new1.js")}"
+        }
+    })
+    r.add(c16Check("Apply: stopping after the first write puts the project back", "Cancelled|true|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            var calls = 0
+            val items = listOf(CoderApplyItem("a.txt", "NEW\n"), CoderApplyItem("b.txt", "fresh\n"))
+            val result = CoderAiApply.apply(store, id, items, shouldContinue = { ++calls < 3 }, now = 5100L)
+            "${result.javaClass.simpleName}|${c16bSameBytes(store, id, seed)}|${!c16bExists(store, id, "b.txt")}|${CoderAiApply.backupIds(store, id).isEmpty()}"
+        }
+    })
+    r.add(c16Check("Apply: a backup over the limit is refused and nothing changes", "Refused|These files are too large to back up safely. Apply them one at a time.|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val result = CoderAiApply.apply(store, id, listOf(CoderApplyItem("a.txt", "x\n")), now = 6000L, maxBackupBytes = 5L)
+            val refused = result as? CoderApplyResult.Refused
+            "${result.javaClass.simpleName}|${refused?.message}|${c16bSameBytes(store, id, seed)}|${store.resolve(id, ".coder-backup")?.list().orEmpty().isEmpty()}"
+        }
+    })
+    r.add(c16Check("Apply: a backup exactly at the limit is allowed", "Applied") {
+        withTempProject(store) { id ->
+            c16bPut(store, id, "a.txt", "12345".toByteArray(Charsets.UTF_8))
+            CoderAiApply.apply(store, id, listOf(CoderApplyItem("a.txt", "x\n")), now = 6100L, maxBackupBytes = 5L).javaClass.simpleName
+        }
+    })
+    r.add(c16Check("Apply: protected paths, too many files and an empty list are refused before any write", "Refused|Refused|Refused|true") {
+        withTempProject(store) { id ->
+            val hidden = CoderAiApply.apply(store, id, listOf(CoderApplyItem(".coder-x/a.txt", "x")))
+            val many = CoderAiApply.apply(store, id, List(21) { CoderApplyItem("f$it.txt", "x") })
+            val empty = CoderAiApply.apply(store, id, emptyList())
+            "${hidden.javaClass.simpleName}|${many.javaClass.simpleName}|${empty.javaClass.simpleName}|${!c16bExists(store, id, ".coder-x")}"
+        }
+    })
+    r.add(c16Check("Apply: a folder, a binary file or a file in the way refuses the whole apply", "true|true|true|true") {
+        withTempProject(store) { id ->
+            c16bSeed(store, id)
+            store.createFolder(id, "dir")
+            c16bPut(store, id, "bin.dat", byteArrayOf(1, 0, 2, 0, 3))
+            val folder = CoderAiApply.apply(store, id, listOf(CoderApplyItem("dir", "x"))) as? CoderApplyResult.Refused
+            val binary = CoderAiApply.apply(store, id, listOf(CoderApplyItem("bin.dat", "x"))) as? CoderApplyResult.Refused
+            val way = CoderAiApply.apply(store, id, listOf(CoderApplyItem("a.txt/z.js", "x"))) as? CoderApplyResult.Refused
+            val untouched = c16bText(store, id, "src/b.js") == "let b = 1;\n"
+            "${folder?.message?.contains("is a folder") == true}|${binary?.message?.contains("isn't a text file") == true}|${way?.message?.contains("is a file") == true}|$untouched"
+        }
+    })
+    r.add(c16Check("Undo: a created file edited since is kept and reported, the rest is undone", "true|true|true|true|true") {
+        withTempProject(store) { id ->
+            val seed = c16bSeed(store, id)
+            val applied = CoderAiApply.apply(store, id, c16bItems(), now = 7000L) as? CoderApplyResult.Applied
+            c16bPut(store, id, "new1.js", "my own edit\n".toByteArray(Charsets.UTF_8))
+            val done = CoderAiApply.undo(store, id, applied?.backupId ?: "") as? CoderUndoResult.Done
+            val kept = done?.kept == listOf("new1.js") && c16bText(store, id, "new1.js") == "my own edit\n"
+            val removed = done?.deleted == listOf("pages/new2.html") && !c16bExists(store, id, "pages")
+            val restored = done?.restored?.size == 3 && c16bSameBytes(store, id, seed)
+            val line = done != null && CoderAiApply.undoLine(done).contains("new1.js was edited after the AI build, so it was kept.")
+            val gone = CoderAiApply.backupIds(store, id).isEmpty()
+            "$kept|$removed|$restored|$line|$gone"
+        }
+    })
+    r.add(c16Check("Undo: a second undo and an undo with no backup say there is none", "NoBackup|NoBackup|NoBackup") {
+        withTempProject(store) { id ->
+            c16bSeed(store, id)
+            val bid = (CoderAiApply.apply(store, id, c16bItems(), now = 8000L) as? CoderApplyResult.Applied)?.backupId ?: ""
+            CoderAiApply.undo(store, id, bid)
+            val again = CoderAiApply.undo(store, id, bid).javaClass.simpleName
+            val last = CoderAiApply.undoLast(store, id).javaClass.simpleName
+            val bad = CoderAiApply.undo(store, id, "../x").javaClass.simpleName
+            "$again|$last|$bad"
+        }
+    })
+    r.add(c16Check("Undo last: undoes only the newest build", "true|true|true") {
+        withTempProject(store) { id ->
+            CoderAiApply.apply(store, id, listOf(CoderApplyItem("one.txt", "1")), now = 9000L)
+            CoderAiApply.apply(store, id, listOf(CoderApplyItem("two.txt", "2")), now = 9001L)
+            val latest = CoderAiApply.latestBackupId(store, id) == CoderAiApply.backupIdFor(9001L)
+            CoderAiApply.undoLast(store, id)
+            "$latest|${!c16bExists(store, id, "two.txt")}|${c16bExists(store, id, "one.txt")}"
+        }
+    })
+    r.add(c16Check("Backups: only the last 5 are kept, newest first", "5|true|5") {
+        withTempProject(store) { id ->
+            for (i in 0..6) CoderAiApply.apply(store, id, listOf(CoderApplyItem("f$i.txt", "x")), now = 1000L + i)
+            val ids = CoderAiApply.backupIds(store, id)
+            val expected = (1006L downTo 1002L).map { CoderAiApply.backupIdFor(it) }
+            "${ids.size}|${ids == expected}|${store.resolve(id, ".coder-backup")?.list()?.size}"
+        }
+    })
+    r.add(c16Check("Backups: a failed apply does not remove an older backup", "1") {
+        withTempProject(store) { id ->
+            CoderAiApply.apply(store, id, listOf(CoderApplyItem("one.txt", "1")), now = 100L, keep = 1)
+            CoderAiApply.apply(store, id, listOf(CoderApplyItem("x", "f"), CoderApplyItem("x/y.js", "z")), now = 101L, keep = 1)
+            CoderAiApply.backupIds(store, id).size.toString()
+        }
+    })
+    r.add(c16Check("Plan: a path inside the backup folder is refused", "refused") {
+        withTempProject(store) { id ->
+            val bid = (CoderAiApply.apply(store, id, listOf(CoderApplyItem("one.txt", "1")), now = 50L) as? CoderApplyResult.Applied)?.backupId ?: ""
+            c16bRefused(".coder-backup/$bid/files/one.txt")
+        }
+    })
+    return r
+}

@@ -13,7 +13,7 @@ enum class ChatRole { User, Assistant }
  * and code pieces so far (empty for a question), [openBlock] the code block being written right now, [stage] the
  * real step it is in, [stopped] true when the person tapped Stop, [interrupted] true when the connection or the
  * provider failed after some text had arrived, and [elapsedMillis] the time since the question was sent (frozen
- * when the answer ended).
+ * when the answer ended). [plan] is the file plan of an answer that ended normally with two or more files in it.
  */
 data class CoderChatMessage(
     val id: Long,
@@ -28,6 +28,25 @@ data class CoderChatMessage(
     val stopped: Boolean = false,
     val interrupted: Boolean = false,
     val elapsedMillis: Long = 0L,
+    val plan: CoderFilePlan? = null,
+)
+
+/** Where a file plan is: waiting for a choice, busy applying or undoing, or applied (and undoable with the backup [backupId]). */
+sealed interface CoderPlanPhase {
+    object Idle : CoderPlanPhase
+    object Working : CoderPlanPhase
+    data class Applied(val backupId: String) : CoderPlanPhase
+}
+
+/**
+ * The files an answer wrote, offered together. [rows] are the files in the order of the answer, [selected] the
+ * paths that are checked, [phase] what the card is doing and [note] the result line of the last apply or undo.
+ */
+data class CoderFilePlan(
+    val rows: List<CoderPlanRow>,
+    val selected: Set<String>,
+    val phase: CoderPlanPhase = CoderPlanPhase.Idle,
+    val note: String? = null,
 )
 
 /** The answer of [CoderAiClient.chat]. A [Failure] message is plain English and never holds the key or the user's code. */

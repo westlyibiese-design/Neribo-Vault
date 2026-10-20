@@ -8,6 +8,10 @@ import androidx.lifecycle.viewModelScope
 import com.westly.neribovault.data.local.entity.CoderProjectEntity
 import com.westly.neribovault.data.repository.CoderProjectsRepository
 import com.westly.neribovault.feature.coder.CoderPrefs
+import com.westly.neribovault.feature.coder.ai.CoderAiApply
+import com.westly.neribovault.feature.coder.ai.CoderApplyItem
+import com.westly.neribovault.feature.coder.ai.CoderApplyResult
+import com.westly.neribovault.feature.coder.ai.CoderUndoResult
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.CoderUndoStack
 import com.westly.neribovault.feature.coder.editor.smart.CoderAutoClose
@@ -127,6 +131,8 @@ private const val MSG_BAD_NAME = "That name can't be used. Avoid slashes and spe
 private const val MSG_EXISTS = "A file or folder with that name already exists."
 private const val MSG_LIMIT = "This project has reached its size or file limit."
 private const val MSG_FAILED = "Couldn't complete that. Please try again."
+private const val MSG_AI_SAVE_FIRST = "Couldn't save your open files first, so nothing was changed."
+private const val MSG_NO_AI_BACKUP = "There is no AI build to undo."
 private const val MSG_PREVIEW_NOT_STARTED = "Couldn't save, so the preview was not started."
 private const val MSG_BAD_PROJECT_NAME = "Project names can't be empty or longer than 60 characters."
 private const val MSG_TOO_MANY_MATCHES = "There are too many matches to replace at once. Search for something longer."
@@ -253,6 +259,11 @@ class CoderWorkspaceViewModel(
 
     private var importJob: Job? = null
 
+    private val _aiBackup = MutableStateFlow(false)
+
+    /** True while at least one AI build can still be undone (a backup exists). */
+    val aiBackupAvailable: StateFlow<Boolean> = _aiBackup.asStateFlow()
+
     init {
         viewModelScope.launch {
             prefs.suggestionsEnabled.collect { on ->
@@ -280,6 +291,7 @@ class CoderWorkspaceViewModel(
             _recentFiles.update { CoderRecentFiles.merge(it, saved) }
         }
         refreshEntries()
+        refreshAiBackup()
     }
 
     // ---- Files list ------------------------------------------------------------------------
@@ -1424,6 +1436,111 @@ class CoderWorkspaceViewModel(
         CoderWriteResult.AlreadyExists -> MSG_EXISTS
         CoderWriteResult.TooLarge, CoderWriteResult.LimitReached -> MSG_LIMIT
         CoderWriteResult.Failed -> MSG_FAILED
+    }
+
+    // ---- AI builds -------------------------------------------------------------------------
+
+    /** Looks again whether a backup exists, so the "Undo last AI build" entry shows or hides. */
+    fun refreshAiBackup() {
+        viewModelScope.launch {
+            _aiBackup.value = withContext(Dispatchers.IO) { CoderAiApply.latestBackupId(files, projectId) != null }
+        }
+    }
+
+    /**
+     * Writes the files of an AI plan: saves the open files first (nothing is applied when that fails), then applies
+     * [items] with a backup while no autosave can write. Open files that were replaced are read from the disk again
+     * (their editor history is cleared) and the file list is refreshed.
+     */
+    suspend fun applyAiPlan(items: List<CoderApplyItem>): CoderApplyResult {
+        if (!saveNow()) return CoderApplyResult.Refused(MSG_AI_SAVE_FIRST)
+        val result = saveMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val scope = this
+                CoderAiApply.apply(files, projectId, items, shouldContinue = { scope.isActive })
+            }
+        }
+        var outcome = result
+        if (result is CoderApplyResult.Applied) {
+            val reset = ArrayList<String>()
+            for (path in result.replaced) if (reloadTabFromDisk(path)) reset.add(path)
+            touchProject()
+            outcome = result.copy(tabsReset = reset)
+        }
+        refreshEntries()
+        refreshAiBackup()
+        return outcome
+    }
+
+    /**
+     * Undoes one AI build: the one with backup [backupId], or the newest when it is null. Saves the open files first so
+     * an edited file is noticed, then restores replaced files (open ones are read again) and removes created ones.
+     */
+    suspend fun undoAiBuild(backupId: String?): CoderUndoResult {
+        if (!saveNow()) return CoderUndoResult.Failed(MSG_AI_SAVE_FIRST)
+        val result = saveMutex.withLock {
+            withContext(Dispatchers.IO) {
+                if (backupId == null) CoderAiApply.undoLast(files, projectId) else CoderAiApply.undo(files, projectId, backupId)
+            }
+        }
+        if (result is CoderUndoResult.Done) {
+            for (path in result.restored) reloadTabFromDisk(path)
+            touchProject()
+        }
+        refreshEntries()
+        refreshAiBackup()
+        return result
+    }
+
+    /** The menu entry "Undo last AI build": undoes the newest backup and says what happened. */
+    fun undoLastAiBuild() {
+        viewModelScope.launch {
+            val text = when (val result = undoAiBuild(null)) {
+                is CoderUndoResult.Done -> CoderAiApply.undoLine(result)
+                is CoderUndoResult.Failed -> result.message
+                CoderUndoResult.NoBackup -> MSG_NO_AI_BACKUP
+            }
+            postMessage(text)
+        }
+    }
+
+    /**
+     * Replaces the text of the open tab [path] with what is on the disk, clearing its editor history. Returns true when
+     * a tab was reloaded. A tab whose file is gone is closed. Does nothing for a file that is not open.
+     */
+    suspend fun reloadTabFromDisk(path: String): Boolean {
+        if (tabStates[path] == null) return false
+        return saveMutex.withLock {
+            val tab = tabStates[path] ?: return@withLock false
+            when (val result = withContext(Dispatchers.IO) { files.read(projectId, path) }) {
+                is CoderReadResult.Text -> {
+                    tab.autosaveJob?.cancel()
+                    tab.undo.clear()
+                    tab.lastPushAt = 0L
+                    tab.lastKind = ChangeKind.None
+                    tab.saveFailed = false
+                    tab.scrollX = 0
+                    tab.scrollY = 0
+                    tab.usesCrlf = result.usesCrlf
+                    tab.lastSavedText = result.text
+                    tab.value = TextFieldValue(result.text, TextRange(0))
+                    if (active === tab) {
+                        clearSuggestions()
+                        clearIssues()
+                        _editorValue.value = tab.value
+                        if (_find.value.open) recomputeMatches(select = false)
+                        scheduleLint()
+                    }
+                    publishTabs()
+                    true
+                }
+                CoderReadResult.Missing -> {
+                    commitTabs(CoderTabLogic.removed(tabs, path), listOf(path))
+                    false
+                }
+                else -> false
+            }
+        }
     }
 
     private fun postMessage(text: String) {

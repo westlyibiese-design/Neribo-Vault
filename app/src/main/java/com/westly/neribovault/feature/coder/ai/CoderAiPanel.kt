@@ -86,6 +86,8 @@ private const val SAVE_CONFIRM_TIMEOUT_MS = 5_000L
  * from [selectionSnapshot], taken when the AI help button was tapped, because the editor loses its selection
  * as soon as it leaves the screen. [onReplaceSelection] replaces exactly the snapshot's range. [onOpenAndReplace]
  * saves the open file, opens another one and replaces all of its text; it returns false when that file could not be opened.
+ * An answer with several files shows a file plan: [onApplyPlan] writes the checked files with a backup (after the person
+ * confirmed) and [onUndoBuild] undoes one build by its backup id. Both are done by the workspace.
  */
 @Composable
 fun CoderAiPanel(
@@ -104,6 +106,8 @@ fun CoderAiPanel(
     onReplaceAll: (String) -> Unit,
     onOpenAndReplace: suspend (path: String, text: String) -> Boolean,
     onCreateFile: (path: String, text: String) -> Unit,
+    onApplyPlan: suspend (List<CoderApplyItem>) -> CoderApplyResult,
+    onUndoBuild: suspend (backupId: String) -> CoderUndoResult,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val setup by viewModel.setup.collectAsStateWithLifecycle()
@@ -125,6 +129,7 @@ fun CoderAiPanel(
     var openReplace by remember { mutableStateOf<Pair<String, String>?>(null) }
     var showPicker by rememberSaveable { mutableStateOf(false) }
     var showNewChat by remember { mutableStateOf(false) }
+    var confirmPlanId by remember { mutableStateOf<Long?>(null) }
 
     val showMessage: (String) -> Unit = { text ->
         scope.launch {
@@ -180,6 +185,13 @@ fun CoderAiPanel(
             pendingSave = path
             onCreateFile(path, code)
         },
+        onTogglePlan = { id, path -> viewModel.togglePlanFile(id, path) },
+        onApplyPlan = { id -> confirmPlanId = id },
+        onCopyPlan = { plan ->
+            clipboard.setText(AnnotatedString(CoderApplyPlan.copyAllText(plan.rows)))
+            showMessage("Copied")
+        },
+        onUndoPlan = { id -> viewModel.undoPlan(id, onUndoBuild) },
     )
 
     val readySetup = setup as? CoderAiSetup.Ready
@@ -230,7 +242,7 @@ fun CoderAiPanel(
                 linked = linked,
                 notesOn = notesOn,
                 ideasVisible = state.messages.isEmpty() && existingFiles.isNotEmpty() && guidanceMode == GuidanceMode.Beginner,
-                dialogOpen = showPicker || replaceCode != null || openReplace != null || showNewChat,
+                dialogOpen = showPicker || replaceCode != null || openReplace != null || showNewChat || confirmPlanId != null,
                 apply = apply,
                 onInput = { viewModel.setInput(it) },
                 onIdea = { viewModel.setInput(it) },
@@ -290,6 +302,21 @@ fun CoderAiPanel(
             destructive = true,
         )
     }
+    val planId = confirmPlanId
+    val planToApply = if (planId == null) null else state.messages.firstOrNull { it.id == planId }?.plan
+    if (planId != null && planToApply != null) {
+        val counts = CoderApplyPlan.counts(planToApply)
+        ConfirmDialog(
+            title = "Apply the AI's files?",
+            message = CoderApplyPlan.confirmText(counts.first, counts.second),
+            confirmLabel = "Apply",
+            onConfirm = {
+                confirmPlanId = null
+                viewModel.applyPlan(planId, onApplyPlan)
+            },
+            onDismiss = { confirmPlanId = null },
+        )
+    }
     if (showNewChat) {
         ConfirmDialog(
             title = "Start a new chat?",
@@ -317,6 +344,10 @@ private class ApplyOptions(
     val onReplaceFile: (String) -> Unit,
     val onOpenAndReplace: (String, String) -> Unit,
     val onSaveNew: (String, String) -> Unit,
+    val onTogglePlan: (Long, String) -> Unit,
+    val onApplyPlan: (Long) -> Unit,
+    val onCopyPlan: (CoderFilePlan) -> Unit,
+    val onUndoPlan: (Long) -> Unit,
 )
 
 @Composable
@@ -487,6 +518,7 @@ private class TextRow(val text: String, override val key: String) : ChatRow
 private class CodeRow(val block: CoderCodeBlock, override val key: String) : ChatRow
 private class OpenCodeRow(val block: OpenBlock, override val key: String) : ChatRow
 private class NoticeRow(val text: String, override val key: String) : ChatRow
+private class PlanItemRow(val messageId: Long, val plan: CoderFilePlan, override val key: String) : ChatRow
 private class InterruptedRow(val text: String, val isLast: Boolean, override val key: String) : ChatRow
 
 /** The rows of the list and, for each message id, the index of its first row. */
@@ -530,6 +562,8 @@ private fun buildRows(messages: List<CoderChatMessage>): BuiltRows {
         if (ended && rows.size == contentStart && !message.stopped && !message.interrupted) {
             rows.add(TextRow("(No text came back.)", "a${message.id}-empty"))
         }
+        val plan = message.plan
+        if (plan != null) rows.add(PlanItemRow(message.id, plan, "a${message.id}-plan"))
     }
     return BuiltRows(rows, firstIndex)
 }
@@ -601,6 +635,13 @@ private fun MessageList(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    is PlanItemRow -> FilePlanCard(
+                        plan = row.plan,
+                        onToggle = { apply.onTogglePlan(row.messageId, it) },
+                        onApply = { apply.onApplyPlan(row.messageId) },
+                        onCopyAll = { apply.onCopyPlan(row.plan) },
+                        onUndo = { apply.onUndoPlan(row.messageId) },
                     )
                     is InterruptedRow -> Column(verticalArrangement = Arrangement.spacedBy(spacing.xs)) {
                         Text(
