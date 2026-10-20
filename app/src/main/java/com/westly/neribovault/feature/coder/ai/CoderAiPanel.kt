@@ -589,7 +589,14 @@ private fun MessageList(
     var follow by remember { mutableStateOf(true) }
     LaunchedEffect(state.isSending) { if (state.isSending) follow = true }
     LaunchedEffect(listState) {
-        snapshotFlow { listState.isScrollInProgress && listState.lastScrolledBackward }.collect { if (it) follow = false }
+        var previous = 0L
+        snapshotFlow {
+            Triple(listState.isScrollInProgress, listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        }.collect { (scrolling, index, offset) ->
+            val position = index.toLong() * 1_000_000L + offset
+            if (scrolling && position < previous) follow = false
+            previous = position
+        }
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.canScrollForward }.collect { if (!it) follow = true }
