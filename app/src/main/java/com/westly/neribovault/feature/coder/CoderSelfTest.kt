@@ -24,7 +24,19 @@ import com.westly.neribovault.data.local.entity.ProjectEntity
 import com.westly.neribovault.feature.coder.ai.AiSelectionSnapshot
 import com.westly.neribovault.feature.coder.ai.CODER_SYSTEM_PROMPT
 import com.westly.neribovault.feature.coder.ai.ChatRole
+import com.westly.neribovault.feature.coder.ai.CODER_AI_IDEAS
 import com.westly.neribovault.feature.coder.ai.CoderAiClient
+import com.westly.neribovault.feature.coder.ai.CoderAiProgress
+import com.westly.neribovault.feature.coder.ai.CoderAiStage
+import com.westly.neribovault.feature.coder.ai.CoderAiStages
+import com.westly.neribovault.feature.coder.ai.CoderPublishGate
+import com.westly.neribovault.feature.coder.ai.CoderSseParser
+import com.westly.neribovault.feature.coder.ai.CoderStageEvent
+import com.westly.neribovault.feature.coder.ai.CoderStreamDecoder
+import com.westly.neribovault.feature.coder.ai.CoderStreamEvent
+import com.westly.neribovault.feature.coder.ai.CoderStreamEvents
+import com.westly.neribovault.feature.coder.ai.CoderStreamParser
+import com.westly.neribovault.feature.coder.ai.SseEvent
 import com.westly.neribovault.feature.coder.ai.CoderAiConfig
 import com.westly.neribovault.feature.coder.ai.CoderAiProvider
 import com.westly.neribovault.feature.coder.ai.CoderChatFailure
@@ -266,6 +278,7 @@ fun runCoderSelfTest(context: Context): List<CoderCheckResult> {
         results.addAll(buildAndEnvChecks(context, store))
         results.addAll(c15aChecks(store))
         results.addAll(c15bChecks(store))
+        results.addAll(c16aChecks())
     } finally {
         root.deleteRecursively()
     }
@@ -4805,3 +4818,670 @@ private fun c15bDuplicateChecks(store: CoderFileStore): List<CoderCheckResult> {
     })
     return out
 }
+
+// ---- Phase C16, Part A: streaming, progress and live code cards -----------------------------
+
+private fun c16Check(name: String, expected: String, actual: () -> String): CoderCheckResult =
+    check(name, expected, actual) { actual() == expected }
+
+private fun c16Frame(event: String?, json: String): String =
+    (if (event != null) "event: $event\n" else "") + "data: $json\n\n"
+
+private val C16_CLAUDE_STREAM: String =
+    c16Frame("message_start", """{"type":"message_start","message":{"id":"m1"}}""") +
+        c16Frame("ping", """{"type": "ping"}""") +
+        c16Frame("content_block_delta", """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello "}}""") +
+        c16Frame("content_block_delta", """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}""") +
+        c16Frame("message_delta", """{"type":"message_delta","delta":{"stop_reason":"end_turn"}}""") +
+        c16Frame("message_stop", """{"type":"message_stop"}""")
+
+private val C16_OPENAI_STREAM: String =
+    c16Frame(null, """{"choices":[{"delta":{"role":"assistant","content":""}}]}""") +
+        c16Frame(null, """{"choices":[{"delta":{"content":"Hi "},"finish_reason":null}]}""") +
+        c16Frame(null, """{"choices":[{"delta":{"content":"there"},"finish_reason":null}]}""") +
+        c16Frame(null, """{"choices":[{"delta":{},"finish_reason":"stop"}]}""") +
+        "data: [DONE]\n\n"
+
+private val C16_GEMINI_STREAM: String =
+    (c16Frame(null, """{"candidates":[{"content":{"parts":[{"text":"Hel"}],"role":"model"}}]}""") +
+        c16Frame(null, """{"candidates":[{"content":{"parts":[{"text":"lo"}],"role":"model"},"finishReason":"STOP"}]}""")
+        ).replace("\n", "\r\n")
+
+private fun c16Show(events: List<CoderStreamEvent>): String = events.joinToString("|") {
+    when (it) {
+        CoderStreamEvent.Started -> "S"
+        is CoderStreamEvent.Text -> "T:" + it.delta
+        is CoderStreamEvent.Finished -> "F:" + it.truncated
+        is CoderStreamEvent.Failed -> "X:" + it.kind.name
+    }
+}
+
+private fun c16Parse(provider: CoderAiProvider, data: String, name: String? = null): String =
+    c16Show(CoderStreamEvents.parse(provider, name, data))
+
+/** Runs a recorded stream through the decoder the way the client does: line by line, then the end. */
+private fun c16Run(provider: CoderAiProvider, stream: String): List<CoderStreamEvent> {
+    val decoder = CoderStreamDecoder(provider)
+    val out = ArrayList<CoderStreamEvent>()
+    val all = stream.split('\n').map { it.removeSuffix("\r") }
+    val lines = if (all.isNotEmpty() && all.last().isEmpty()) all.dropLast(1) else all
+    for (line in lines) {
+        if (decoder.isDone) break
+        out.addAll(decoder.feedLine(line))
+    }
+    out.addAll(decoder.end())
+    return out
+}
+
+private fun c16Sse(vararg pieces: String): List<SseEvent> {
+    val parser = CoderSseParser()
+    val out = ArrayList<SseEvent>()
+    for (piece in pieces) out.addAll(parser.feed(piece))
+    out.addAll(parser.finish())
+    return out
+}
+
+private fun c16SseSplitEverywhere(text: String): Boolean {
+    val whole = c16Sse(text)
+    for (i in 0..text.length) {
+        if (c16Sse(text.substring(0, i), text.substring(i)) != whole) return false
+    }
+    return true
+}
+
+private fun c16ShowSse(events: List<SseEvent>): String = events.joinToString("|") { (it.event ?: "-") + "=" + it.data }
+
+private fun c16Norm(list: List<CoderReplySegment>): List<CoderReplySegment> = list.map {
+    if (it is CoderReplySegment.Code) CoderReplySegment.Code(it.block.copy(unfinished = false)) else it
+}
+
+private fun c16Parser(vararg pieces: String): CoderStreamParser {
+    val parser = CoderStreamParser()
+    for (piece in pieces) parser.feed(piece)
+    return parser
+}
+
+private fun c16SameAtEveryCut(text: String): Boolean {
+    val expected = parseReply(text)
+    for (i in 0..text.length) {
+        val parser = c16Parser(text.substring(0, i), text.substring(i))
+        parser.finish()
+        if (c16Norm(parser.segments) != expected) return false
+    }
+    return true
+}
+
+private fun c16SameAtRandomCuts(text: String, seed: Long): Boolean {
+    val expected = parseReply(text)
+    val random = java.util.Random(seed)
+    repeat(40) {
+        val parser = CoderStreamParser()
+        var pos = 0
+        while (pos < text.length) {
+            val size = 1 + random.nextInt(11)
+            val end = minOf(text.length, pos + size)
+            parser.feed(text.substring(pos, end))
+            pos = end
+        }
+        parser.finish()
+        if (c16Norm(parser.segments) != expected) return false
+    }
+    return true
+}
+
+private fun c16SameCharByChar(text: String): Boolean {
+    val parser = CoderStreamParser()
+    for (ch in text) parser.feed(ch.toString())
+    parser.finish()
+    return c16Norm(parser.segments) == parseReply(text)
+}
+
+private val C16_REPLIES: List<String> = listOf(
+    "Hello\nworld",
+    "Here:\n```html path=index.html\n<p>Hi</p>\n```\nDone",
+    "```css path=style.css\na{}\n```\nand\n```js\nlet x = 1\n```",
+    "````md\n```js\nx\n```\n````\nafter",
+    "Look:\n```js\nlet a = 1;",
+    "A\r\n```js\r\nx\r\n```\r\nB\r\n",
+    "```html path=../x\n<p></p>\n```",
+    "```\n```",
+    "Intro\n\n\n```js path=a.js\nline1\n\nline3\n```\n\nOutro\n\n",
+    "Use ``` inline ``` here\n`code`\n   ```js\n  indented\n   ```\ntext",
+    "```js\nabc\n",
+    "",
+    "```",
+    "One\n```js path=a.js\nx\n```\nTwo\n```html path=b.html\n<p>y</p>\n```\nThree",
+)
+
+private fun c16SseChecks(): List<CoderCheckResult> {
+    val claudeEvents = c16Sse(C16_CLAUDE_STREAM)
+    return listOf(
+        c16Check("Stream reader: Claude stream gives six named events", "message_start,ping,content_block_delta,content_block_delta,message_delta,message_stop") {
+            claudeEvents.joinToString(",") { it.event ?: "-" }
+        },
+        c16Check("Stream reader: Claude stream split at every position gives the same events", "true") {
+            c16SseSplitEverywhere(C16_CLAUDE_STREAM).toString()
+        },
+        c16Check("Stream reader: OpenAI stream split at every position gives the same events", "true") {
+            c16SseSplitEverywhere(C16_OPENAI_STREAM).toString()
+        },
+        c16Check("Stream reader: Gemini stream with CRLF split at every position gives the same events", "true") {
+            c16SseSplitEverywhere(C16_GEMINI_STREAM).toString()
+        },
+        c16Check("Stream reader: OpenAI stream has five data events and no names", "5|true") {
+            val events = c16Sse(C16_OPENAI_STREAM)
+            events.size.toString() + "|" + events.all { it.event == null }
+        },
+        c16Check("Stream reader: comment lines are ignored", "-=a") {
+            c16ShowSse(c16Sse(": keep-alive\ndata: a\n: another\n\n"))
+        },
+        c16Check("Stream reader: CRLF line ends give the same events as LF", "true") {
+            val lf = c16Sse("event: x\ndata: one\ndata: two\n\ndata: three\n\n")
+            val crlf = c16Sse("event: x\r\ndata: one\r\ndata: two\r\n\r\ndata: three\r\n\r\n")
+            (lf == crlf).toString()
+        },
+        c16Check("Stream reader: several data lines are joined with a newline", "x=one\ntwo") {
+            c16ShowSse(c16Sse("event: x\ndata: one\ndata: two\n\n"))
+        },
+        c16Check("Stream reader: blank lines alone give no events", "") {
+            c16ShowSse(c16Sse("\n\n\r\n\n"))
+        },
+        c16Check("Stream reader: an event without data gives nothing", "") {
+            c16ShowSse(c16Sse("event: ping\n\n"))
+        },
+        c16Check("Stream reader: only one space after the colon is dropped", "-=  two spaces") {
+            c16ShowSse(c16Sse("data:   two spaces\n\n"))
+        },
+        c16Check("Stream reader: data without a space after the colon", "-={\"a\":1}") {
+            c16ShowSse(c16Sse("data:{\"a\":1}\n\n"))
+        },
+        c16Check("Stream reader: a field without a colon is read as an empty value", "-=") {
+            c16ShowSse(c16Sse("data\n\n"))
+        },
+        c16Check("Stream reader: unknown fields are ignored", "-=a") {
+            c16ShowSse(c16Sse("id: 7\nretry: 100\nfoo: bar\ndata: a\n\n"))
+        },
+        c16Check("Stream reader: garbage never throws", "true") {
+            val junk = listOf("\u0000\u0001\n\n", ":::\n:\n\ndata\n\n\n", "event:\ndata:\n\n", "\r\r\r\n\n\n", "data: \uD83D\n\n")
+            junk.forEach { c16Sse(it) }
+            true.toString()
+        },
+        c16Check("Stream reader: finish delivers an event that was not closed by a blank line", "-=last") {
+            c16ShowSse(c16Sse("data: last"))
+        },
+        c16Check("Stream reader: the event name does not leak into the next event", "a=1|-=2") {
+            c16ShowSse(c16Sse("event: a\ndata: 1\n\ndata: 2\n\n"))
+        },
+        c16Check("Stream reader: a line over a million characters is dropped and the next event still comes", "ok=ok") {
+            val big = "data: " + "x".repeat(1_100_000) + "\n\nevent: ok\ndata: ok\n\n"
+            val parser = CoderSseParser()
+            val out = ArrayList<SseEvent>()
+            out.addAll(parser.feed(big.substring(0, 500_000)))
+            out.addAll(parser.feed(big.substring(500_000)))
+            out.addAll(parser.finish())
+            c16ShowSse(out)
+        },
+    )
+}
+
+private fun c16EventChecks(): List<CoderCheckResult> {
+    val claude = CoderAiProvider.CLAUDE
+    val openAi = CoderAiProvider.OPENAI
+    val gemini = CoderAiProvider.GEMINI
+    return listOf(
+        c16Check("Claude event: a text piece", "T:Hi") {
+            c16Parse(claude, """{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hi"}}""")
+        },
+        c16Check("Claude event: other delta kinds are ignored", "") {
+            c16Parse(claude, """{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}}""")
+        },
+        c16Check("Claude event: stop reason max_tokens means cut short", "F:true") {
+            c16Parse(claude, """{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}""")
+        },
+        c16Check("Claude event: stop reason end_turn gives nothing yet", "") {
+            c16Parse(claude, """{"type":"message_delta","delta":{"stop_reason":"end_turn"}}""")
+        },
+        c16Check("Claude event: message_stop finishes", "F:false") { c16Parse(claude, """{"type":"message_stop"}""") },
+        c16Check("Claude event: ping and start events are ignored", "") {
+            listOf("ping", "message_start", "content_block_start", "content_block_stop").joinToString("") {
+                c16Parse(claude, """{"type":"$it"}""")
+            }
+        },
+        c16Check("Claude event: overloaded error means busy", "X:Busy") {
+            c16Parse(claude, """{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}""")
+        },
+        c16Check("Claude event: rate limit error", "X:RateLimited") {
+            c16Parse(claude, """{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}""")
+        },
+        c16Check("Claude event: authentication error means invalid key", "X:InvalidKey") {
+            c16Parse(claude, """{"type":"error","error":{"type":"authentication_error","message":"bad"}}""")
+        },
+        c16Check("Claude event: another error shows the provider's message, one line, 300 characters", "Other|332") {
+            val long = "a\n  b " + "x".repeat(500)
+            val event = CoderStreamEvents.parse(claude, null, """{"type":"error","error":{"type":"api_error","message":"$long"}}""".replace("\n", "\\n")).single()
+            event as CoderStreamEvent.Failed
+            event.kind.name + "|" + event.message.length
+        },
+        c16Check("Claude event: the event name is used when the data has no type", "F:false") {
+            c16Show(CoderStreamEvents.parse(claude, "message_stop", "{}"))
+        },
+        c16Check("Claude event: unknown fields around a text piece are ignored", "T:ok") {
+            c16Parse(claude, """{"type":"content_block_delta","index":3,"extra":{"a":1},"delta":{"type":"text_delta","text":"ok","more":true}}""")
+        },
+        c16Check("Claude event: unreadable data gives nothing", "") {
+            listOf("not json", "[1,2]", "", "{", "null", "   ").joinToString("") { c16Parse(claude, it) }
+        },
+        c16Check("Claude event: a null or empty text piece gives nothing", "") {
+            c16Parse(claude, """{"type":"content_block_delta","delta":{"type":"text_delta","text":null}}""") +
+                c16Parse(claude, """{"type":"content_block_delta","delta":{"type":"text_delta","text":""}}""")
+        },
+        c16Check("OpenAI event: a text piece", "T:Hi") {
+            c16Parse(openAi, """{"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}""")
+        },
+        c16Check("OpenAI event: null, empty or missing content gives nothing", "") {
+            c16Parse(openAi, """{"choices":[{"delta":{"content":null}}]}""") +
+                c16Parse(openAi, """{"choices":[{"delta":{"content":""}}]}""") +
+                c16Parse(openAi, """{"choices":[{"delta":{}}]}""")
+        },
+        c16Check("OpenAI event: a refusal is shown as text", "T:No.") {
+            c16Parse(openAi, """{"choices":[{"delta":{"refusal":"No."}}]}""")
+        },
+        c16Check("OpenAI event: finish reason length means cut short, after its text", "T:x|F:true") {
+            c16Parse(openAi, """{"choices":[{"delta":{"content":"x"},"finish_reason":"length"}]}""")
+        },
+        c16Check("OpenAI event: finish reason stop gives nothing yet", "") {
+            c16Parse(openAi, """{"choices":[{"delta":{},"finish_reason":"stop"}]}""")
+        },
+        c16Check("OpenAI event: the DONE line finishes", "F:false") { c16Parse(openAi, "[DONE]") },
+        c16Check("OpenAI event: empty choices (a usage chunk) give nothing", "") {
+            c16Parse(openAi, """{"choices":[],"usage":{"total_tokens":3}}""")
+        },
+        c16Check("OpenAI event: an error object is a failure", "X:Other") {
+            c16Parse(openAi, """{"error":{"message":"boom","type":"server_error"}}""")
+        },
+        c16Check("OpenAI event: unreadable data gives nothing", "") {
+            listOf("oops", "[]", "{\"choices\":5}", "").joinToString("") { c16Parse(openAi, it) }
+        },
+        c16Check("Gemini event: every text part is a piece", "T:A|T:B") {
+            c16Parse(gemini, """{"candidates":[{"content":{"parts":[{"text":"A"},{"text":"B"}]}}]}""")
+        },
+        c16Check("Gemini event: thought parts are skipped", "T:A") {
+            c16Parse(gemini, """{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true},{"text":"A"}]}}]}""")
+        },
+        c16Check("Gemini event: finish reason MAX_TOKENS means cut short", "T:A|F:true") {
+            c16Parse(gemini, """{"candidates":[{"content":{"parts":[{"text":"A"}]},"finishReason":"MAX_TOKENS"}]}""")
+        },
+        c16Check("Gemini event: finish reason STOP adds nothing", "T:A") {
+            c16Parse(gemini, """{"candidates":[{"content":{"parts":[{"text":"A"}]},"finishReason":"STOP"}]}""")
+        },
+        c16Check("Gemini event: a safety finish is a blocked failure", "X:Blocked") {
+            c16Parse(gemini, """{"candidates":[{"finishReason":"SAFETY"}]}""")
+        },
+        c16Check("Gemini event: a block reason without candidates is a blocked failure", "X:Blocked") {
+            c16Parse(gemini, """{"promptFeedback":{"blockReason":"SAFETY"}}""")
+        },
+        c16Check("Gemini event: no candidates and no block reason gives nothing", "") {
+            c16Parse(gemini, """{"usageMetadata":{"totalTokenCount":3}}""") + c16Parse(gemini, """{"candidates":[]}""")
+        },
+        c16Check("Gemini event: an error object is a failure", "X:Other") {
+            c16Parse(gemini, """{"error":{"code":500,"message":"boom"}}""")
+        },
+        c16Check("Gemini event: unreadable data gives nothing", "") {
+            listOf("nope", "[1]", "{\"candidates\":\"x\"}").joinToString("") { c16Parse(gemini, it) }
+        },
+    )
+}
+
+private fun c16DecoderChecks(): List<CoderCheckResult> = listOf(
+    c16Check("Decoder: a whole Claude stream", "T:Hello |T:world|F:false") {
+        c16Show(c16Run(CoderAiProvider.CLAUDE, C16_CLAUDE_STREAM))
+    },
+    c16Check("Decoder: a whole OpenAI stream", "T:Hi |T:there|F:false") {
+        c16Show(c16Run(CoderAiProvider.OPENAI, C16_OPENAI_STREAM))
+    },
+    c16Check("Decoder: a whole Gemini stream ends at the end of the stream", "T:Hel|T:lo|F:false") {
+        c16Show(c16Run(CoderAiProvider.GEMINI, C16_GEMINI_STREAM))
+    },
+    c16Check("Decoder: Claude stream that breaks off keeps its text, then fails", "T:Hello |X:Network") {
+        val cut = C16_CLAUDE_STREAM.substringBefore("""data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"world"}}""")
+        c16Show(c16Run(CoderAiProvider.CLAUDE, cut))
+    },
+    c16Check("Decoder: a stream with no text at all is an empty-answer failure", "X:Other") {
+        c16Show(c16Run(CoderAiProvider.CLAUDE, c16Frame("message_stop", """{"type":"message_stop"}""")))
+    },
+    c16Check("Decoder: an empty Gemini stream is an empty-answer failure", "X:Other") {
+        c16Show(c16Run(CoderAiProvider.GEMINI, ""))
+    },
+    c16Check("Decoder: the first end counts (max_tokens, then message_stop)", "T:a|F:true") {
+        val stream = c16Frame("content_block_delta", """{"type":"content_block_delta","delta":{"type":"text_delta","text":"a"}}""") +
+            c16Frame("message_delta", """{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}""") +
+            c16Frame("message_stop", """{"type":"message_stop"}""")
+        c16Show(c16Run(CoderAiProvider.CLAUDE, stream))
+    },
+    c16Check("Decoder: nothing after the OpenAI DONE line is used", "T:a|F:false") {
+        val stream = c16Frame(null, """{"choices":[{"delta":{"content":"a"}}]}""") + "data: [DONE]\n\n" +
+            c16Frame(null, """{"choices":[{"delta":{"content":"late"}}]}""")
+        c16Show(c16Run(CoderAiProvider.OPENAI, stream))
+    },
+    c16Check("Decoder: a safety block after some text only cuts the answer short", "T:A|F:true") {
+        val stream = c16Frame(null, """{"candidates":[{"content":{"parts":[{"text":"A"}]}}]}""") +
+            c16Frame(null, """{"candidates":[{"finishReason":"SAFETY"}]}""")
+        c16Show(c16Run(CoderAiProvider.GEMINI, stream))
+    },
+    c16Check("Decoder: a safety block with no text is a blocked failure", "X:Blocked") {
+        c16Show(c16Run(CoderAiProvider.GEMINI, c16Frame(null, """{"promptFeedback":{"blockReason":"SAFETY"}}""")))
+    },
+    c16Check("Decoder: a Claude error after some text keeps the text", "T:a|X:Busy") {
+        val stream = c16Frame("content_block_delta", """{"type":"content_block_delta","delta":{"type":"text_delta","text":"a"}}""") +
+            c16Frame("error", """{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}""")
+        c16Show(c16Run(CoderAiProvider.CLAUDE, stream))
+    },
+    c16Check("Decoder: a whitespace-only answer counts as empty", "T: |X:Other") {
+        val stream = c16Frame("content_block_delta", """{"type":"content_block_delta","delta":{"type":"text_delta","text":" "}}""") +
+            c16Frame("message_stop", """{"type":"message_stop"}""")
+        c16Show(c16Run(CoderAiProvider.CLAUDE, stream))
+    },
+    c16Check("Decoder: ends exactly once", "true") {
+        val decoder = CoderStreamDecoder(CoderAiProvider.CLAUDE)
+        decoder.feedLine("data: {\"type\":\"message_stop\"}")
+        decoder.feedLine("")
+        (decoder.isDone && decoder.end().isEmpty() && decoder.feedLine("data: x").isEmpty()).toString()
+    },
+)
+
+private fun c16ParserChecks(): List<CoderCheckResult> {
+    val long = C16_REPLIES.joinToString("\n")
+    return listOf(
+        c16Check("Reply parts: chunked at every position equals the whole parse (14 sample replies)", "true") {
+            val bad = C16_REPLIES.indexOfFirst { !c16SameAtEveryCut(it) }
+            if (bad < 0) "true" else "reply $bad differs"
+        },
+        c16Check("Reply parts: chunked at every position, long reply", "true") { c16SameAtEveryCut(long).toString() },
+        c16Check("Reply parts: random chunk sizes equal the whole parse", "true") {
+            val bad = C16_REPLIES.indexOfFirst { !c16SameAtRandomCuts(it, 7L) }
+            if (bad < 0 && c16SameAtRandomCuts(long, 11L)) "true" else "reply $bad differs"
+        },
+        c16Check("Reply parts: one character at a time equals the whole parse", "true") {
+            val bad = C16_REPLIES.indexOfFirst { !c16SameCharByChar(it) }
+            if (bad < 0 && c16SameCharByChar(long)) "true" else "reply $bad differs"
+        },
+        c16Check("Reply parts: a fence split across chunks opens a block", "true|a.js") {
+            val parser = c16Parser("``", "`js path=a.js\nx\n")
+            parser.isInsideCode.toString() + "|" + parser.openBlock?.path
+        },
+        c16Check("Reply parts: a closing fence split across chunks closes the block", "true|false|1") {
+            val parser = c16Parser("```js\nx\n``")
+            val before = parser.isInsideCode
+            parser.feed("`\n")
+            before.toString() + "|" + parser.isInsideCode + "|" + parser.segments.size
+        },
+        c16Check("Reply parts: four backticks hold a three-backtick fence inside", "md|```js\nx\n```") {
+            val parser = c16Parser("````md\n```js\nx\n```\n````\n")
+            parser.finish()
+            val block = (parser.segments.first() as CoderReplySegment.Code).block
+            block.language + "|" + block.code
+        },
+        c16Check("Reply parts: an unfinished block is flagged when the text ends", "true") {
+            val parser = c16Parser("Look:\n```js\nlet a")
+            parser.finish()
+            ((parser.segments.last() as CoderReplySegment.Code).block == CoderCodeBlock("js", null, "let a", true)).toString()
+        },
+        c16Check("Reply parts: a closed block is not flagged", "false") {
+            val parser = c16Parser("```js\nlet a\n```")
+            parser.finish()
+            (parser.segments.single() as CoderReplySegment.Code).block.unfinished.toString()
+        },
+        c16Check("Reply parts: the whole parse never flags a block", "false") {
+            (parseReply("```js\nlet a").single() as CoderReplySegment.Code).block.unfinished.toString()
+        },
+        c16Check("Reply parts: path= names the file, language is kept", "html|index.html") {
+            val parser = c16Parser("```html path=index.html\n<p>x</p>\n```\n")
+            val block = (parser.segments.single() as CoderReplySegment.Code).block
+            block.language + "|" + block.path
+        },
+        c16Check("Reply parts: an invalid path is dropped", "null") {
+            val parser = c16Parser("```html path=../x\n<p>x</p>\n```\n")
+            (parser.segments.single() as CoderReplySegment.Code).block.path.toString()
+        },
+        c16Check("Reply parts: the open block shows its language, path and complete lines", "OpenBlock(language=js, path=a.js, codeSoFar=let a = 1;)") {
+            c16Parser("```js path=a.js\nlet a = 1;\nlet b").openBlock.toString()
+        },
+        c16Check("Reply parts: the held-back last line is not in the segments or the open block", "1|let a;") {
+            val parser = c16Parser("Hi there\n```js\nlet a;\nlet b")
+            parser.segments.size.toString() + "|" + parser.openBlock?.codeSoFar
+        },
+        c16Check("Reply parts: the live open block adds the last line", "let a;\nlet b") {
+            c16Parser("```js\nlet a;\nlet b").liveOpenBlock()?.codeSoFar.toString()
+        },
+        c16Check("Reply parts: a last line that may be a fence is not shown", "let a;") {
+            c16Parser("```js\nlet a;\n``").liveOpenBlock()?.codeSoFar.toString()
+        },
+        c16Check("Reply parts: live text shows the held-back last line", "Text(text=Hi\nthere)") {
+            c16Parser("Hi\nthere").liveSegments().single().toString()
+        },
+        c16Check("Reply parts: live text hides a last line that starts with a backtick", "Text(text=Hi)") {
+            c16Parser("Hi\n``").liveSegments().single().toString()
+        },
+        c16Check("Reply parts: live segments after a closed block and more text", "2") {
+            c16Parser("```js\nx\n```\nAfter").liveSegments().size.toString()
+        },
+        c16Check("Reply parts: live segments equal the final segments after finish", "true") {
+            val parser = c16Parser(C16_REPLIES[1])
+            parser.finish()
+            (parser.liveSegments() == parser.segments && parser.liveOpenBlock() == null).toString()
+        },
+        c16Check("Reply parts: the raw text is everything that was fed", "true") {
+            val parser = c16Parser("a", "", "b\n", "```")
+            (parser.rawText == "ab\n```").toString()
+        },
+        c16Check("Reply parts: pieces after finish are ignored and finish twice is harmless", "true") {
+            val parser = c16Parser("a\n")
+            parser.finish()
+            val first = parser.segments
+            parser.feed("more\n")
+            parser.finish()
+            (parser.segments == first && parser.isFinished).toString()
+        },
+        c16Check("Reply parts: nothing fed gives nothing", "true") {
+            val parser = CoderStreamParser()
+            parser.finish()
+            (parser.segments.isEmpty() && parser.openBlock == null && !parser.isInsideCode).toString()
+        },
+        c16Check("Reply parts: a very long single line stays fast", "true") {
+            val start = System.nanoTime()
+            val parser = CoderStreamParser()
+            repeat(50_000) { parser.feed("abcd") }
+            parser.finish()
+            (parser.segments.size == 1 && System.nanoTime() - start < 5_000_000_000L).toString()
+        },
+    )
+}
+
+private fun c16StageChecks(): List<CoderCheckResult> {
+    fun walk(vararg events: CoderStageEvent): CoderAiStage {
+        var stage = CoderAiStage.Reading
+        for (event in events) stage = CoderAiStages.next(stage, event)
+        return stage
+    }
+    val ctx = CoderStageEvent.ContextRead
+    val text = CoderStageEvent.TextArrived
+    val progress = CoderAiProgress(CoderAiStage.Reading, fileCount = 3, providerName = "Claude", model = "m1")
+    fun stepsOf(stage: CoderAiStage, target: String? = null, ms: Long = 0L) =
+        CoderAiStages.steps(progress.copy(stage = stage), target, ms)
+    return listOf(
+        c16Check("Stages: a normal answer goes Reading, Asking, Writing, Finished", "Reading|Asking|Writing|Finished") {
+            listOf(
+                CoderAiStage.Reading,
+                walk(ctx),
+                walk(ctx, text),
+                walk(ctx, text, CoderStageEvent.StreamFinished),
+            ).joinToString("|") { it.name }
+        },
+        c16Check("Stages: Stop ends the answer from every stage", "Stopped|Stopped|Stopped") {
+            listOf(walk(CoderStageEvent.StopTapped), walk(ctx, CoderStageEvent.StopTapped), walk(ctx, text, CoderStageEvent.StopTapped))
+                .joinToString("|") { it.name }
+        },
+        c16Check("Stages: an error ends the answer as Failed from every stage", "Failed|Failed|Failed") {
+            listOf(walk(CoderStageEvent.ErrorHappened), walk(ctx, CoderStageEvent.ErrorHappened), walk(ctx, text, CoderStageEvent.ErrorHappened))
+                .joinToString("|") { it.name }
+        },
+        c16Check("Stages: an end with no first text is Failed", "Failed|Failed") {
+            listOf(walk(ctx, CoderStageEvent.StreamFinished), walk(ctx, CoderStageEvent.StreamCutShort)).joinToString("|") { it.name }
+        },
+        c16Check("Stages: cut short after text", "CutShort") { walk(ctx, text, CoderStageEvent.StreamCutShort).name },
+        c16Check("Stages: an ended answer never changes", "Finished|Stopped|CutShort|Failed") {
+            listOf(
+                walk(ctx, text, CoderStageEvent.StreamFinished, text),
+                walk(ctx, CoderStageEvent.StopTapped, text),
+                walk(ctx, text, CoderStageEvent.StreamCutShort, CoderStageEvent.StopTapped),
+                walk(CoderStageEvent.ErrorHappened, ctx),
+            ).joinToString("|") { it.name }
+        },
+        c16Check("Stages: reading the context twice does not go back", "Writing") { walk(ctx, text, ctx).name },
+        c16Check("Stages: only the four endings are terminal", "false,false,false,true,true,true,true") {
+            CoderAiStage.values().joinToString(",") { CoderAiStages.isTerminal(it).toString() }
+        },
+        c16Check("Stages: reading shows one step that is not done", "Reading your files (3):false") {
+            stepsOf(CoderAiStage.Reading).joinToString(";") { it.label + ":" + it.done }
+        },
+        c16Check("Stages: asking shows the provider and model and a seconds counter", "Reading your files (3):true;Asking Claude (m1):false:4 s") {
+            stepsOf(CoderAiStage.Asking, ms = 4_200L).joinToString(";") {
+                it.label + ":" + it.done + (if (it.detail != null) ":" + it.detail else "")
+            }
+        },
+        c16Check("Stages: no seconds counter in the first second", "null") { stepsOf(CoderAiStage.Asking, ms = 900L).last().detail.toString() },
+        c16Check("Stages: writing a file names its path", "Writing index.html") {
+            stepsOf(CoderAiStage.Writing, target = "index.html").last().label
+        },
+        c16Check("Stages: writing plain text or unnamed code", "Writing|Writing code") {
+            stepsOf(CoderAiStage.Writing).last().label + "|" + stepsOf(CoderAiStage.Writing, target = "code").last().label
+        },
+        c16Check("Stages: writing shows three steps, the first two done", "true,true,false") {
+            stepsOf(CoderAiStage.Writing).joinToString(",") { it.done.toString() }
+        },
+        c16Check("Stages: no steps once the answer ended", "0") { stepsOf(CoderAiStage.Finished).size.toString() },
+        c16Check("Stages: no files gives a plain reading label", "Reading your request") {
+            CoderAiStages.steps(CoderAiProgress(CoderAiStage.Reading), null, 0L).single().label
+        },
+        c16Check("Stages: summary lines", "Wrote 2 files in 14 s|Wrote 1 file in 1 s|Wrote code in 3 s|Finished in 5 s|Stopped|Cut short|Couldn't finish") {
+            fun s(stage: CoderAiStage, files: Int, others: Int, ms: Long) =
+                CoderAiStages.summary(progress.copy(stage = stage), files, others, ms)
+            listOf(
+                s(CoderAiStage.Finished, 2, 0, 14_400L),
+                s(CoderAiStage.Finished, 1, 0, 100L),
+                s(CoderAiStage.Finished, 0, 1, 3_000L),
+                s(CoderAiStage.Finished, 0, 0, 5_000L),
+                s(CoderAiStage.Stopped, 0, 0, 1L),
+                s(CoderAiStage.CutShort, 0, 0, 1L),
+                s(CoderAiStage.Failed, 0, 0, 1L),
+            ).joinToString("|")
+        },
+        c16Check("Stages: no summary while the answer runs", "") {
+            CoderAiStages.summary(progress.copy(stage = CoderAiStage.Writing), 1, 0, 9_000L)
+        },
+        c16Check("Stages: seconds are rounded and at least one", "1,14,15") {
+            listOf(0L, 14_400L, 14_600L).joinToString(",") { CoderAiStages.secondsOf(it).toString() }
+        },
+    )
+}
+
+private fun c16GateChecks(): List<CoderCheckResult> = listOf(
+    c16Check("Updates: the first change is published at once", "true") { CoderPublishGate(50L).shouldPublish(1_000L, true).toString() },
+    c16Check("Updates: nothing is published when nothing changed", "false") { CoderPublishGate(50L).shouldPublish(1_000L, false).toString() },
+    c16Check("Updates: changes within 50 ms wait for the next update", "true|false|false|true") {
+        val gate = CoderPublishGate(50L)
+        val first = gate.shouldPublish(0L, true)
+        gate.markPublished(0L)
+        val second = gate.shouldPublish(10L, true)
+        val third = gate.shouldPublish(49L, true)
+        val fourth = gate.shouldPublish(50L, true)
+        "$first|$second|$third|$fourth"
+    },
+    c16Check("Updates: a delta every millisecond for one second gives at most 21 updates", "true") {
+        val gate = CoderPublishGate(50L)
+        var published = 0
+        for (t in 0L..1_000L) {
+            if (gate.shouldPublish(t, true)) {
+                gate.markPublished(t)
+                published++
+            }
+        }
+        (published in 20..21).toString()
+    },
+    c16Check("Updates: deltas that arrive within 50 ms end up in one update", "ab c") {
+        val gate = CoderPublishGate(50L)
+        val parser = CoderStreamParser()
+        var shown = ""
+        val deltas = listOf(0L to "a", 10L to "b", 20L to " ", 60L to "c")
+        for ((t, delta) in deltas) {
+            parser.feed(delta)
+            if (gate.shouldPublish(t, true)) {
+                gate.markPublished(t)
+                shown = parser.rawText
+            }
+        }
+        // t=0 published "a"; t=10 and t=20 waited; t=60 published everything so far.
+        shown
+    },
+)
+
+private fun c16RequestChecks(): List<CoderCheckResult> {
+    val turns = listOf(ChatRole.User to "hi", ChatRole.Assistant to "yo", ChatRole.User to "go")
+    fun build(provider: CoderAiProvider, model: String, stream: Boolean) =
+        CoderAiClient.buildRequest(CoderAiConfig(provider, CHAT_TEST_KEY, model), "SYS", turns, stream)
+    val claude = build(CoderAiProvider.CLAUDE, "claude-x", true)
+    val openAi = build(CoderAiProvider.OPENAI, "gpt-x", true)
+    val gemini = build(CoderAiProvider.GEMINI, "models/gemini-1.5-pro", true)
+    return listOf(
+        c16Check("Stream request: Claude body asks for a stream, same address and headers", "true") {
+            val json = JSONObject(chatBody(claude))
+            (json.getBoolean("stream") && claude.url.toString() == "https://api.anthropic.com/v1/messages" &&
+                claude.header("x-api-key") == CHAT_TEST_KEY && claude.header("anthropic-version") == "2023-06-01" &&
+                json.getInt("max_tokens") == 4096).toString()
+        },
+        c16Check("Stream request: a normal Claude request has no stream field", "false") {
+            JSONObject(chatBody(build(CoderAiProvider.CLAUDE, "claude-x", false))).has("stream").toString()
+        },
+        c16Check("Stream request: OpenAI body has only model, messages and stream", "messages,model,stream") {
+            JSONObject(chatBody(openAi)).keys().asSequence().toList().sorted().joinToString(",")
+        },
+        c16Check("Stream request: a normal OpenAI request has no stream field", "false") {
+            JSONObject(chatBody(build(CoderAiProvider.OPENAI, "gpt-x", false))).has("stream").toString()
+        },
+        c16Check("Stream request: Gemini uses the streaming address with alt=sse", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:streamGenerateContent?alt=sse") {
+            gemini.url.toString()
+        },
+        c16Check("Stream request: a normal Gemini request keeps its address", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent") {
+            build(CoderAiProvider.GEMINI, "models/gemini-1.5-pro", false).url.toString()
+        },
+        c16Check("Stream request: Gemini body has no stream field and the key is in a header", "true") {
+            val json = JSONObject(chatBody(gemini))
+            (!json.has("stream") && gemini.header("x-goog-api-key") == CHAT_TEST_KEY).toString()
+        },
+        c16Check("Stream request: the key is never in an address or a body", "false") {
+            listOf(claude, openAi, gemini).any {
+                it.url.toString().contains(CHAT_TEST_KEY) || chatBody(it).contains(CHAT_TEST_KEY)
+            }.toString()
+        },
+        c16Check("Stream request: every address is https", "true") {
+            listOf(claude, openAi, gemini).all { it.url.isHttps }.toString()
+        },
+    )
+}
+
+private fun c16MiscChecks(): List<CoderCheckResult> = listOf(
+    c16Check("Ideas: three chips with the agreed words", "Make a to-do app|Add a dark mode|Make it work on phones") {
+        CODER_AI_IDEAS.joinToString("|")
+    },
+    c16Check("Message: a plain message has no stream details", "true") {
+        val m = CoderChatMessage(id = 1, role = ChatRole.Assistant, text = "x")
+        (m.segments.isEmpty() && m.openBlock == null && m.stage == null && !m.stopped && !m.interrupted && m.elapsedMillis == 0L).toString()
+    },
+    c16Check("Code block: unfinished is false unless set", "false|true") {
+        CoderCodeBlock("js", null, "x").unfinished.toString() + "|" + CoderCodeBlock("js", null, "x", true).unfinished
+    },
+)
+
+private fun c16aChecks(): List<CoderCheckResult> =
+    c16SseChecks() + c16EventChecks() + c16DecoderChecks() + c16ParserChecks() + c16StageChecks() +
+        c16GateChecks() + c16RequestChecks() + c16MiscChecks()

@@ -1,6 +1,7 @@
 package com.westly.neribovault.feature.coder.ai
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -20,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Lightbulb
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -29,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -36,7 +40,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -56,6 +62,7 @@ import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
+import com.westly.neribovault.feature.coder.GuidanceMode
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.files.CoderPaths
 import com.westly.neribovault.feature.coder.guidance.CoderTipHost
@@ -102,6 +109,7 @@ fun CoderAiPanel(
     val setup by viewModel.setup.collectAsStateWithLifecycle()
     val linked by viewModel.linked.collectAsStateWithLifecycle()
     val notesOn by viewModel.notesOn.collectAsStateWithLifecycle()
+    val guidanceMode by viewModel.guidanceMode.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val existingPaths = remember(entries) { entries.map { it.path }.toSet() }
@@ -221,9 +229,11 @@ fun CoderAiPanel(
                 hasSelection = selection != null,
                 linked = linked,
                 notesOn = notesOn,
+                ideasVisible = state.messages.isEmpty() && existingFiles.isNotEmpty() && guidanceMode == GuidanceMode.Beginner,
                 dialogOpen = showPicker || replaceCode != null || openReplace != null || showNewChat,
                 apply = apply,
                 onInput = { viewModel.setInput(it) },
+                onIdea = { viewModel.setInput(it) },
                 onToggleOpenFile = { viewModel.setIncludeOpenFile(!state.includeOpenFile) },
                 onRemoveError = { viewModel.removeAttachedError() },
                 onToggleNotes = { viewModel.setNotesOn(!notesOn) },
@@ -318,9 +328,11 @@ private fun ChatBody(
     hasSelection: Boolean,
     linked: Boolean,
     notesOn: Boolean,
+    ideasVisible: Boolean,
     dialogOpen: Boolean,
     apply: ApplyOptions,
     onInput: (String) -> Unit,
+    onIdea: (String) -> Unit,
     onToggleOpenFile: () -> Unit,
     onRemoveError: () -> Unit,
     onToggleNotes: () -> Unit,
@@ -402,6 +414,20 @@ private fun ChatBody(
                 QuickChip(label = action.label, enabled = quickEnabled, onClick = { onQuick(action) })
             }
         }
+        if (ideasVisible) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = spacing.screen),
+                horizontalArrangement = Arrangement.spacedBy(spacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                for (idea in CODER_AI_IDEAS) {
+                    NeriboChip(label = idea, selected = false, onClick = { onIdea(idea) })
+                }
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -456,9 +482,12 @@ private sealed interface ChatRow {
 }
 
 private class UserRow(val message: CoderChatMessage, override val key: String) : ChatRow
+private class ProgressRow(val message: CoderChatMessage, override val key: String) : ChatRow
 private class TextRow(val text: String, override val key: String) : ChatRow
 private class CodeRow(val block: CoderCodeBlock, override val key: String) : ChatRow
+private class OpenCodeRow(val block: OpenBlock, override val key: String) : ChatRow
 private class NoticeRow(val text: String, override val key: String) : ChatRow
+private class InterruptedRow(val text: String, val isLast: Boolean, override val key: String) : ChatRow
 
 /** The rows of the list and, for each message id, the index of its first row. */
 private class BuiltRows(val rows: List<ChatRow>, val firstIndex: Map<Long, Int>)
@@ -466,24 +495,48 @@ private class BuiltRows(val rows: List<ChatRow>, val firstIndex: Map<Long, Int>)
 private fun buildRows(messages: List<CoderChatMessage>): BuiltRows {
     val rows = ArrayList<ChatRow>()
     val firstIndex = HashMap<Long, Int>()
+    val lastId = messages.lastOrNull()?.id
     for (message in messages) {
         firstIndex[message.id] = rows.size
         if (message.role == ChatRole.User) {
             rows.add(UserRow(message, "u${message.id}"))
             continue
         }
-        parseReply(message.text).forEachIndexed { index, segment ->
+        val progress = message.stage
+        if (progress != null) rows.add(ProgressRow(message, "a${message.id}-progress"))
+        val contentStart = rows.size
+        val segments = if (message.segments.isEmpty() && message.openBlock == null && message.text.isNotBlank()) {
+            parseReply(message.text)
+        } else {
+            message.segments
+        }
+        segments.forEachIndexed { index, segment ->
             val key = "a${message.id}-$index"
             when (segment) {
                 is CoderReplySegment.Text -> rows.add(TextRow(segment.text, key))
                 is CoderReplySegment.Code -> rows.add(CodeRow(segment.block, key))
             }
         }
-        if (message.truncated) rows.add(NoticeRow("The answer was cut short.", "a${message.id}-cut"))
-        if (firstIndex[message.id] == rows.size) rows.add(TextRow("(No text came back.)", "a${message.id}-empty"))
+        val open = message.openBlock
+        if (open != null) rows.add(OpenCodeRow(open, "a${message.id}-open"))
+        val notice = message.notice
+        if (message.interrupted) {
+            rows.add(InterruptedRow(notice ?: "The answer broke off.", message.id == lastId, "a${message.id}-broke"))
+        } else {
+            if (message.truncated && notice == null) rows.add(NoticeRow("The answer was cut short.", "a${message.id}-cut"))
+            if (notice != null) rows.add(NoticeRow(notice, "a${message.id}-notice"))
+        }
+        val ended = progress == null || CoderAiStages.isTerminal(progress.stage)
+        if (ended && rows.size == contentStart && !message.stopped && !message.interrupted) {
+            rows.add(TextRow("(No text came back.)", "a${message.id}-empty"))
+        }
     }
     return BuiltRows(rows, firstIndex)
 }
+
+/** A scroll distance larger than any list, used to reach the end of the list. */
+private const val SCROLL_TO_END_PX = 100_000f
+private const val MAX_LIVE_CODE_LINES = 14
 
 @Composable
 private fun MessageList(
@@ -495,58 +548,160 @@ private fun MessageList(
 ) {
     val spacing = NeriboTheme.spacing
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
     val built = remember(state.messages) { buildRows(state.messages) }
-    val lastMessage = state.messages.lastOrNull()
-    val lastId = lastMessage?.id
-    LaunchedEffect(lastId, state.isSending) {
-        val target = if (state.isSending) built.rows.size else lastId?.let { built.firstIndex[it] }
-        if (target != null) listState.animateScrollToItem(target)
+    val lastId = state.messages.lastOrNull()?.id
+    // The list follows the end of the answer only while the person has not scrolled up.
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(state.isSending) { if (state.isSending) follow = true }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress && listState.lastScrolledBackward }.collect { if (it) follow = false }
     }
-    LazyColumn(
-        state = listState,
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = spacing.screen, vertical = spacing.md),
-        verticalArrangement = Arrangement.spacedBy(spacing.md),
-    ) {
-        if (built.rows.isEmpty() && !state.isSending) {
-            item(key = "hint") {
-                Text(
-                    text = "Ask a question about your code, or tap Explain, Fix, Improve or Add comments.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.canScrollForward }.collect { if (!it) follow = true }
+    }
+    LaunchedEffect(state.messages, follow) {
+        if (follow) listState.scrollBy(SCROLL_TO_END_PX)
+    }
+    Box(modifier = modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = spacing.screen, vertical = spacing.md),
+            verticalArrangement = Arrangement.spacedBy(spacing.md),
+        ) {
+            if (built.rows.isEmpty() && !state.isSending) {
+                item(key = "hint") {
+                    Text(
+                        text = "Ask a question about your code, or tap Explain, Fix, Improve or Add comments.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            items(built.rows, key = { it.key }) { row ->
+                when (row) {
+                    is UserRow -> UserBubble(
+                        message = row.message,
+                        isLast = row.message.id == lastId,
+                        failureKind = state.failureKind,
+                        onRetry = onRetry,
+                        onOpenAiSettings = onOpenAiSettings,
+                    )
+                    is ProgressRow -> ProgressRowContent(row.message)
+                    is TextRow -> Text(
+                        text = row.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    is CodeRow -> CodeBlockCard(block = row.block, apply = apply)
+                    is OpenCodeRow -> OpenCodeCard(block = row.block)
+                    is NoticeRow -> Text(
+                        text = row.text,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                    is InterruptedRow -> Column(verticalArrangement = Arrangement.spacedBy(spacing.xs)) {
+                        Text(
+                            text = row.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                        if (row.isLast) NeriboButton(text = "Retry", onClick = onRetry, style = ButtonStyle.Text)
+                    }
+                }
             }
         }
-        items(built.rows, key = { it.key }) { row ->
-            when (row) {
-                is UserRow -> UserBubble(
-                    message = row.message,
-                    isLast = row.message.id == lastId,
-                    failureKind = state.failureKind,
-                    onRetry = onRetry,
-                    onOpenAiSettings = onOpenAiSettings,
-                )
-                is TextRow -> Text(
-                    text = row.text,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                is CodeRow -> CodeBlockCard(block = row.block, apply = apply)
-                is NoticeRow -> Text(
-                    text = row.text,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+        if (state.isSending && !follow) {
+            NeriboChip(
+                label = "Jump to latest",
+                selected = true,
+                onClick = {
+                    follow = true
+                    scope.launch { listState.scrollBy(SCROLL_TO_END_PX) }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = spacing.sm),
+            )
         }
-        if (state.isSending) {
-            item(key = "thinking") {
+    }
+}
+
+/** The progress card (or, once the answer ended, its one-line summary) of an assistant message. */
+@Composable
+private fun ProgressRowContent(message: CoderChatMessage) {
+    val progress = message.stage ?: return
+    var files = 0
+    var others = 0
+    for (segment in message.segments) {
+        if (segment is CoderReplySegment.Code && !segment.block.unfinished) {
+            if (segment.block.path != null) files++ else others++
+        }
+    }
+    val open = message.openBlock
+    AiProgressCard(
+        progress = progress,
+        writingTarget = open?.let { it.path ?: "code" },
+        filesWritten = files,
+        otherBlocks = others,
+        elapsedMillis = message.elapsedMillis,
+    )
+}
+
+/** The card of a code block that is still being written: its name, a thin moving line and the last lines so far. */
+@Composable
+private fun OpenCodeCard(block: OpenBlock) {
+    val spacing = NeriboTheme.spacing
+    val colors = MaterialTheme.colorScheme
+    val path = block.path
+    val title = if (path != null) "Writing $path\u2026" else "Writing code\u2026"
+    val shown = remember(block.codeSoFar) {
+        val all = block.codeSoFar.split('\n')
+        all.takeLast(MAX_LIVE_CODE_LINES).joinToString("\n") to all.size
+    }
+    NeriboCard(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.onSurfaceVariant,
+            modifier = Modifier.padding(start = spacing.md, end = spacing.md, top = spacing.sm),
+        )
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = spacing.md, vertical = spacing.xs)
+                .height(2.dp),
+            color = colors.primary,
+            trackColor = colors.surfaceVariant,
+        )
+        if (shown.first.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(spacing.sm)
+                    .clip(MaterialTheme.shapes.small)
+                    .background(colors.surfaceVariant)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(spacing.sm),
+            ) {
                 Text(
-                    text = "Thinking\u2026",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = shown.first,
+                    color = colors.onSurface,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = CODE_FONT_SIZE,
+                    lineHeight = CODE_LINE_HEIGHT,
+                    softWrap = false,
                 )
             }
+            Text(
+                text = "${shown.second} lines so far",
+                style = MaterialTheme.typography.labelSmall,
+                color = colors.onSurfaceVariant,
+                modifier = Modifier.padding(start = spacing.md, end = spacing.md, bottom = spacing.sm),
+            )
         }
     }
 }
@@ -626,12 +781,25 @@ private fun CodeBlockCard(block: CoderCodeBlock, apply: ApplyOptions) {
         if (tooLong && !expanded) lines.take(MAX_VISIBLE_CODE_LINES).joinToString("\n") else block.code
     }
     val label = listOfNotNull(block.language.takeIf { it.isNotEmpty() }, block.path).joinToString(" \u00B7 ")
+    val title = label.ifEmpty { "Code" } + if (block.unfinished) " (unfinished)" else ""
     val path = block.path
-    val buttons = aiApplyButtonsFor(path, apply.openPath, apply.hasSelection, apply.existingPaths, apply.existingFiles)
+    // A block that never got its closing fence is incomplete: it can be copied but never applied.
+    val buttons = if (block.unfinished) {
+        AiApplyButtons(
+            insertAtCursor = false,
+            replaceSelection = false,
+            replaceWholeFile = false,
+            saveAsNewFile = false,
+            openAndReplace = false,
+            nameTaken = false,
+        )
+    } else {
+        aiApplyButtonsFor(path, apply.openPath, apply.hasSelection, apply.existingPaths, apply.existingFiles)
+    }
 
     NeriboCard(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = label.ifEmpty { "Code" },
+            text = title,
             style = MaterialTheme.typography.labelSmall,
             color = colors.onSurfaceVariant,
             modifier = Modifier.padding(start = spacing.md, end = spacing.md, top = spacing.sm),

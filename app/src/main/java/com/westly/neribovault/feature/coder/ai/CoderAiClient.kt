@@ -2,10 +2,17 @@ package com.westly.neribovault.feature.coder.ai
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -13,12 +20,14 @@ import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.net.SocketTimeoutException
+import java.util.concurrent.TimeUnit
 
 /**
- * Sends a chat to Claude, OpenAI or Gemini and reads the answer. Every address is fixed and HTTPS, the
- * key travels only in a header, and nothing from the request (key, headers, address, the user's code)
- * is ever put into a result, a log or an error text. The request builder, the answer reader and the
- * error mapper are pure, so the self-test can check them without a network.
+ * Sends a chat to Claude, OpenAI or Gemini and reads the answer, either whole ([chat]) or as it is written
+ * ([chatStream]). Every address is fixed and HTTPS, the key travels only in a header, and nothing from the
+ * request (key, headers, address, the user's code) is ever put into a result, a log or an error text. The
+ * request builder, the answer reader and the error mapper are pure, so the self-test can check them without a network.
  */
 object CoderAiClient {
     private const val CLAUDE_URL = "https://api.anthropic.com/v1/messages"
@@ -28,18 +37,26 @@ object CoderAiClient {
     private const val CLAUDE_MAX_TOKENS = 4096
     private const val MAX_REPLY_BYTES = 2 * 1024 * 1024
     private const val MAX_DETAIL_CHARS = 300
+    private const val ERROR_BODY_LIMIT = 64 * 1024
+    private const val IDLE_LIMIT_NANOS = 120_000_000_000L
 
-    private const val MESSAGE_INVALID_KEY = "Your key was not accepted. Check it in AI settings."
+    internal const val MESSAGE_INVALID_KEY = "Your key was not accepted. Check it in AI settings."
     private const val MESSAGE_MODEL_NOT_FOUND = "That model wasn't found. Choose another one in AI settings."
     private const val MESSAGE_RATE_LIMITED = "Your provider says you've used up your limit or need to add billing."
     private const val MESSAGE_BUSY = "The provider is busy. Try again in a moment."
     private const val MESSAGE_REJECTED = "The provider rejected the request."
-    private const val MESSAGE_BLOCKED = "The provider's safety filter blocked this request. Try rewording it."
+    internal const val MESSAGE_BLOCKED = "The provider's safety filter blocked this request. Try rewording it."
     private const val MESSAGE_NOT_UNDERSTOOD = "The provider's answer wasn't understood."
-    private const val MESSAGE_EMPTY = "The provider sent an empty answer. Try again."
+    internal const val MESSAGE_EMPTY = "The provider sent an empty answer. Try again."
     private const val MESSAGE_TOO_LARGE = "The provider's answer was too large to read."
 
     private val JSON_TYPE = "application/json; charset=utf-8".toMediaType()
+
+    /**
+     * The shared client without the 150-second limit on a whole call: a long answer may take longer than that to
+     * write. The 120-second read limit of the shared client still ends a stream that goes silent.
+     */
+    private val streamClient: OkHttpClient = CoderHttp.client.newBuilder().callTimeout(0, TimeUnit.MILLISECONDS).build()
     private val GEMINI_BLOCKED_FINISH = setOf("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION")
 
     /**
@@ -82,21 +99,121 @@ object CoderAiClient {
     }
 
     /**
-     * The POST request for [config]'s provider. The key is only in a header; the address and the body
-     * never hold it. Throws [IllegalArgumentException] when the key holds a character a header cannot carry.
+     * Sends [messages] like [chat] but returns the answer as it is written: a [CoderStreamEvent.Started], then
+     * [CoderStreamEvent.Text] pieces, then exactly one end ([CoderStreamEvent.Finished] or [CoderStreamEvent.Failed]).
+     * Runs on the IO dispatcher. Cancelling the collector cancels the call and closes the connection. A problem
+     * after some text arrived comes as [CoderStreamEvent.Failed] after all earlier text, so the caller keeps it.
+     * A stream with no meaningful event for 120 seconds fails with the usual "took too long" text. No message
+     * ever holds the key, a header, the address or the user's code.
      */
-    fun buildRequest(config: CoderAiConfig, system: String, messages: List<Pair<ChatRole, String>>): Request {
+    fun chatStream(
+        config: CoderAiConfig,
+        system: String,
+        messages: List<Pair<ChatRole, String>>,
+    ): Flow<CoderStreamEvent> = channelFlow<CoderStreamEvent> {
+        val request = try {
+            buildRequest(config, system, messages, stream = true)
+        } catch (e: IllegalArgumentException) {
+            // The exception text repeats the header value (the key), so it is dropped on purpose.
+            send(CoderStreamEvent.Failed(CoderChatFailure.InvalidKey, MESSAGE_INVALID_KEY))
+            return@channelFlow
+        }
+        val call = streamClient.newCall(request)
+        // A read that waits for data cannot be interrupted by cancelling the coroutine; cancelling the call can.
+        val watcher = launch {
+            try {
+                awaitCancellation()
+            } finally {
+                call.cancel()
+            }
+        }
+        try {
+            call.awaitResponse().use { response -> readStream(config, response) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A cancelled call fails with a plain IOException; that must not look like a network error.
+            ensureActive()
+            send(CoderStreamEvent.Failed(CoderChatFailure.Network, describeFailure(e)))
+        } finally {
+            watcher.cancel()
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /** Reads one response of [chatStream] and sends its events. HTTP errors are mapped like in [chat]. */
+    private suspend fun ProducerScope<CoderStreamEvent>.readStream(config: CoderAiConfig, response: Response) {
+        if (!response.isSuccessful) {
+            val failure = mapError(config.provider, response.code, readErrorBody(response))
+            send(CoderStreamEvent.Failed(failure.kind, scrubKey(failure.message, config.apiKey)))
+            return
+        }
+        val source = response.body?.source()
+        if (source == null) {
+            send(CoderStreamEvent.Failed(CoderChatFailure.Other, MESSAGE_EMPTY))
+            return
+        }
+        send(CoderStreamEvent.Started)
+        val decoder = CoderStreamDecoder(config.provider)
+        var lastEventAt = System.nanoTime()
+        while (!decoder.isDone) {
+            ensureActive()
+            val line = source.readUtf8Line() ?: break
+            for (event in decoder.feedLine(line)) {
+                send(scrubEvent(event, config.apiKey))
+                lastEventAt = System.nanoTime()
+            }
+            if (!decoder.isDone && System.nanoTime() - lastEventAt > IDLE_LIMIT_NANOS) {
+                send(CoderStreamEvent.Failed(CoderChatFailure.Network, describeFailure(SocketTimeoutException())))
+                return
+            }
+        }
+        for (event in decoder.end()) send(scrubEvent(event, config.apiKey))
+    }
+
+    /** The first 64 KB of an error answer as text. */
+    private fun readErrorBody(response: Response): String {
+        val stream = response.body?.byteStream() ?: return ""
+        val out = ByteArrayOutputStream()
+        val chunk = ByteArray(8192)
+        while (out.size() < ERROR_BODY_LIMIT) {
+            val count = stream.read(chunk, 0, minOf(chunk.size, ERROR_BODY_LIMIT - out.size()))
+            if (count < 0) break
+            out.write(chunk, 0, count)
+        }
+        return out.toString("UTF-8")
+    }
+
+    private fun scrubEvent(event: CoderStreamEvent, apiKey: String): CoderStreamEvent =
+        if (event is CoderStreamEvent.Failed) event.copy(message = scrubKey(event.message, apiKey)) else event
+
+    private fun scrubKey(message: String, apiKey: String): String =
+        if (apiKey.isEmpty() || !message.contains(apiKey)) message else message.replace(apiKey, "[hidden]")
+
+    /**
+     * The POST request for [config]'s provider. The key is only in a header; the address and the body
+     * never hold it. With [stream] true the request asks for the answer as a stream of events: Claude and OpenAI get
+     * `"stream": true` in the body, Gemini gets its streaming address with `?alt=sse`. Throws [IllegalArgumentException]
+     * when the key holds a character a header cannot carry.
+     */
+    fun buildRequest(
+        config: CoderAiConfig,
+        system: String,
+        messages: List<Pair<ChatRole, String>>,
+        stream: Boolean = false,
+    ): Request {
         val builder = Request.Builder()
         val body: JSONObject = when (config.provider) {
             CoderAiProvider.CLAUDE -> {
                 builder.url(CLAUDE_URL)
                     .header("x-api-key", config.apiKey)
                     .header("anthropic-version", ANTHROPIC_VERSION)
-                JSONObject()
+                val json = JSONObject()
                     .put("model", config.model)
                     .put("max_tokens", CLAUDE_MAX_TOKENS)
                     .put("system", system)
                     .put("messages", turnArray(messages, "assistant"))
+                if (stream) json.put("stream", true)
+                json
             }
             CoderAiProvider.OPENAI -> {
                 builder.url(OPENAI_URL)
@@ -105,18 +222,21 @@ object CoderAiClient {
                 all.put(JSONObject().put("role", "system").put("content", system))
                 val turns = turnArray(messages, "assistant")
                 for (i in 0 until turns.length()) all.put(turns.get(i))
-                JSONObject().put("model", config.model).put("messages", all)
+                val json = JSONObject().put("model", config.model).put("messages", all)
+                if (stream) json.put("stream", true)
+                json
             }
             CoderAiProvider.GEMINI -> {
                 val model = config.model.removePrefix("models/")
-                val url = HttpUrl.Builder()
+                val method = if (stream) "streamGenerateContent" else "generateContent"
+                val urlBuilder = HttpUrl.Builder()
                     .scheme("https")
                     .host(GEMINI_HOST)
                     .addPathSegment("v1beta")
                     .addPathSegment("models")
-                    .addPathSegment("$model:generateContent")
-                    .build()
-                builder.url(url).header("x-goog-api-key", config.apiKey)
+                    .addPathSegment("$model:$method")
+                if (stream) urlBuilder.addQueryParameter("alt", "sse")
+                builder.url(urlBuilder.build()).header("x-goog-api-key", config.apiKey)
                 JSONObject()
                     .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
                     .put("contents", geminiContents(messages))
