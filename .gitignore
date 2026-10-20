@@ -1,5 +1,7 @@
 .gradle/
-build/
+# Only the top-level Gradle build folders; a folder named "build" inside the source code (feature/coder/build) must be kept.
+/build/
+/app/build/
 local.properties
 .idea/
 *.iml
