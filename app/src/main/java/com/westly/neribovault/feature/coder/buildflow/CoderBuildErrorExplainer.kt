@@ -1,4 +1,4 @@
-package com.westly.neribovault.feature.coder.build
+package com.westly.neribovault.feature.coder.buildflow
 
 /**
  * Turns the last lines of a failed build log into one calm sentence a beginner can act on. Pure. The most specific

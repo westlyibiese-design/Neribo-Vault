@@ -72,7 +72,7 @@ import com.westly.neribovault.feature.coder.ai.CoderAiPanel
 import com.westly.neribovault.feature.coder.ai.CoderAiViewModel
 import com.westly.neribovault.feature.coder.ai.aiSelectionSnapshotOf
 import com.westly.neribovault.feature.coder.ai.aiSnapshotApplies
-import com.westly.neribovault.feature.coder.build.CoderBuildAiHandoff
+import com.westly.neribovault.feature.coder.buildflow.CoderBuildAiHandoff
 import com.westly.neribovault.feature.coder.editor.CoderEditorPanel
 import com.westly.neribovault.feature.coder.editor.CoderLanguage
 import com.westly.neribovault.feature.coder.editor.ExtraKeysBar

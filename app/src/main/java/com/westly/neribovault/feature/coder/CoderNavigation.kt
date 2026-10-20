@@ -8,7 +8,7 @@ import androidx.navigation.navArgument
 import com.westly.neribovault.core.lock.VaultLockGate
 import com.westly.neribovault.core.navigation.Routes
 import com.westly.neribovault.feature.coder.ai.CoderAiSettingsScreen
-import com.westly.neribovault.feature.coder.build.BuildWizardScreen
+import com.westly.neribovault.feature.coder.buildflow.BuildWizardScreen
 import com.westly.neribovault.feature.coder.env.EnvironmentScreen
 import com.westly.neribovault.feature.coder.github.CoderGitHubScreen
 import com.westly.neribovault.feature.coder.guidance.CoderHelpScreen

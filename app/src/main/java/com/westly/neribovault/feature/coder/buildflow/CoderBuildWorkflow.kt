@@ -1,4 +1,4 @@
-package com.westly.neribovault.feature.coder.build
+package com.westly.neribovault.feature.coder.buildflow
 
 /**
  * Writes the GitHub Actions file that builds a project. The text is fixed apart from the Node version, the install

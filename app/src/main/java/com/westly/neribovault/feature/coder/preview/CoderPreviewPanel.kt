@@ -91,7 +91,7 @@ import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
 import com.westly.neribovault.core.ui.components.NeriboTopBar
 import com.westly.neribovault.core.util.formatDateTime
-import com.westly.neribovault.feature.coder.build.CoderBuildFiles
+import com.westly.neribovault.feature.coder.buildflow.CoderBuildFiles
 import com.westly.neribovault.feature.coder.env.CoderEnvCache
 import com.westly.neribovault.feature.coder.env.CoderEnvStore
 import com.westly.neribovault.feature.coder.files.CoderEntry
