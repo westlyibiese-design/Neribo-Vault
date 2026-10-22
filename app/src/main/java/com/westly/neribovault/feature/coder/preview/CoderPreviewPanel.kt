@@ -886,14 +886,18 @@ private fun buildPreviewWebView(
     return view
 }
 
-/** The address to open for [entryPath]: Markdown and JSON files go through the app's own pages, everything else is a normal file. */
+/**
+ * The address to open for [entryPath]: Markdown and JSON files go through the app's own pages, everything else is a normal file.
+ * [entryPath] is the page's path below the site's top folder. The responder adds [rootPrefix] itself, so it is not put in the address
+ * (putting it there made a GitHub build in the hidden `.coder-build` folder answer "File not found").
+ */
 private fun previewEntryUrl(projectId: String, rootPrefix: String, entryPath: String): String {
     val extension = CoderPaths.nameOf(entryPath).substringAfterLast('.', "").lowercase()
     val virtual = CoderPreviewHost.VIRTUAL_PREFIX
     return when (extension) {
         "md", "markdown" -> CoderPreviewHost.urlFor(projectId, "$virtual/md/$entryPath")
         "json" -> CoderPreviewHost.urlFor(projectId, "$virtual/json/$entryPath")
-        else -> CoderPreviewHost.urlFor(projectId, CoderPreviewRoot.join(rootPrefix, entryPath))
+        else -> CoderPreviewHost.urlFor(projectId, entryPath)
     }
 }
 
