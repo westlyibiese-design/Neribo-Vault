@@ -178,7 +178,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import com.westly.neribovault.feature.coder.files.CoderEntry
 import com.westly.neribovault.feature.coder.preview.CoderAccess
-import com.westly.neribovault.feature.coder.preview.CoderDevicePreset
 import com.westly.neribovault.feature.coder.preview.CoderHttpRequest
 import com.westly.neribovault.feature.coder.preview.CoderHttpResponse
 import com.westly.neribovault.feature.coder.preview.CoderLocalServer
@@ -194,7 +193,6 @@ import com.westly.neribovault.feature.coder.preview.clampRatio
 import com.westly.neribovault.feature.coder.preview.consoleCopyText
 import com.westly.neribovault.feature.coder.preview.filterConsoleMessages
 import com.westly.neribovault.feature.coder.preview.htmlPagesOf
-import com.westly.neribovault.feature.coder.preview.presetWidthDp
 import com.westly.neribovault.feature.coder.preview.shouldAutoRefresh
 import java.net.Socket
 import java.io.ByteArrayInputStream
@@ -3112,7 +3110,7 @@ private fun bodyOfResponse(response: CoderHttpResponse): String {
 }
 
 private fun previewUpgradeChecks(context: Context, store: CoderFileStore): List<CoderCheckResult> =
-    servedPathChecks() + splitAndPresetChecks() + httpParseChecks() + httpDecisionChecks() + httpResponseChecks() +
+    servedPathChecks() + splitAndRefreshChecks() + httpParseChecks() + httpDecisionChecks() + httpResponseChecks() +
         pickerAndConsoleChecks() + blockedResponderChecks(context, store) + localServerChecks(context, store)
 
 private fun servedPathChecks(): List<CoderCheckResult> {
@@ -3127,24 +3125,13 @@ private fun servedPathChecks(): List<CoderCheckResult> {
     return out
 }
 
-private fun splitAndPresetChecks(): List<CoderCheckResult> = listOf(
+private fun splitAndRefreshChecks(): List<CoderCheckResult> = listOf(
     check("Split: a share below 25% becomes 25%", "0.25") { clampRatio(0.1f) == 0.25f },
     check("Split: a share above 75% becomes 75%", "0.75") { clampRatio(0.9f) == 0.75f },
     check("Split: 50% stays 50%", "0.5") { clampRatio(0.5f) == 0.5f },
     check("Split: the edges 25% and 75% stay", "0.25 and 0.75") { clampRatio(0.25f) == 0.25f && clampRatio(0.75f) == 0.75f },
     check("Split: not a number gives 50%", "0.5") { clampRatio(Float.NaN) == 0.5f },
     check("Split: negative gives 25%", "0.25") { clampRatio(-3f) == 0.25f },
-    check("Size: Full uses the pane width", "500") { presetWidthDp(CoderDevicePreset.Full, 500) == 500 },
-    check("Size: Phone is 360", "360") { presetWidthDp(CoderDevicePreset.Phone, 500) == 360 },
-    check("Size: Tablet is 768", "768") { presetWidthDp(CoderDevicePreset.Tablet, 500) == 768 },
-    check("Size: Desktop is 1200", "1200") { presetWidthDp(CoderDevicePreset.Desktop, 500) == 1200 },
-    check("Size: chip texts", "Full, Phone 360, Tablet 768, Desktop 1200") {
-        CoderDevicePreset.values().joinToString(", ") { it.chipText } == "Full, Phone 360, Tablet 768, Desktop 1200"
-    },
-    check("Size: an unknown saved name gives Full", "Full") {
-        CoderDevicePreset.fromName("Nope") == CoderDevicePreset.Full && CoderDevicePreset.fromName(null) == CoderDevicePreset.Full &&
-            CoderDevicePreset.fromName("Tablet") == CoderDevicePreset.Tablet
-    },
     check("Auto-refresh: everything right reloads", "true") { shouldAutoRefresh(true, true, true, false, 1000L) },
     check("Auto-refresh: switched off does not reload", "false") { !shouldAutoRefresh(false, true, true, false, 5000L) },
     check("Auto-refresh: preview hidden does not reload", "false") { !shouldAutoRefresh(true, false, true, false, 5000L) },
@@ -3287,6 +3274,22 @@ private fun httpResponseChecks(): List<CoderCheckResult> {
         check("Response: a HEAD answer has no body", "empty") {
             bodyOfResponse(CoderHttpRequest.textResponse(200, "OK", "hello", head = true)).isEmpty()
         },
+        check("Opening page: 200 with the cookie", "200, html, Set-Cookie") {
+            val h = headOfResponse(CoderHttpRequest.openingResponse("/index.html", "tok"))
+            h.startsWith("HTTP/1.1 200 OK\r\n") && h.contains("Content-Type: text/html; charset=utf-8\r\n") &&
+                h.contains("Set-Cookie: coderk=tok; Path=/; HttpOnly; SameSite=Strict\r\n")
+        },
+        check("Opening page: the body opens the asked path and can try again", "target, replace, Try again") {
+            val body = bodyOfResponse(CoderHttpRequest.openingResponse("/index.html", "tok"))
+            body.contains("var target=\"/index.html\";") && body.contains("location.replace") && body.contains("Try again")
+        },
+        check("Opening page: the path cannot break out of its quotes", "escaped") {
+            val page = CoderHttpRequest.openingPage("/a\"b<c>'d\\e.html")
+            page.contains("var target=\"/a\\\"b\\u003cc\\u003e\\u0027d\\\\e.html\";") && !page.contains("<c>")
+        },
+        check("Opening page: a HEAD answer has no body", "empty") {
+            bodyOfResponse(CoderHttpRequest.openingResponse("/", "tok", head = true)).isEmpty()
+        },
         check("Token: 32 hex characters", "32 characters of 0-9a-f") {
             val t = CoderLocalServer.generateToken()
             t.length == 32 && t.all { it in '0'..'9' || it in 'a'..'f' }
@@ -3396,10 +3399,18 @@ private fun localServerChecks(context: Context, store: CoderFileStore): List<Cod
         out.add(check("Local server: a wrong host gives 403", "403") {
             rawLoopbackGet(info.port, "/?k=${info.token}", null, "evil.com:${info.port}").startsWith("HTTP/1.1 403")
         })
-        out.add(check("Local server: the token gives 302 and the cookie", "302, Location /, Set-Cookie") {
+        out.add(check("Local server: the token gives the opening page and the cookie", "200, Set-Cookie, the page to open") {
             val answer = rawLoopbackGet(info.port, "/?k=${info.token}", null)
-            answer.startsWith("HTTP/1.1 302") && answer.contains("Location: /\r\n") &&
+            answer.startsWith("HTTP/1.1 200") && answer.contains("Opening your page") && answer.contains("var target=\"/\";") &&
                 answer.contains("Set-Cookie: coderk=${info.token}; Path=/; HttpOnly; SameSite=Strict")
+        })
+        out.add(check("Local server: bytes that are not an HTTP request are closed at once", "closed without an answer") {
+            Socket("127.0.0.1", info.port).use { socket ->
+                socket.soTimeout = 2000
+                socket.getOutputStream().write(byteArrayOf(0x16))
+                socket.getOutputStream().flush()
+                socket.getInputStream().read() == -1
+            }
         })
         out.add(check("Local server: the cookie gives the page", "200 and the body") {
             val answer = rawLoopbackGet(info.port, "/", cookie)

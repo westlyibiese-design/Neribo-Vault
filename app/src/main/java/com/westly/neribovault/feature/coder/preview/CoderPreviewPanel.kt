@@ -25,22 +25,18 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -74,7 +70,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -85,7 +80,6 @@ import com.westly.neribovault.NeriboApp
 import com.westly.neribovault.core.design.NeriboTheme
 import com.westly.neribovault.core.ui.components.ConfirmDialog
 import com.westly.neribovault.core.ui.components.LoadingState
-import com.westly.neribovault.core.ui.components.NeriboChip
 import com.westly.neribovault.core.ui.components.NeriboIconButton
 import com.westly.neribovault.core.ui.components.NeriboScaffold
 import com.westly.neribovault.core.ui.components.NeriboTextField
@@ -188,9 +182,9 @@ private class PageDialogState(
  * gets a Fix with AI button that hands the message to it.
  *
  * With [embedded] set the panel has no top bar and no Back handling of its own: it is the preview pane next to
- * the editor, with a thin toolbar (reload, page picker, size, console, menu), and [onClose] turns the pane off.
+ * the editor, with a thin toolbar (reload, page picker, console, menu), and [onClose] turns the pane off.
  * [saveTick] goes up each time a save finishes, which reloads the page after a second when auto-refresh is on.
- * [entries] is the project's file list, for the page picker; [session] keeps the chosen size and page while the
+ * [entries] is the project's file list, for the page picker; [session] keeps the chosen page while the
  * screen is open; messages such as "Copied" are shown on [snackbarHostState]. When a site built on GitHub is shown,
  * a line says when it was built and, if [onOpenBuild] is set, a Rebuild button opens the build wizard.
  */
@@ -422,7 +416,6 @@ private fun PreviewContent(
 
     val viewport: @Composable (Modifier) -> Unit = { modifier ->
         PreviewViewport(
-            preset = view.preset,
             startUrl = startUrl,
             holder = holder,
             responder = responder,
@@ -458,7 +451,6 @@ private fun PreviewContent(
             ) {
                 NeriboIconButton(icon = Icons.Outlined.Refresh, contentDescription = "Reload", onClick = reload)
                 PagePicker(pages = pages, current = shownEntry, onPick = pickPage)
-                SizeChip(preset = view.preset, onPick = { view.preset = it })
                 ConsoleAction(errorCount = console.errorCount, onClick = { showConsole = true })
                 menu()
             }
@@ -497,15 +489,16 @@ private fun PreviewContent(
                     ),
                     modifier = Modifier.padding(horizontal = NeriboTheme.spacing.md, vertical = NeriboTheme.spacing.xs),
                 )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = NeriboTheme.spacing.xs),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    PagePicker(pages = pages, current = shownEntry, onPick = pickPage)
-                    SizeChip(preset = view.preset, onPick = { view.preset = it })
+                if (pages.size > 1) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = NeriboTheme.spacing.xs),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        PagePicker(pages = pages, current = shownEntry, onPick = pickPage)
+                    }
                 }
                 if (servingHere) ServingRow(onStop = { server.stop() })
                 if (rootPrefix == CoderPreviewRoot.BUILT_FOLDER) BuiltBanner(builtAt, onOpenBuild)
@@ -564,13 +557,12 @@ private fun PreviewContent(
 }
 
 /**
- * The page itself: the browser view laid out at exactly the width of the chosen [preset] (the whole area for Full),
- * centered with a hairline border when the area is wider and scrolling sideways when it is narrower. The page is
- * never scaled or zoomed. Changing [startUrl] opens that page in the same browser view.
+ * The page itself: the browser view fills the whole preview area, so the page is laid out at the real width of
+ * this phone, whatever phone it is. Nothing scrolls around the browser view, so the page scrolls by itself, up and
+ * down, the way it does in a normal browser. Changing [startUrl] opens that page in the same browser view.
  */
 @Composable
 private fun PreviewViewport(
-    preset: CoderDevicePreset,
     startUrl: String,
     holder: PreviewHolder,
     responder: CoderPreviewResponder,
@@ -583,82 +575,37 @@ private fun PreviewViewport(
     modifier: Modifier = Modifier,
 ) {
     val colors = MaterialTheme.colorScheme
-    val scrollState = rememberScrollState()
-    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val paneWidth = maxWidth
-        val pageWidth: Dp = if (preset.widthDp == null) paneWidth else presetWidthDp(preset, paneWidth.value.toInt()).dp
-        val framed = preset.widthDp != null && pageWidth < paneWidth
-        Box(modifier = Modifier.fillMaxSize().horizontalScroll(scrollState)) {
-            Box(
-                modifier = Modifier.width(maxOf(pageWidth, paneWidth)).fillMaxHeight(),
-                contentAlignment = Alignment.TopCenter,
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(pageWidth)
-                        .fillMaxHeight()
-                        .then(if (framed) Modifier.border(Dp.Hairline, colors.outlineVariant) else Modifier),
-                ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { viewContext ->
-                            val browser = buildPreviewWebView(
-                                context = viewContext,
-                                responder = responder,
-                                console = console,
-                                host = host,
-                                onLoading = onLoading,
-                                onDialog = onDialog,
-                                onExternalLink = onExternalLink,
-                            )
-                            holder.webView = browser
-                            holder.loadedUrl = startUrl
-                            browser.loadUrl(startUrl)
-                            browser
-                        },
-                        update = { browser ->
-                            if (holder.loadedUrl != startUrl) {
-                                holder.loadedUrl = startUrl
-                                browser.loadUrl(startUrl)
-                            }
-                        },
-                    )
+    Box(modifier = modifier.fillMaxWidth()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { viewContext ->
+                val browser = buildPreviewWebView(
+                    context = viewContext,
+                    responder = responder,
+                    console = console,
+                    host = host,
+                    onLoading = onLoading,
+                    onDialog = onDialog,
+                    onExternalLink = onExternalLink,
+                )
+                holder.webView = browser
+                holder.loadedUrl = startUrl
+                browser.loadUrl(startUrl)
+                browser
+            },
+            update = { browser ->
+                if (holder.loadedUrl != startUrl) {
+                    holder.loadedUrl = startUrl
+                    browser.loadUrl(startUrl)
                 }
-            }
-        }
+            },
+        )
         if (loading) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
                 color = colors.primary,
                 trackColor = colors.surfaceVariant,
             )
-        }
-    }
-}
-
-/** The size chip: it shows the chosen width ("Phone 360") and opens a small menu of the four sizes. */
-@Composable
-private fun SizeChip(preset: CoderDevicePreset, onPick: (CoderDevicePreset) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val colors = MaterialTheme.colorScheme
-    Box {
-        NeriboChip(label = preset.chipText, selected = false, onClick = { expanded = true })
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            for (option in CoderDevicePreset.values()) {
-                DropdownMenuItem(
-                    text = {
-                        Text(
-                            text = if (option.widthDp == null) "Full width" else option.chipText,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = if (option == preset) colors.primary else colors.onSurface,
-                        )
-                    },
-                    onClick = {
-                        expanded = false
-                        onPick(option)
-                    },
-                )
-            }
         }
     }
 }
@@ -853,6 +800,10 @@ private fun buildPreviewWebView(
     settings.builtInZoomControls = false
     settings.setGeolocationEnabled(false)
     settings.textZoom = 100
+    // The page is laid out at this phone's own width and cannot be pinched or double-tapped out of that.
+    settings.useWideViewPort = false
+    settings.loadWithOverviewMode = false
+    settings.setSupportZoom(false)
 
     view.webViewClient = object : WebViewClient() {
         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =

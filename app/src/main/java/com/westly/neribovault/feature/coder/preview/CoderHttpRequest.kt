@@ -214,6 +214,80 @@ object CoderHttpRequest {
         return CoderHttpResponse(head.toString().toByteArray(Charsets.ISO_8859_1), bodyStream)
     }
 
+    /**
+     * The answer to the first request, the one that carries the secret in its address: a small page that sets the
+     * cookie and then opens [target] (the path the browser asked for). It first fetches [target] itself and tries
+     * again when the phone is slow to answer, so the person never sits in front of a blank page that needs a
+     * manual refresh. After six failed tries it says so and offers a Try again button. The body is left out when
+     * [head] is true (a HEAD request).
+     */
+    fun openingResponse(target: String, token: String, head: Boolean = false): CoderHttpResponse {
+        val headers = LinkedHashMap<String, String>()
+        headers["Content-Type"] = "text/html; charset=utf-8"
+        headers["Set-Cookie"] = cookieHeader(token)
+        val stream: InputStream? = if (head) null else ByteArrayInputStream(openingPage(target).toByteArray(Charsets.UTF_8))
+        return buildResponse(200, "OK", headers, stream)
+    }
+
+    /** The HTML of the opening page for [target]. Pure, so the self-test checks it. [target] is escaped for both HTML and JavaScript. */
+    fun openingPage(target: String): String =
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+            "<meta name=\"color-scheme\" content=\"light dark\">" +
+            "<title>Opening your page</title>" +
+            "<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;" +
+            "font-family:system-ui,sans-serif;text-align:center;padding:24px;box-sizing:border-box}" +
+            "h2{margin:0 0 8px}p{margin:8px 0;opacity:.7}button{font:inherit;padding:10px 18px;margin-top:12px}</style>" +
+            "</head><body><div><h2 id=\"t\">Opening your page\u2026</h2><p id=\"m\">One moment.</p>" +
+            "<button id=\"b\" hidden>Try again</button>" +
+            "<noscript><p><a href=\"" + htmlAttribute(target) + "\">Open the page</a></p></noscript></div>" +
+            "<script>" + OPENING_SCRIPT.replace("__TARGET__", jsString(target)) + "</script></body></html>"
+
+    /** [text] as a double-quoted JavaScript string that is also safe inside a script element. */
+    private fun jsString(text: String): String {
+        val out = StringBuilder("\"")
+        for (ch in text) {
+            val special = ch == '<' || ch == '>' || ch == '&' || ch == '\'' || ch == '\u2028' || ch == '\u2029' ||
+                ch.code < 32 || ch.code == 127
+            when {
+                ch == '\\' -> out.append("\\\\")
+                ch == '"' -> out.append("\\\"")
+                special -> out.append("\\u").append("%04x".format(ch.code))
+                else -> out.append(ch)
+            }
+        }
+        return out.append('"').toString()
+    }
+
+    /** [text] made safe to put between double quotes in an HTML attribute. */
+    private fun htmlAttribute(text: String): String =
+        text.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;")
+
+    /** Opens the target once a fetch of it has been answered; a 403 (cookie not stored yet) or no answer is tried again. */
+    private const val OPENING_SCRIPT = """(function(){
+var target=__TARGET__;var tries=0;var max=6;
+var t=document.getElementById('t'),m=document.getElementById('m'),b=document.getElementById('b');
+function openIt(){location.replace(target);}
+function fail(){
+if(tries<max){setTimeout(go,600*tries);return;}
+t.textContent='The page did not open';
+m.textContent='Keep Neribo Vault open on your phone and allow cookies for this page, then tap Try again.';
+b.hidden=false;
+}
+function go(){
+tries++;b.hidden=true;
+if(typeof fetch!=='function'){openIt();return;}
+var c=typeof AbortController==='function'?new AbortController():null;
+var timer=setTimeout(function(){if(c)c.abort();},8000);
+fetch(target,{cache:'no-store',credentials:'same-origin',signal:c?c.signal:undefined})
+.then(function(r){return r.text().then(function(){return r;});})
+.then(function(r){clearTimeout(timer);if(r.status===403){fail();}else{openIt();}})
+.catch(function(){clearTimeout(timer);fail();});
+}
+b.onclick=function(){tries=0;t.textContent='Opening your page\u2026';m.textContent='One moment.';go();};
+go();
+})();"""
+
     /** A short plain-text response, such as the 403 and 405 answers. The body is left out when [head] is true (a HEAD request). */
     fun textResponse(
         status: Int,

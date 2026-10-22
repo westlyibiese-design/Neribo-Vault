@@ -34,7 +34,7 @@ data class CoderServerInfo(val port: Int, val token: String, val url: String)
 /** The project that is being served right now, with the details of its server. */
 data class CoderServing(val projectId: String, val info: CoderServerInfo)
 
-private const val MAX_CONNECTIONS = 8
+private const val MAX_CONNECTIONS = 32
 private const val READ_TIMEOUT_MS = 15_000
 private const val IDLE_TIMEOUT_MS = 10 * 60 * 1000L
 private const val IDLE_CHECK_MS = 15_000L
@@ -187,14 +187,10 @@ class CoderLocalServer(private val context: Context, private val store: CoderFil
             CoderAccess.MethodNotAllowed ->
                 CoderHttpRequest.textResponse(405, "Method Not Allowed", MSG_NOT_ALLOWED, mapOf("Allow" to "GET, HEAD"))
             CoderAccess.SetCookieAndRedirect -> {
+                // Not a bare redirect: a small page sets the cookie, makes sure the phone answers for the real page
+                // (trying again if it is slow) and only then opens it, so the browser never sits on a blank page.
                 run.lastRequestAt.set(SystemClock.elapsedRealtime())
-                CoderHttpRequest.textResponse(
-                    302,
-                    "Found",
-                    "",
-                    mapOf("Location" to request.rawPath, "Set-Cookie" to CoderHttpRequest.cookieHeader(run.token)),
-                    head = true,
-                )
+                CoderHttpRequest.openingResponse(request.rawPath, run.token, head = head)
             }
             CoderAccess.Serve -> {
                 run.lastRequestAt.set(SystemClock.elapsedRealtime())
@@ -248,6 +244,9 @@ class CoderLocalServer(private val context: Context, private val store: CoderFil
                 return null
             }
             if (next < 0) return null
+            // A request starts with a method such as GET. Anything else (for example a browser trying a secure
+            // connection first) is closed at once, so the browser falls back to plain http without waiting.
+            if (buffer.size() == 0 && next !in 'A'.code..'Z'.code) return null
             buffer.write(next)
             matched = when {
                 next == 13 && (matched == 0 || matched == 2) -> matched + 1

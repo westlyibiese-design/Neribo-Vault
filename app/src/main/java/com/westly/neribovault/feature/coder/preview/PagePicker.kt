@@ -37,18 +37,17 @@ const val MAX_PICKER_PAGES = 50
 
 /**
  * What the person picked in the preview, kept while the screen is open: the page to show ([page], or null to follow
- * the open file) and the width ([preset]). The workspace screen holds one so the choices survive turning the preview
- * off and on and rotating the phone.
+ * the open file). The workspace screen holds one so the choice survives turning the preview off and on and rotating
+ * the phone.
  */
-class CoderPreviewSession(preset: CoderDevicePreset = CoderDevicePreset.Full, page: String? = null) {
-    var preset: CoderDevicePreset by mutableStateOf(preset)
+class CoderPreviewSession(page: String? = null) {
     var page: String? by mutableStateOf(page)
 
     companion object {
-        /** Saves the two choices as two strings so they survive rotation and a killed process. */
+        /** Saves the choice as one string so it survives rotation and a killed process. The last saved item is the page. */
         val Saver: Saver<CoderPreviewSession, Any> = listSaver(
-            save = { listOf(it.preset.name, it.page.orEmpty()) },
-            restore = { CoderPreviewSession(CoderDevicePreset.fromName(it[0]), it[1].ifEmpty { null }) },
+            save = { listOf(it.page.orEmpty()) },
+            restore = { CoderPreviewSession(it.last().ifEmpty { null }) },
         )
     }
 }
